@@ -94,6 +94,14 @@
           <span class="material-icons">account_balance_wallet</span>
           Wallet
         </router-link>
+        <router-link 
+          to="/how-it-works" 
+          class="nav-button"
+          @click="closeMobileMenu"
+        >
+          <span class="material-icons">help_outline</span>
+          How It Works
+        </router-link>
         <div class="wallet-balance" :class="{ disabled: !isWalletInitialized }">
           ₿ {{ formattedBalance }}
         </div>
@@ -136,6 +144,7 @@
       v-if="showArkSettings"
       @close="showArkSettings = false"
     />
+    <base-footer/>
   </div>
 </template>
 
@@ -145,6 +154,7 @@ import { useStore } from 'vuex'
 import { useRoute } from 'vue-router'
 import RelaySettings from '@/components/RelaySettings.vue'
 import ArkSettings from '@/components/ArkSettings.vue'
+import BaseFooter from '@/components/BaseFooter.vue'
 
 const truncateUrl = (url, maxLength = 30) => {
   if (url.length <= maxLength) return url
@@ -156,7 +166,8 @@ const truncateUrl = (url, maxLength = 30) => {
 export default {
   components: {
     RelaySettings,
-    ArkSettings
+    ArkSettings,
+    BaseFooter
   },
   setup() {
     const store = useStore()
@@ -287,10 +298,17 @@ body {
   min-height: 100vh;
 }
 
+router-view {
+  flex: 1;
+}
+
 nav {
   background: var(--card);
   border-bottom: 1px solid var(--border);
   padding: 1rem 0;
+  position: sticky;
+  top: 0;
+  z-index: 100;
   
   .nav-content {
     max-width: 1200px;

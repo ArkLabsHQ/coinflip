@@ -114,7 +114,7 @@ export default createStore<State>({
       relayInstance: null
     },
     ark: {
-      server: localStorage.getItem('ark_server') || 'http://localhost:3000',
+      server: localStorage.getItem('ark_server') || 'https://master.signet.arklabs.to',
       status: 'disconnected',
       lastError: null,
       info: null

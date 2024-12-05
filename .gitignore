@@ -17,3 +17,8 @@ pnpm-debug.log*
 
 # Nixpacks
 .nixpacks
+
+# Docker files
+dist/
+node_modules/
+.DS_Store

@@ -14,3 +14,6 @@ pnpm-debug.log*
 
 # Editor directories and files
 .vscode
+
+# Nixpacks
+.nixpacks

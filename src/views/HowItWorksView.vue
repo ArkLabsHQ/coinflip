@@ -5,12 +5,12 @@
         <h2>Trustless coinflip</h2>
 
         <p>
-          Coinflip is a game of chance with two players. The first player choose "Heads" or "Tails" and the second player try to guess the coin's side.
+          Coinflip is a game of chance with two players. The first player (A) chooses "Heads" or "Tails" and the second player (B) tries to guess the coin's side.
           If the second player guesses the coin's side correctly, he wins and the first player loses. Otherwise, the first player wins and the second player loses.
           <br>
           <br>
-          The game is built on Bitcoin's Taproot and multisig. The emulation of coinflip is made with secret generation. Both players generate a secret of 15 or 16 bytes.
-          15 is "Heads" and 16 is "Tails".
+          The game is built on Bitcoin's Taproot and multisignature capabilities. The emulation of coinflip is made with secret generation of predetermined sizes. 
+          Both players generate a secret of 15 or 16 bytes. 15 is "Heads" and 16 is "Tails".
         </p>
 
         <br>
@@ -27,7 +27,7 @@
         <br>
         <p>
           The <b>final transaction</b> is signed BEFORE the <b>setup transaction</b>.
-          Thus, once the <b>setup transaction</b> is submitted, the only way to spend it is by submitting the <b>final transaction</b>.
+          Thus, once the <b>setup transaction</b> is submitted, the funds can only be spent through the <b>final transaction</b>.
         </p>
 
 

@@ -7,6 +7,7 @@ import { GameEvent, Game, gameFromEvents, isCreateEvent, isJoinEvent, isFinalize
 import { hex } from '@scure/base'
 import { toast } from '@/utils/toast'
 import { getEventHash, getSignature, UnsignedEvent, nip04, Filter, relayInit, Relay, getPublicKey, Sub } from 'nostr-tools'
+import type { RootState } from '@/types/store'
 
 // NIP-04 direct message kind
 const CREATE_GAME_KIND = 400000
@@ -65,34 +66,7 @@ function saveDeletedGames(gameIds: string[]) {
   }
 }
 
-export type State = {
-  wallet: {
-    privateKey: string | null
-    publicKey: string | null
-    isInitialized: boolean
-  }
-  games: Game[]
-  currentGame: Game | null
-  walletBalance: number
-  btcPrice: number
-  nostr: {
-    relay: string
-    status: 'disconnected' | 'connecting' | 'connected'
-    lastError: Error | null
-    subscription: { id: string, sub: Sub } | null
-    relayInstance: Relay | null
-  }
-  ark: {
-    server: string
-    status: 'disconnected' | 'connecting' | 'connected' | 'error'
-    lastError: Error | null
-    info: ArkServerInfo | null
-  }
-  gameEvents: { [gameId: string]: GameEvent[] }
-  emittedEvents: { [gameId: string]: GameEvent[] }
-  currentGameId: string | null
-  deletedGames: string[]  // Add to state type
-}
+export type State = RootState
 
 async function encryptGameEvent(event: GameEvent, privateKey: string, game: Game | null): Promise<[string, string | null]> {
   if (event.type === 'create') {
@@ -341,7 +315,7 @@ export default createStore<State>({
         commit('SET_NOSTR_STATUS', 'disconnected')
       }
     },
-    subscribeToGames({ commit, state }) {
+    subscribeToGames({ commit, state, dispatch }) {
       if (!state.nostr.relayInstance || state.nostr.status !== 'connected') return
 
       const currentPubkey = state.wallet.publicKey
@@ -359,6 +333,10 @@ export default createStore<State>({
           kinds: [GAME_KIND],
           '#p': [currentPubkey || ''],
           since,
+        },
+        {
+          kinds: [5],
+          since,
         }
       ]
 
@@ -374,13 +352,15 @@ export default createStore<State>({
 
       sub.on('event', async (event) => {
         try {
-          let gameEvent: GameEvent
-
           if (event.kind === CREATE_GAME_KIND) {
-            gameEvent = JSON.parse(event.content)
+            const gameEvent = JSON.parse(event.content)
             if (!isCreateEvent(gameEvent)) {
               console.warn('Unrecognized create event format')
               return
+            }
+
+            if (gameEvent && 'gameId' in gameEvent && !state.deletedGames.includes(gameEvent.gameId)) {
+              commit('ADD_GAME_EVENT', gameEvent)
             }
           } else if (event.kind === GAME_KIND) {
             if (!state.wallet.privateKey) {
@@ -395,7 +375,7 @@ export default createStore<State>({
             )
 
             console.log('Decrypted event:', decrypted)
-            gameEvent = JSON.parse(decrypted)
+            const gameEvent = JSON.parse(decrypted)
             if (
               !isJoinEvent(gameEvent)
               && !isSetupStartedEvent(gameEvent)
@@ -406,14 +386,48 @@ export default createStore<State>({
               console.warn('Unrecognized game event format')
               return
             }
+
+            if (gameEvent && 'gameId' in gameEvent && !state.deletedGames.includes(gameEvent.gameId)) {
+              commit('ADD_GAME_EVENT', gameEvent)
+
+              // If this is a join event, delete the corresponding create event
+              if (isJoinEvent(gameEvent)) {
+                // Find and delete the create event for this game
+                const createEvents = await state.nostr.relayInstance?.list([{
+                  kinds: [CREATE_GAME_KIND],
+                  '#g': [gameEvent.gameId]
+                }])
+
+                if (createEvents && createEvents.length > 0) {
+                  try {
+                    await dispatch('deleteEvent', { eventId: createEvents[0].id, gameId: gameEvent.gameId })
+                  } catch (err) {
+                    console.error('Failed to delete create event:', err)
+                  }
+                }
+              }
+            }
+          } else if (event.kind === 5) {
+            // delete event
+            console.log('Delete event:', event)
+            const gameId = event.tags.find((tag) => tag[0] === 'g')?.[1]
+            console.log('Game ID:', gameId)
+            if (gameId) {
+              const gameEvents = state.gameEvents[gameId]
+              console.log('Game events:', gameEvents)
+              if (gameEvents && gameEvents.length == 1) {
+                console.log('Removing game events:', gameId)
+                commit('REMOVE_GAME_EVENTS', gameId)
+                return
+              }
+            }
           } else {
             console.warn('Unrecognized event format')
             return
           }
 
-          if (gameEvent && 'gameId' in gameEvent && !state.deletedGames.includes(gameEvent.gameId)) {
-            commit('ADD_GAME_EVENT', gameEvent)
-          }
+
+          
         } catch (e) {
           console.error('Failed to parse game event:', e)
           toast.error(`Failed to parse game event: ${(e as Error).message}`)
@@ -480,7 +494,7 @@ export default createStore<State>({
       commit('SET_NOSTR_RELAY', relay)
       await dispatch('connectNostr')
     },
-    async pushGameEvent({ commit, dispatch, rootState, getters }, event: GameEvent) {
+    async pushGameEvent({ commit, dispatch, rootState, state, getters }, event: GameEvent) {
       if (!rootState.wallet.privateKey) {
         throw new Error('Wallet not initialized')
       }
@@ -497,20 +511,34 @@ export default createStore<State>({
 
       const created_at = Math.floor(Date.now() / 1000)
 
+      const isCreate = isCreateEvent(event)
+
       // Get expiration from game state or use default
-      const expiration = isCreateEvent(event)
+      const expiration = isCreate
         ? event.finalExpiration
         : game?.finalExpiration || (created_at + (24 * 60 * 60))
 
+      // Build tags array
+      const tags: string[][] = [
+        ['expiration', expiration.toString()],  // Add expiration tag
+      ]
+
+      // Add recipient tag for encrypted events
+      if (recipientPubkey) {
+        tags.push(['p', recipientPubkey])
+      }
+
+      // Add event ID tag for create events
+      if (isCreate) {
+        tags.push(['g', event.gameId])
+      }
+
       // Convert GameEvent to NostrEvent and push it
-      const nostrEvent: UnsignedEvent<number> = {
-        kind: event.type === 'create' ? CREATE_GAME_KIND : GAME_KIND,
+      const nostrEvent: UnsignedEvent<typeof CREATE_GAME_KIND | typeof GAME_KIND> = {
+        kind: isCreate ? CREATE_GAME_KIND : GAME_KIND,
         content: encryptedContent,
         created_at,
-        tags: [
-          ['expiration', expiration.toString()],  // Add expiration tag
-          ...(recipientPubkey ? [['p', recipientPubkey]] : []), // tag recipient for encrypted events
-        ],
+        tags,
         pubkey: getPublicKey(rootState.wallet.privateKey),
       }
 
@@ -525,13 +553,20 @@ export default createStore<State>({
         id,
         sig,
       }
-
-      // Push to relay
+      // Push to nostr
       await dispatch('pushEvent', signedEvent)
 
       // Add the event to both stores
       commit('ADD_GAME_EVENT', event)
       commit('ADD_EMITTED_EVENT', event)
+
+      if (isJoinEvent(event)) {
+        const currentGameEvents = state.gameEvents[event.gameId]
+        const createEvent = currentGameEvents
+        .find((e: GameEvent) => isCreateEvent(e))
+        // if we are joining a game, add the create event to the emitted events to persist it
+        commit('ADD_EMITTED_EVENT', createEvent)
+      }
 
       return signedEvent
     },
@@ -555,6 +590,38 @@ export default createStore<State>({
     removeGame({ commit }, gameId: string) {
       commit('ADD_DELETED_GAME', gameId)
       commit('REMOVE_GAME_EVENTS', gameId)
+    },
+    async deleteEvent({ state }, { eventId, gameId }: { eventId: string, gameId: string }) {
+      console.log('Deleting event:', eventId)
+      if (!state.nostr.relayInstance || !state.wallet.privateKey) {
+        throw new Error('Nostr relay not initialized or wallet not available')
+      }
+
+      const deleteEvent: UnsignedEvent<5> = {
+        kind: 5,
+        created_at: Math.floor(Date.now() / 1000),
+        content: '',
+        tags: [['e', eventId], ['g', gameId]],
+        pubkey: getPublicKey(state.wallet.privateKey)
+      }
+
+      const id = getEventHash(deleteEvent)
+      const sig = getSignature(deleteEvent, state.wallet.privateKey)
+
+      const signedEvent = {
+        ...deleteEvent,
+        id,
+        sig,
+      }
+
+      try {
+        const pub = state.nostr.relayInstance.publish(signedEvent)
+        await pub
+        console.log('Successfully deleted event:', eventId)
+      } catch (err) {
+        console.error('Failed to delete event:', err)
+        throw new Error(`Failed to delete event: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      }
     },
   }
 }) 

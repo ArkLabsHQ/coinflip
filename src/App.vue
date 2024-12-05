@@ -12,32 +12,34 @@
             <span class="material-icons" :class="{ 'rotating': isRefreshing }">refresh</span>
           </button>
           <router-link to="/" class="logo">CoinFlip</router-link>
-          <div class="relay-group">
-            <span class="relay-label">nostr</span>
-            <div 
-              class="relay-status" 
-              @click="isWalletInitialized && (showRelaySettings = true)"
-              :class="{ disabled: !isWalletInitialized }"
-              v-if="!isSetupRoute"
-            >
-              <span class="status-indicator" :class="nostrStatus"></span>
-              <span class="relay-url">{{ nostrRelay }}</span>
+          <div class="relay-groups desktop-only">
+            <div class="relay-group">
+              <span class="relay-label">nostr</span>
+              <div 
+                class="relay-status" 
+                @click="isWalletInitialized && (showRelaySettings = true)"
+                :class="{ disabled: !isWalletInitialized }"
+                v-if="!isSetupRoute"
+              >
+                <span class="status-indicator" :class="nostrStatus"></span>
+                <span class="relay-url">{{ nostrRelay }}</span>
+              </div>
             </div>
-          </div>
-          <div class="relay-group">
-            <span class="relay-label">ark</span>
-            <div 
-              class="relay-status" 
-              @click="isWalletInitialized && (showArkSettings = true)"
-              :class="{ disabled: !isWalletInitialized }"
-              v-if="!isSetupRoute"
-            >
-              <span class="status-indicator" :class="arkStatus"></span>
-              <span class="relay-url">{{ arkServer }}</span>
+            <div class="relay-group">
+              <span class="relay-label">ark</span>
+              <div 
+                class="relay-status" 
+                @click="isWalletInitialized && (showArkSettings = true)"
+                :class="{ disabled: !isWalletInitialized }"
+                v-if="!isSetupRoute"
+              >
+                <span class="status-indicator" :class="arkStatus"></span>
+                <span class="relay-url">{{ arkServer }}</span>
+              </div>
             </div>
           </div>
         </div>
-        <div class="nav-links">
+        <div class="nav-links desktop-only">
           <template v-if="!isSetupRoute">
             <router-link 
               to="/" 
@@ -67,8 +69,64 @@
             <span class="material-icons">{{ isDark ? 'light_mode' : 'dark_mode' }}</span>
           </button>
         </div>
+        <button @click="toggleMobileMenu" class="mobile-menu-button mobile-only">
+          <span class="material-icons">{{ showMobileMenu ? 'close' : 'menu' }}</span>
+        </button>
       </div>
     </nav>
+    <div class="mobile-menu" :class="{ 'show': showMobileMenu }" v-if="!isSetupRoute">
+      <div class="mobile-menu-content">
+        <router-link 
+          to="/" 
+          class="nav-button"
+          :class="{ disabled: !isWalletInitialized }"
+          @click="closeMobileMenu"
+        >
+          <span class="material-icons">casino</span>
+          Games
+        </router-link>
+        <router-link 
+          to="/wallet" 
+          class="nav-button"
+          :class="{ disabled: !isWalletInitialized }"
+          @click="closeMobileMenu"
+        >
+          <span class="material-icons">account_balance_wallet</span>
+          Wallet
+        </router-link>
+        <div class="wallet-balance" :class="{ disabled: !isWalletInitialized }">
+          ₿ {{ formattedBalance }}
+        </div>
+        <div class="relay-groups">
+          <div class="relay-group">
+            <span class="relay-label">nostr</span>
+            <div 
+              class="relay-status" 
+              @click="openRelaySettings"
+              :class="{ disabled: !isWalletInitialized }"
+            >
+              <span class="status-indicator" :class="nostrStatus"></span>
+              <span class="relay-url">{{ nostrRelay }}</span>
+            </div>
+          </div>
+          <div class="relay-group">
+            <span class="relay-label">ark</span>
+            <div 
+              class="relay-status" 
+              @click="openArkSettings"
+              :class="{ disabled: !isWalletInitialized }"
+            >
+              <span class="status-indicator" :class="arkStatus"></span>
+              <span class="relay-url">{{ arkServer }}</span>
+            </div>
+          </div>
+        </div>
+        <button @click="toggleTheme" class="theme-toggle">
+          <span class="material-icons">{{ isDark ? 'light_mode' : 'dark_mode' }}</span>
+          {{ isDark ? 'Light Mode' : 'Dark Mode' }}
+        </button>
+      </div>
+    </div>
     <router-view/>
     <relay-settings
       v-if="showRelaySettings"
@@ -115,6 +173,7 @@ export default {
     const arkStatus = computed(() => store.getters.arkStatus)
     const arkServer = computed(() => truncateUrl(store.getters.arkServer))
     const formattedBalance = computed(() => store.getters['ark/formattedBalance'])
+    const showMobileMenu = ref(false)
 
     const toggleTheme = () => {
       isDark.value = !isDark.value
@@ -132,6 +191,28 @@ export default {
       setTimeout(() => {
         isRefreshing.value = false
       }, 1000) // Keep spinning for at least 1 second
+    }
+
+    const toggleMobileMenu = () => {
+      showMobileMenu.value = !showMobileMenu.value
+    }
+
+    const closeMobileMenu = () => {
+      showMobileMenu.value = false
+    }
+
+    const openRelaySettings = () => {
+      if (isWalletInitialized.value) {
+        showRelaySettings.value = true
+        closeMobileMenu()
+      }
+    }
+
+    const openArkSettings = () => {
+      if (isWalletInitialized.value) {
+        showArkSettings.value = true
+        closeMobileMenu()
+      }
     }
 
     onMounted(() => {
@@ -154,7 +235,12 @@ export default {
       isWalletInitialized,
       isSetupRoute,
       arkStatus,
-      arkServer
+      arkServer,
+      showMobileMenu,
+      toggleMobileMenu,
+      closeMobileMenu,
+      openRelaySettings,
+      openArkSettings
     }
   }
 }
@@ -248,6 +334,11 @@ nav {
         font-weight: 700;
         color: var(--primary);
         text-decoration: none;
+      }
+
+      .relay-groups {
+        display: flex;
+        gap: 1rem;
       }
 
       .relay-group {
@@ -439,6 +530,184 @@ h2 {
   }
   100% {
     opacity: 1;
+  }
+}
+
+.desktop-only {
+  @media (max-width: 768px) {
+    display: none !important;
+  }
+}
+
+.mobile-only {
+  display: none !important;
+  @media (max-width: 768px) {
+    display: flex !important;
+  }
+}
+
+.mobile-menu-button {
+  background: transparent;
+  color: var(--text);
+  padding: 0.5rem;
+  min-width: auto;
+  border-radius: 0.75rem;
+  transition: all 0.2s ease;
+
+  &:active {
+    background: var(--background);
+    transform: scale(0.95);
+  }
+
+  .material-icons {
+    font-size: 1.75rem;
+  }
+}
+
+.mobile-menu {
+  position: fixed;
+  top: 73px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--background);
+  z-index: 100;
+  transform: translateX(100%);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow-y: auto;
+  backdrop-filter: blur(8px);
+  
+  &.show {
+    transform: translateX(0);
+    box-shadow: 0 0 15px rgba(0, 0, 0, 0.1);
+  }
+
+  .mobile-menu-content {
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    max-width: 500px;
+    margin: 0 auto;
+
+    .nav-button {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 0.875rem 1.25rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      font-size: 1rem;
+      gap: 1rem;
+      font-weight: 500;
+      transition: all 0.2s ease;
+
+      .material-icons {
+        font-size: 1.4rem;
+        color: var(--primary);
+      }
+
+      &:active {
+        transform: scale(0.98);
+        background: var(--background);
+      }
+
+      &.router-link-active {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: white;
+
+        .material-icons {
+          color: white;
+        }
+      }
+    }
+
+    .wallet-balance {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.875rem 1.25rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--primary);
+    }
+
+    .relay-groups {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      background: var(--card);
+      padding: 1.25rem;
+      border-radius: 1rem;
+      border: 1px solid var(--border);
+
+      .relay-group {
+        .relay-label {
+          font-size: 0.75rem;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          color: var(--text-light);
+          margin-bottom: 0.5rem;
+        }
+
+        .relay-status {
+          background: var(--background);
+          padding: 0.75rem 1rem;
+          border-radius: 0.75rem;
+          width: 100%;
+          border: 1px solid var(--border);
+          transition: all 0.2s ease;
+
+          &:active {
+            transform: scale(0.98);
+            background: var(--card);
+          }
+
+          .status-indicator {
+            width: 10px;
+            height: 10px;
+          }
+
+          .relay-url {
+            font-size: 0.9rem;
+          }
+        }
+      }
+    }
+
+    .theme-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 1rem;
+      color: var(--text);
+      background: var(--card);
+      padding: 0.875rem 1.25rem;
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      font-size: 1rem;
+      font-weight: 500;
+      transition: all 0.2s ease;
+
+      .material-icons {
+        font-size: 1.4rem;
+        color: var(--primary);
+      }
+
+      &:active {
+        transform: scale(0.98);
+        background: var(--background);
+      }
+    }
   }
 }
 </style> 

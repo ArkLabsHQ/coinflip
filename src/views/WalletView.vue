@@ -408,6 +408,10 @@ export default {
   max-width: 1200px;
   margin: 0 auto;
   padding: 2rem 1rem;
+
+  @media (max-width: 768px) {
+    padding: 1rem;
+  }
 }
 
 .wallet-container {
@@ -477,6 +481,26 @@ export default {
         }
       }
     }
+
+    @media (max-width: 768px) {
+      flex-direction: column;
+      text-align: center;
+      
+      .balance-info {
+        .balance-amount {
+          font-size: 2rem;
+        }
+      }
+      
+      .balance-actions {
+        width: 100%;
+        
+        .withdraw-button {
+          width: 100%;
+          justify-content: center;
+        }
+      }
+    }
   }
 }
 
@@ -494,6 +518,12 @@ export default {
     background: var(--background);
     border-radius: 0.5rem;
     align-items: center;
+    
+    @media (max-width: 768px) {
+      flex-direction: column;
+      align-items: center;
+      gap: 1.5rem;
+    }
 
     .qr-code {
       padding: 1rem;
@@ -510,6 +540,7 @@ export default {
 
     .address-details {
       flex: 1;
+      width: 100%;
 
       label {
         display: block;
@@ -522,6 +553,19 @@ export default {
         display: flex;
         gap: 1rem;
         align-items: center;
+        
+        @media (max-width: 480px) {
+          flex-direction: column;
+          
+          .address {
+            font-size: 0.875rem;
+          }
+          
+          .copy-button {
+            width: 100%;
+            padding: 0.75rem;
+          }
+        }
 
         .address {
           flex: 1;
@@ -658,6 +702,19 @@ export default {
         }
       }
     }
+
+    @media (max-width: 480px) {
+      flex-direction: column;
+      
+      .action-buttons {
+        flex-direction: column;
+        
+        .danger-button {
+          width: 100%;
+          justify-content: center;
+        }
+      }
+    }
   }
 }
 
@@ -744,14 +801,23 @@ export default {
       display: grid;
       grid-template-columns: 150px 1fr;
       gap: 1.5rem;
+      
+      @media (max-width: 768px) {
+        grid-template-columns: 1fr;
+        gap: 1rem;
+      }
 
       .info-item {
         &.network {
-          min-width: 150px;
+          min-width: auto;
         }
 
         &.pubkey {
           flex: 1;
+
+          code {
+            font-size: 0.75rem;
+          }
         }
 
         label {

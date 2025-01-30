@@ -44,7 +44,7 @@ const ark: Module<ArkState, RootState> = {
   namespaced: true,
 
   state: {
-    server: localStorage.getItem('ark_server') || 'https://master.signet.arklabs.to',
+    server: localStorage.getItem('ark_server') || 'https://master.mutinynet.arklabs.to',
     status: 'disconnected',
     lastError: null,
     info: getCachedServerInfo(),

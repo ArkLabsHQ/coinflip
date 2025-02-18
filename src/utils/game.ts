@@ -47,8 +47,6 @@ export type Game = Partial<{
   // the amount of sats each player bets
   // the winner gets 2x the betAmount
   betAmount: bigint 
-  // the amount of sats used as transaction fees
-  txFees: bigint
   // the creator of the game
   creator: PlayerData
   // the player joining the game
@@ -69,7 +67,6 @@ export interface CreateEvent {
   creatorVtxos: VtxoInput[]
   creatorChangeAddress: string
   betAmount: string
-  txFees: string
   serverPubkey: string
   setupExpiration: number
   finalExpiration: number
@@ -207,7 +204,6 @@ export function gameFromEvents(...events: GameEvent[]): Game {
           changeAddress: event.creatorChangeAddress,
         }
         game.betAmount = BigInt(event.betAmount)
-        game.txFees = BigInt(event.txFees)
         game.serverPubkey = hex.decode(
           event.serverPubkey.length == 66 ?
           event.serverPubkey.slice(2) :
@@ -430,8 +426,7 @@ function getFinalOutputAddress(game: Game): [ArkAddress, creatorWin: string, pla
 
 export function getPotAmount(game: Game): bigint {
   assertExist(game.betAmount, 'game.betAmount')
-  assertExist(game.txFees, 'game.txFees')
-  return 2n * game.betAmount - 2n * BigInt(game.txFees)
+  return 2n * game.betAmount
 }
 
 export function getTransactions(game: Game): Transactions {
@@ -443,12 +438,10 @@ export function getTransactions(game: Game): Transactions {
   assertExist(creator.changeAddress, 'creator.changeAddress')
   assertExist(player.changeAddress, 'player.changeAddress')
   assertExist(game.betAmount, 'game.betAmount')
-  assertExist(game.txFees, 'game.txFees')
 
   const [setupOutputAddress, revealLeaf, abortedLeaf] = getSetupOutputAddress(game)
 
-  const setupAmount = 2n * game.betAmount - BigInt(game.txFees)
-  // the setup tx output = pot - fees
+  const setupAmount = 2n * game.betAmount
   const outputs = [
     { value: setupAmount, address: setupOutputAddress.encode() },
   ]
@@ -543,7 +536,7 @@ export function getTransactions(game: Game): Transactions {
 
   const final = buildRedeemTx(
     [finalInput],
-    [{ value: setupAmount - game.txFees, address: finalOutputAddress.encode() }]
+    [{ value: setupAmount, address: finalOutputAddress.encode() }]
   )
   
   const revealLeafHash = tapLeafHash(revealLeafScript, TAP_LEAF_VERSION)
@@ -659,7 +652,6 @@ export async function cashoutTx(
   signerPrivateKey: Uint8Array,
   signerPubkey: Uint8Array
 ): Promise<boolean> {
-  assertExist(game.txFees, 'game.txFees')
   assertExist(game.creator, 'game.creator')
   
   const { final } = getTransactions(game)
@@ -713,7 +705,7 @@ export async function cashoutTx(
       },
       leaf: winLeaf
     }],
-    [{ value: getPotAmount(game) - BigInt(game.txFees), address: cashoutAddress }]
+    [{ value: getPotAmount(game), address: cashoutAddress }]
   )
 
   // sign the cashout tx

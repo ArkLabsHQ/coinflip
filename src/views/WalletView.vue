@@ -250,7 +250,6 @@ export default {
     const deleteConfirmText = ref('')
 
     const setMaxAmount = () => {
-      // Set max amount minus 300 sats (network fee) converted to BTC
       const maxSats = store.getters['ark/balance'] || BigInt(0)
       if (maxSats > BigInt(300)) {
         withdrawAmount.value = Number(maxSats) / 100000000

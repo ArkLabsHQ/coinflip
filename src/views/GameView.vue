@@ -46,7 +46,6 @@
           <div class="amount">{{ formattedPotAmount }}</div>
           <div class="bet-size">
             2 x {{ formatBTC(game?.betAmount) }} BTC 
-            <br />- 2 x {{ formatBTC(game?.txFees) }} BTC (fees)
           </div>
         </div>
 

@@ -15,9 +15,8 @@
         <div class="card-header">
           <StatusBadge :status="getGameStatus(game)" />
           <div class="actions">
-            <div class="expiry" v-if="game.expiresAt">
+            <div class="expiry" v-if="game.finalExpiration">
               <span class="material-icons">schedule</span>
-              {{ formatExpiry(game.expiresAt) }}
             </div>
             <button 
               class="remove-button" 
@@ -336,12 +335,6 @@ export default defineComponent({
     .pot {
       font-size: 0.875rem;
       color: var(--text-light);
-
-      .fees {
-        font-size: 0.75rem;
-        margin-top: 0.25rem;
-        opacity: 0.8;
-      }
     }
   }
 

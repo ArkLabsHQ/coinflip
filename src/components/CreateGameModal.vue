@@ -95,7 +95,6 @@ export default defineComponent({
       const finalExpiration = now + Math.floor(expirySeconds)
 
       const betAmount = BigInt(Math.floor(parseFloat(amount.value) * 100000000))
-      const txFees = BigInt(300)
 
       const arkVtxos = store.getters['ark/vtxos']
       const walletPubkey = hex.decode(store.state.wallet.publicKey!)
@@ -126,7 +125,6 @@ export default defineComponent({
         creatorVtxos: inputs,
         creatorChangeAddress: changeAddress,
         betAmount: betAmount.toString(),
-        txFees: txFees.toString(),
         serverPubkey: store.getters['ark/serverPubkey'],
         setupExpiration,
         finalExpiration

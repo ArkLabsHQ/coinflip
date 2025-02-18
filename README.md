@@ -1,6 +1,18 @@
-# CoinFlip on Ark
+# CoinFlip
 
-inspired by https://arxiv.org/pdf/1612.05390v3
+CoinFlip is a decentralized & trustless Bitcoin gambling game built on Ark and Nostr protocols. Players can create or join games with customizable bet amounts, competing head-to-head in a provably fair coin flip. 
+
+![Main page](screenshots/mainpage.png)
+*Browse available games and create new ones*
+
+![Game page](screenshots/game.png)
+*View game details and play*
+
+## How it works
+
+CoinFlip uses Bitcoin's Taproot and Ark capabilities to create a trustless coin flip game between two players. The game mechanics are based on secret generation of predetermined sizes (15 bytes for "Heads", 16 bytes for "Tails").
+
+The game is completely trustless - neither player can cheat or withhold funds once committed. For detailed technical explanation, visit: https://coinflip.casino/how-it-works
 
 ## Prerequisites
 
@@ -27,43 +39,11 @@ yarn serve
 
 The application will be available at `http://localhost:8080`
 
-## Project Structure
-
-```
-├── src/
-│   ├── assets/        # Static assets
-│   ├── components/    # Vue components
-│   ├── utils/         # Utility functions
-│   ├── views/         # Views
-│   ├── store/         # Vuex store
-│   ├── router/        # Vue router
-│   ├── App.vue        # Main chat interface
-│   └── main.js        # Application entry point
-├── public/
-│   └── index.html     # HTML template
-├── babel.config.js    # Babel configuration
-└── package.json       # Project dependencies and scripts
-```
-
-## Scripts
-
-- `npm run serve`: Start development server
-- `npm run build`: Build for production
-- `npm run lint`: Lint and fix files
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
 ## License
 
 MIT License
 
-Copyright (c) 2024 CoinFlip developers
+Copyright (c) 2024 ArkLabs developers
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

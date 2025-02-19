@@ -10,7 +10,7 @@
           <br>
           <br>
           The game is built on Bitcoin's Taproot and multisignature capabilities. The emulation of coinflip is made with secret generation of predetermined sizes. 
-          Both players generate a secret of 15 or 16 bytes. 15 is "Heads" and 16 is "Tails". This method is inspired by https://arxiv.org/pdf/1612.05390v3.
+          Both players generate a secret of 15 or 16 bytes. 15 is "Heads" and 16 is "Tails". This method is inspired by <a href="https://arxiv.org/pdf/1612.05390v3">https://arxiv.org/pdf/1612.05390v3</a>.
         </p>
 
         <br>

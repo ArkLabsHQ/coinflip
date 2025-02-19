@@ -2,7 +2,7 @@
   <footer class="base-footer">
     <div class="footer-content">
       <div class="footer-links">
-        <router-link to="/how-it-works">
+        <router-link to="/how-it-works" @click="scrollToTop">
           <span class="material-icons link-icon">help_outline</span>
           How it Works
         </router-link>
@@ -16,6 +16,13 @@
 
 <script setup lang="ts">
 const currentYear = new Date().getFullYear();
+
+const scrollToTop = () => {
+  window.scrollTo({
+    top: 0,
+    behavior: 'smooth'
+  });
+};
 </script>
 
 <style lang="scss" scoped>

@@ -79,7 +79,7 @@
         </button>
       </div>
     </nav>
-    <div class="mobile-menu" :class="{ 'show': showMobileMenu }" v-if="!isSetupRoute">
+    <div class="mobile-menu mobile-only" :class="{ 'show': showMobileMenu }" v-if="!isSetupRoute">
       <div class="mobile-menu-content">
         <router-link 
           to="/" 
@@ -583,14 +583,14 @@ h2 {
 }
 
 .desktop-only {
-  @media (max-width: 768px) {
+  @media (max-width: 1050px) {
     display: none !important;
   }
 }
 
 .mobile-only {
   display: none !important;
-  @media (max-width: 768px) {
+  @media (max-width: 1050px) {
     display: flex !important;
   }
 }

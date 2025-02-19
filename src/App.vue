@@ -11,9 +11,11 @@
           >
             <span class="material-icons" :class="{ 'rotating': isRefreshing }">refresh</span>
           </button>
-          <router-link to="/" class="logo">CoinFlip</router-link>
-          <div class="network-badge" v-if="networkName">
-            {{ networkName }}
+          <div class="logo-container">
+            <router-link to="/" class="logo">CoinFlip</router-link>
+            <div class="network-badge" v-if="networkName">
+              {{ networkName }}
+            </div>
           </div>
           <div class="relay-groups desktop-only">
             <div class="relay-group">
@@ -352,22 +354,35 @@ nav {
         }
       }
 
-      .logo {
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: var(--primary);
-        text-decoration: none;
-      }
+      .logo-container {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.25rem;
 
-      .network-badge {
-        background: var(--primary);
-        color: white;
-        padding: 0.25rem 0.75rem;
-        border-radius: 1rem;
-        font-size: 0.75rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
+        .logo {
+          font-size: 1.5rem;
+          font-weight: 700;
+          color: var(--primary);
+          text-decoration: none;
+          line-height: 1.2;
+        }
+
+        .network-badge {
+          background: var(--primary);
+          color: white;
+          padding: 0.25rem 0.75rem;
+          border-radius: 1rem;
+          font-size: 0.75rem;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+
+          @media (max-width: 768px) {
+            padding: 0.15rem 0.5rem;
+            font-size: 0.7rem;
+          }
+        }
       }
 
       .relay-groups {

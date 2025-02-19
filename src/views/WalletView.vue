@@ -35,6 +35,12 @@
                 <span class="material-icons">content_copy</span>
               </button>
             </div>
+            <div v-if="isMutinyTestnet" class="faucet-container">
+              <button @click="requestFaucet" class="faucet-button">
+                <span class="material-icons">water_drop</span>
+                Faucet
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -367,6 +373,39 @@ export default {
       router.push('/setup')
     }
 
+    const isMutinyTestnet = computed(() => 
+      store.state.ark.server === 'https://master.mutinynet.arklabs.to'
+    )
+
+    const requestFaucet = async () => {
+      if (!arkAddress.value) return
+      
+      try {
+        const response = await fetch('https://faucet.mutinynet.arklabs.to/faucet', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            address: arkAddress.value,
+            amount: 1000
+          })
+        })
+        
+        if (!response.ok) {
+          throw new Error('Faucet request failed')
+        }
+        
+        toast.success('Faucet request successful! Funds should arrive shortly.')
+        
+        // Reload VTXOs to update balance
+        await store.dispatch('ark/fetchVTXOs')
+      } catch (err) {
+        console.error('Failed to request from faucet:', err)
+        toast.error('Failed to request from faucet')
+      }
+    }
+
     onMounted(async () => {
       // Fetch server info if not already available
       if (!store.state.ark.info) {
@@ -397,6 +436,8 @@ export default {
       deleteWallet,
       store,
       arkBalance,
+      isMutinyTestnet,
+      requestFaucet,
     }
   }
 }
@@ -848,5 +889,44 @@ export default {
   padding: 1rem;
   border: 1px solid #ddd;
   border-radius: 4px;
+}
+
+.faucet-container {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: center;
+  
+  .faucet-button {
+    width: auto;
+    background: var(--primary);
+    color: white;
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    transition: all 0.2s ease;
+    
+    &:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+    
+    .material-icons {
+      font-size: 1rem;
+    }
+    
+    @media (max-width: 480px) {
+      width: 100%;
+      padding: 0.75rem;
+      font-size: 1rem;
+      
+      .material-icons {
+        font-size: 1.25rem;
+      }
+    }
+  }
 }
 </style> 

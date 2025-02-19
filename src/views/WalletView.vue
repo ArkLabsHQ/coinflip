@@ -251,7 +251,7 @@ export default {
       return Number(balanceSats) / 100000000
     })
     const showPrivateKey = ref(false)
-    const privateKey = computed(() => store.getters.walletPrivateKey)
+    const privateKey = computed(() => store.getters.walletPrivateKeyEncoded)
     const showDeleteConfirm = ref(false)
     const deleteConfirmText = ref('')
 

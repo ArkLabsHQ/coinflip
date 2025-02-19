@@ -23,6 +23,7 @@ const wallet: Module<WalletState, RootState> = {
   getters: {
     isWalletInitialized: (state: WalletState) => state.isInitialized,
     walletPrivateKey: (state: WalletState) => state.privateKey,
+    walletPrivateKeyEncoded: (state: WalletState) => !!state.privateKey && nip19.nsecEncode(state.privateKey),
     walletPublicKey: (state: WalletState) => state.publicKey
   },
 

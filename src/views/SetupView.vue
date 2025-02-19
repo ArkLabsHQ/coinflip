@@ -114,7 +114,7 @@ export default {
 
     const createWallet = async () => {
       await store.dispatch('createNewWallet')
-      newPrivateKey.value = store.getters.walletPrivateKey
+      newPrivateKey.value = store.getters.walletPrivateKeyEncoded
       showPrivateKey.value = true
     }
 

@@ -12,11 +12,14 @@
             v-model="amount"
             placeholder="0.00000000"
             step="0.00000001"
-            min="0.00000001"
+            :min="minAmount"
           >
         </div>
         <div class="usd-value" v-if="parseFloat(amount) > 0">
           ≈ ${{ usdAmount }}
+        </div>
+        <div class="dust-warning" v-if="showDustWarning">
+          Minimum amount is {{ minAmount }} BTC
         </div>
       </div>
 
@@ -76,14 +79,26 @@ export default defineComponent({
     const isValid = computed(() => {
       const numAmount = parseFloat(amount.value)
       const balance = store.getters['ark/balance']
+      const dust = store.getters['ark/dust']
       return !isNaN(numAmount) && 
-             numAmount >= 0.00000001 && 
+             BigInt(Math.floor(numAmount * 100000000)) >= BigInt(dust || 1000) && 
              BigInt(Math.floor(numAmount * 100000000)) <= balance
     })
 
     const usdAmount = computed(() => {
       if (!amount.value || !btcPrice.value) return '0.00'
       return (parseFloat(amount.value) * btcPrice.value).toFixed(2)
+    })
+
+    const minAmount = computed(() => {
+      const dust = store.getters['ark/dust']
+      return (dust / 100000000).toFixed(8)
+    })
+
+    const showDustWarning = computed(() => {
+      const numAmount = parseFloat(amount.value)
+      const dust = store.getters['ark/dust']
+      return !isNaN(numAmount) && BigInt(Math.floor(numAmount * 100000000)) < BigInt(dust || 1000)
     })
 
     const createGame = async () => {
@@ -143,7 +158,9 @@ export default defineComponent({
       expiryHours,
       isValid,
       usdAmount,
-      createGame
+      createGame,
+      minAmount,
+      showDustWarning
     }
   }
 })
@@ -182,6 +199,12 @@ export default defineComponent({
       margin-top: 0.5rem;
       font-size: 0.875rem;
       color: var(--text-light);
+    }
+
+    .dust-warning {
+      margin-top: 0.5rem;
+      font-size: 0.875rem;
+      color: var(--error);
     }
   }
 

@@ -12,6 +12,9 @@
             <span class="material-icons" :class="{ 'rotating': isRefreshing }">refresh</span>
           </button>
           <router-link to="/" class="logo">CoinFlip</router-link>
+          <div class="network-badge" v-if="networkName">
+            {{ networkName }}
+          </div>
           <div class="relay-groups desktop-only">
             <div class="relay-group">
               <span class="relay-label">nostr</span>
@@ -185,6 +188,7 @@ export default {
     const arkServer = computed(() => truncateUrl(store.getters.arkServer))
     const formattedBalance = computed(() => store.getters['ark/formattedBalance'])
     const showMobileMenu = ref(false)
+    const networkName = computed(() => store.getters['ark/serverNetwork'])
 
     const toggleTheme = () => {
       isDark.value = !isDark.value
@@ -251,7 +255,8 @@ export default {
       toggleMobileMenu,
       closeMobileMenu,
       openRelaySettings,
-      openArkSettings
+      openArkSettings,
+      networkName,
     }
   }
 }
@@ -352,6 +357,17 @@ nav {
         font-weight: 700;
         color: var(--primary);
         text-decoration: none;
+      }
+
+      .network-badge {
+        background: var(--primary);
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 1rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
       }
 
       .relay-groups {

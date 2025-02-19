@@ -652,6 +652,8 @@ h2 {
       gap: 1rem;
       font-weight: 500;
       transition: all 0.2s ease;
+      text-decoration: none;
+      color: var(--text);
 
       .material-icons {
         font-size: 1.4rem;

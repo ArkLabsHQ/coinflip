@@ -8,7 +8,7 @@
         </router-link>
       </div>
       <div class="footer-copyright">
-        © {{ currentYear }} Coinflip Ark. All rights reserved.
+        © {{ currentYear }} ArkLabs. All rights reserved.
       </div>
     </div>
   </footer>

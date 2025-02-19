@@ -1,6 +1,6 @@
 <template>
   <div id="app">
-    <nav>
+    <nav v-if="!isSetupRoute">
       <div class="nav-content">
         <div class="nav-left">
           <button 

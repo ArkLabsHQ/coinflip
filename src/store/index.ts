@@ -107,7 +107,7 @@ export default createStore<State>({
     walletBalance: 0,
     btcPrice: 0,
     nostr: {
-      relay: normalizeRelayUrl(localStorage.getItem('nostr_relay') || 'relay.damus.io'),
+      relay: normalizeRelayUrl(localStorage.getItem('nostr_relay') || 'nostr.arkade.sh'),
       status: 'disconnected',
       lastError: null,
       subscription: null,

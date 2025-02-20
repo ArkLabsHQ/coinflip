@@ -10,7 +10,7 @@
           <input 
             type="text" 
             v-model="newRelay"
-            placeholder="relay.damus.io"
+            placeholder="nostr.arkade.sh"
           >
           <button 
             @click="updateRelay" 
@@ -24,7 +24,7 @@
           Please enter a valid relay URL
         </div>
         <div class="help-text">
-          Examples: relay.damus.io, wss://relay.damus.io, ws://localhost:8080
+          Examples: nostr.arkade.sh, wss://nostr.arkade.sh, ws://localhost:8080
         </div>
       </div>
     </div>

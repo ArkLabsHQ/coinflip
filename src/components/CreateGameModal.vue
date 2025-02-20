@@ -5,21 +5,30 @@
   >
     <div class="create-form">
       <div class="form-group">
-        <label>Game Amount (BTC)</label>
+        <label>Game Amount</label>
         <div class="amount-input">
           <input 
             type="number" 
             v-model="amount"
-            placeholder="0.00000000"
-            step="0.00000001"
+            :placeholder="unitPlaceholder"
+            :step="unitStep"
             :min="minAmount"
           >
+          <button 
+            class="unit-toggle" 
+            @click="toggleUnit"
+          >
+            {{ unit }}
+          </button>
         </div>
-        <div class="usd-value" v-if="parseFloat(amount) > 0">
+        <div class="usd-value" v-if="parseFloat(displayAmount) > 0">
           ≈ ${{ usdAmount }}
         </div>
         <div class="dust-warning" v-if="showDustWarning">
-          Minimum amount is {{ minAmount }} BTC
+          Minimum amount is {{ minAmount }} {{ unit }}
+        </div>
+        <div class="balance-warning" v-if="showBalanceWarning">
+          Insufficient balance. You have {{ formatBalance }} {{ unit }}
         </div>
       </div>
 
@@ -75,30 +84,77 @@ export default defineComponent({
     const amount = ref<string>('')
     const expiryHours = ref<string>('24')
     const btcPrice = computed(() => store.state.btcPrice)
+    const isSats = ref<boolean>(true)
+
+    const unit = computed(() => isSats.value ? 'SATS' : 'BTC')
+    const unitStep = computed(() => isSats.value ? '1' : '0.00000001')
+    const unitPlaceholder = computed(() => isSats.value ? '0' : '0.00000000')
+
+    const displayAmount = computed(() => {
+      if (!amount.value) return '0'
+      return isSats.value 
+        ? (parseFloat(amount.value) / 100000000).toString()
+        : amount.value
+    })
+
+    const toggleUnit = () => {
+      if (!amount.value) {
+        isSats.value = !isSats.value
+        return
+      }
+
+      // Convert between sats and BTC while maintaining value
+      const currentValue = parseFloat(amount.value)
+      amount.value = isSats.value
+        ? (currentValue / 100000000).toString() // sats to BTC
+        : Math.floor(currentValue * 100000000).toString() // BTC to sats
+      isSats.value = !isSats.value
+    }
 
     const isValid = computed(() => {
-      const numAmount = parseFloat(amount.value)
+      const numAmount = isSats.value 
+        ? parseFloat(amount.value) 
+        : parseFloat(amount.value) * 100000000
       const balance = store.getters['ark/balance']
       const dust = store.getters['ark/dust']
       return !isNaN(numAmount) && 
-             BigInt(Math.floor(numAmount * 100000000)) >= BigInt(dust || 1000) && 
-             BigInt(Math.floor(numAmount * 100000000)) <= balance
+             BigInt(Math.floor(numAmount)) >= BigInt(dust || 1000) && 
+             BigInt(Math.floor(numAmount)) <= balance
     })
 
     const usdAmount = computed(() => {
-      if (!amount.value || !btcPrice.value) return '0.00'
-      return (parseFloat(amount.value) * btcPrice.value).toFixed(2)
+      if (!displayAmount.value || !btcPrice.value) return '0.00'
+      return (parseFloat(displayAmount.value) * btcPrice.value).toFixed(2)
     })
 
     const minAmount = computed(() => {
       const dust = store.getters['ark/dust']
-      return (dust / 100000000).toFixed(8)
+      return isSats.value 
+        ? dust.toString()
+        : (dust / 100000000).toFixed(8)
     })
 
     const showDustWarning = computed(() => {
-      const numAmount = parseFloat(amount.value)
+      const numAmount = isSats.value 
+        ? parseFloat(amount.value)
+        : parseFloat(amount.value) * 100000000
       const dust = store.getters['ark/dust']
-      return !isNaN(numAmount) && BigInt(Math.floor(numAmount * 100000000)) < BigInt(dust || 1000)
+      return !isNaN(numAmount) && BigInt(Math.floor(numAmount)) < BigInt(dust || 1000)
+    })
+
+    const showBalanceWarning = computed(() => {
+      const numAmount = isSats.value 
+        ? parseFloat(amount.value)
+        : parseFloat(amount.value) * 100000000
+      const balance = store.getters['ark/balance']
+      return !isNaN(numAmount) && BigInt(Math.floor(numAmount)) > balance
+    })
+
+    const formatBalance = computed(() => {
+      const balance = store.getters['ark/balance']
+      return isSats.value 
+        ? balance.toString()
+        : (Number(balance) / 100000000).toFixed(8)
     })
 
     const createGame = async () => {
@@ -109,7 +165,9 @@ export default defineComponent({
       const setupExpiration = now + Math.floor(expirySeconds / 2)
       const finalExpiration = now + Math.floor(expirySeconds)
 
-      const betAmount = BigInt(Math.floor(parseFloat(amount.value) * 100000000))
+      const betAmount = BigInt(Math.floor(isSats.value 
+        ? parseFloat(amount.value)
+        : parseFloat(amount.value) * 100000000))
 
       const arkVtxos = store.getters['ark/vtxos']
       const walletPubkey = hex.decode(store.state.wallet.publicKey!)
@@ -160,7 +218,14 @@ export default defineComponent({
       usdAmount,
       createGame,
       minAmount,
-      showDustWarning
+      showDustWarning,
+      showBalanceWarning,
+      formatBalance,
+      unit,
+      unitStep,
+      unitPlaceholder,
+      toggleUnit,
+      displayAmount
     }
   }
 })
@@ -179,8 +244,11 @@ export default defineComponent({
     }
 
     .amount-input {
+      display: flex;
+      gap: 0.5rem;
+
       input {
-        width: 100%;
+        flex: 1;
         padding: 0.75rem;
         border: 1px solid var(--border);
         border-radius: 0.5rem;
@@ -193,6 +261,20 @@ export default defineComponent({
           border-color: var(--primary);
         }
       }
+
+      .unit-toggle {
+        padding: 0.75rem 1rem;
+        background: var(--background);
+        border: 1px solid var(--border);
+        border-radius: 0.5rem;
+        color: var(--text);
+        font-weight: 500;
+        transition: all 0.2s;
+
+        &:hover {
+          background: var(--border);
+        }
+      }
     }
 
     .usd-value {
@@ -201,7 +283,8 @@ export default defineComponent({
       color: var(--text-light);
     }
 
-    .dust-warning {
+    .dust-warning,
+    .balance-warning {
       margin-top: 0.5rem;
       font-size: 0.875rem;
       color: var(--error);

@@ -165,7 +165,7 @@
                     (winner === 'creator' && isCreator) || 
                     (winner === 'player' && isPlayer) 
                   }">
-                    {{ winner === 'creator' ? 'Creator' : 'Player' }} Won!
+                    {{ winner === 'creator' ? 'Creator' : 'Opponent' }} Won!
                   </span>
                 </div>
               </div>

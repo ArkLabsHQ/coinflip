@@ -84,11 +84,11 @@
       >
         <div class="withdraw-form">
           <div class="form-group">
-            <label>Bitcoin Address</label>
+            <label>Ark Address</label>
             <input 
               type="text" 
               v-model="withdrawAddress"
-              placeholder="Enter BTC address"
+              placeholder="Enter Ark address"
             >
           </div>
 

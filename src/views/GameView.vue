@@ -151,10 +151,10 @@
                   class="play-button"
                   @click="playGame"
                   :title="'Try to claim the funds'">
-                  Play Game
+                  Reveal outcome
                 </button>
                 <div class="help-text">
-                  Player has revealed their secret - try to claim the funds!
+                  Player has revealed their side - try to claim the funds!
                 </div>
               </div>
               <!-- Show game result for resolved games with known winner -->

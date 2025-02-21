@@ -701,6 +701,10 @@ export default {
   max-width: 1200px;
   margin: 0 auto;
   padding: 1rem;
+  
+  @media (max-width: 768px) {
+    padding: 0.5rem;
+  }
 }
 
 .game-container {
@@ -708,6 +712,11 @@ export default {
   border-radius: 1rem;
   padding: 1.5rem;
   box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
+  
+  @media (max-width: 768px) {
+    padding: 1rem;
+    border-radius: 0.75rem;
+  }
 }
 
 .game-header {
@@ -766,9 +775,19 @@ export default {
   background: var(--background);
   border-radius: 0.5rem;
 
+  @media (max-width: 768px) {
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1rem;
+  }
+
   .player {
     text-align: center;
     flex: 1;
+
+    @media (max-width: 768px) {
+      width: 100%;
+    }
 
     h3 {
       margin-bottom: 0.5rem;
@@ -781,6 +800,11 @@ export default {
       align-items: center;
       justify-content: center;
       gap: 0.5rem;
+      
+      @media (max-width: 768px) {
+        font-size: 0.875rem;
+        flex-wrap: wrap;
+      }
 
       .role-badge {
         background: var(--primary);
@@ -799,6 +823,25 @@ export default {
     width: 60px;
     display: flex;
     justify-content: center;
+    
+    @media (max-width: 768px) {
+      margin: 0.5rem 0;
+      width: 100%;
+      
+      &::before,
+      &::after {
+        width: calc(50% - 30px);
+        top: 50%;
+      }
+      
+      &::before {
+        left: 0;
+      }
+      
+      &::after {
+        right: 0;
+      }
+    }
     
     .vs-circle {
       width: 40px;
@@ -857,6 +900,18 @@ export default {
   .bet-size {
     font-size: 0.875rem;
     color: var(--text-light);
+  }
+
+  @media (max-width: 768px) {
+    padding: 0.75rem;
+    
+    .amount {
+      font-size: 1.25rem;
+    }
+    
+    .bet-size {
+      font-size: 0.8125rem;
+    }
   }
 }
 
@@ -921,6 +976,15 @@ export default {
   .material-icons {
     font-size: 1.25rem;
   }
+
+  @media (max-width: 768px) {
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+    
+    .material-icons {
+      font-size: 1.125rem;
+    }
+  }
 }
 
 .join-options {
@@ -937,6 +1001,16 @@ export default {
     display: flex;
     gap: 1rem;
     justify-content: center;
+    
+    @media (max-width: 480px) {
+      flex-direction: column;
+      width: 100%;
+      
+      .choice-button {
+        width: 100%;
+        justify-content: center;
+      }
+    }
     
     .choice-button {
       display: flex;
@@ -1018,6 +1092,59 @@ export default {
     
     &.is-you {
       color: var(--primary);
+    }
+  }
+}
+
+.choice-buttons {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  
+  @media (max-width: 480px) {
+    flex-direction: column;
+    width: 100%;
+    
+    .choice-button {
+      width: 100%;
+      justify-content: center;
+    }
+  }
+}
+
+.game-header {
+  @media (max-width: 480px) {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+    
+    .game-title {
+      width: 100%;
+      
+      .game-id {
+        .hash {
+          font-size: 0.75rem;
+          word-break: break-all;
+        }
+      }
+    }
+  }
+}
+
+.game-actions {
+  .action-buttons {
+    @media (max-width: 768px) {
+      width: 100%;
+      
+      button:not(.choice-button) {
+        width: 100%;
+      }
+      
+      .completed-message,
+      .status-message {
+        width: 100%;
+        text-align: center;
+      }
     }
   }
 }

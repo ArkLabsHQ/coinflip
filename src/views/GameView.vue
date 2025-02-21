@@ -101,7 +101,7 @@
                 </div>
               </div>
               <div v-else class="status-message">
-                Waiting for creator to start setup...
+                Waiting for opponent…
               </div>
             </template>
             
@@ -111,10 +111,10 @@
                 v-if="isPlayer"
                 @click="setupFinalize"
                 :title="'Finalize the game setup'">
-                Finalize Setup
+                Finalize
               </button>
               <div v-else class="status-message">
-                Waiting for opponent to finalize setup...
+                Waiting for opponent…
               </div>
             </template>
             
@@ -124,10 +124,10 @@
                 v-if="isCreator"
                 @click="finalize"
                 :title="'Finalize the game'">
-                Finalize Game
+                Reveal your side
               </button>
               <div v-else class="status-message">
-                Waiting for creator to finalize the game...
+                Waiting for opponent…
               </div>
             </template>
             
@@ -139,7 +139,7 @@
                   class="play-button"
                   @click="playGame"
                   :title="'Reveal your secret and see if you won'">
-                  Play Game
+                  Reveal your side
                 </button>
                 <div class="help-text">
                   Reveal your secret to see if you won!

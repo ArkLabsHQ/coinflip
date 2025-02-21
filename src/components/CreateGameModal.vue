@@ -32,21 +32,6 @@
         </div>
       </div>
 
-      <div class="form-group">
-        <label>Expires In</label>
-        <div class="expiry-input">
-          <select v-model="expiryHours">
-            <option value="0.0833">5 minutes</option>
-            <option value="0.1667">10 minutes</option>
-            <option value="1">1 hour</option>
-            <option value="6">6 hours</option>
-            <option value="12">12 hours</option>
-            <option value="24">24 hours</option>
-            <option value="48">48 hours</option>
-          </select>
-        </div>
-      </div>
-
       <div class="modal-actions">
         <button @click="$emit('close')" class="cancel-button">
           <span class="material-icons">close</span>
@@ -82,7 +67,6 @@ export default defineComponent({
   setup(props, { emit }) {
     const store = useStore()
     const amount = ref<string>('')
-    const expiryHours = ref<string>('24')
     const btcPrice = computed(() => store.state.btcPrice)
     const isSats = ref<boolean>(true)
 
@@ -161,7 +145,7 @@ export default defineComponent({
       if (!isValid.value) return
 
       const now = Math.floor(Date.now() / 1000)
-      const expirySeconds = parseFloat(expiryHours.value) * 60 * 60
+      const expirySeconds = 10 * 60 // 10 minutes in seconds
       const setupExpiration = now + Math.floor(expirySeconds / 2)
       const finalExpiration = now + Math.floor(expirySeconds)
 
@@ -213,7 +197,6 @@ export default defineComponent({
 
     return {
       amount,
-      expiryHours,
       isValid,
       usdAmount,
       createGame,
@@ -288,24 +271,6 @@ export default defineComponent({
       margin-top: 0.5rem;
       font-size: 0.875rem;
       color: var(--error);
-    }
-  }
-
-  .expiry-input {
-    select {
-      width: 100%;
-      padding: 0.75rem;
-      border: 1px solid var(--border);
-      border-radius: 0.5rem;
-      font-size: 1rem;
-      background: var(--background);
-      color: var(--text);
-      transition: border-color 0.2s;
-
-      &:focus {
-        outline: none;
-        border-color: var(--primary);
-      }
     }
   }
 

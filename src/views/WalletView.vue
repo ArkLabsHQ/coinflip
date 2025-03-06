@@ -374,14 +374,14 @@ export default {
     }
 
     const isMutinyTestnet = computed(() => 
-      store.state.ark.server === 'https://master.mutinynet.arklabs.to'
+      store.state.ark.server === 'https://mutinynet.arkade.sh'
     )
 
     const requestFaucet = async () => {
       if (!arkAddress.value) return
       
       try {
-        const response = await fetch('https://faucet.mutinynet.arklabs.to/faucet', {
+        const response = await fetch('https://faucet.mutinynet.arkade.sh/faucet', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'

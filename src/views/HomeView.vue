@@ -139,6 +139,7 @@ export default {
       padding: 0.75rem 1.5rem;
       font-size: 1rem;
       transition: all 0.2s ease;
+      max-width: 50%;;
       
       &:hover {
         background: #16a34a;

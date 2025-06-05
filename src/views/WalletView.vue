@@ -53,6 +53,10 @@
               <label>Network</label>
               <span>{{ store.getters['ark/serverNetwork'] || 'Unknown' }}</span>
             </div>
+            <div class="info-item network">
+              <label>Server URL</label>
+              <span>{{ store.getters['arkServer'] || 'Unknown' }}</span>
+            </div>
             <div class="info-item pubkey">
               <label>Server Pubkey</label>
               <code>{{ store.getters['ark/serverPubkey'] || 'Unknown' }}</code>

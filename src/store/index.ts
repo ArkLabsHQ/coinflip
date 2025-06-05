@@ -166,13 +166,6 @@ export default createStore<State>({
           (game.player?.pubkey && hex.encode(game.player.pubkey) === pubkey))
       )
     },
-    
-    formattedBalance: (state: State) => {
-      return `${state.walletBalance.toFixed(8)} BTC`
-    },
-    usdBalance: (state: State) => {
-      return (state.walletBalance * state.btcPrice).toFixed(2)
-    },
     nostrStatus: (state: State) => state.nostr.status,
     nostrRelay: (state: State) => state.nostr.relay,
     arkServer: (state: State) => state.ark.server,

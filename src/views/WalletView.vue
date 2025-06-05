@@ -6,7 +6,7 @@
           <div class="balance-info">
             <span class="balance-label">Available Balance</span>
             <div class="balance-amount">
-              ₿ {{ store.getters['ark/formattedBalance'] }}
+              ₿ {{ balance }}
               <div class="usd-value">
                 ≈ ${{ usdBalance }}
               </div>
@@ -110,7 +110,7 @@
               <button @click="setMaxAmount" class="max-button">MAX</button>
             </div>
             <div class="available">
-              ₿{{ store.getters['ark/formattedBalance'] }}
+              ₿{{ balance }}
             </div>
           </div>
 
@@ -203,8 +203,8 @@ export default {
   setup() {
     const store = useStore()
     const router = useRouter()
-    const balance = computed(() => store.getters.formattedBalance)
-    const usdBalance = computed(() => store.getters.usdBalance)
+    const balance = computed(() => store.getters['ark/formattedBalance'])
+    const usdBalance = computed(() => store.getters['ark/usdBalance'])
     const publicKey = computed(() => store.state.wallet.publicKey)
     const serverPubkey = computed(() => store.state.ark.info?.pubkey)
     const arkAddress = computed(() => store.getters['ark/address'])

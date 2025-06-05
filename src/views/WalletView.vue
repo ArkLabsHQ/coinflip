@@ -25,7 +25,7 @@
         <h2>Deposit</h2>
         <div class="address-card">
           <div class="qr-code" v-if="arkAddress">
-            <img :src="`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${arkAddress}`" alt="ARK Address QR Code"/>
+            <img :src="`https://api.qrserver.com/v1/create-qr-code/?data=${arkAddress}`" alt="ARK Address QR Code"/>
           </div>
           <div class="address-details">
             <label>Address</label>
@@ -571,8 +571,8 @@ export default {
       border-radius: 0.75rem;
       box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
       img {
-        width: 150px;
-        height: 150px;
+        width: 100%;
+        height: auto;
         border-radius: 0.25rem;
         display: block;
       }

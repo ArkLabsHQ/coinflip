@@ -100,15 +100,25 @@ export default {
     const newPrivateKey = ref('')
     const hasBackedUp = ref(false)
 
+    const refreshAll = async () => {
+      await Promise.all([
+        store.dispatch('ark/checkConnection'),
+        store.dispatch('fetchBTCPrice'),
+        store.dispatch('connectNostr')
+      ])
+    }
+
     const createWallet = async () => {
       await store.dispatch('createNewWallet')
       newPrivateKey.value = store.getters.walletPrivateKeyEncoded
       showPrivateKey.value = true
+      await refreshAll()
     }
 
     const restoreWallet = async () => {
       try {
         await store.dispatch('restoreWallet', privateKey.value)
+        await refreshAll()
         router.push('/')
       } catch (err) {
         error.value = 'Invalid private key' + (err.cause ? `: ${err.cause}` : '')

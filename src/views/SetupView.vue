@@ -4,7 +4,7 @@
       <h1>Welcome to CoinFlip</h1>
       
       <div class="setup-options">
-        <div class="option-card" @click="mode = 'create'">
+        <div class="option-card" @click="createWallet">
           <span class="material-icons">add_circle</span>
           <h2>Create New Wallet</h2>
           <p>Generate a new wallet for playing CoinFlip</p>
@@ -15,18 +15,6 @@
           <h2>Restore Wallet</h2>
           <p>Restore your existing wallet using private key</p>
         </div>
-      </div>
-
-      <!-- Create New Wallet -->
-      <div v-if="mode === 'create'" class="setup-form">
-        <div class="warning-box">
-          <h3>Important!</h3>
-          <p>Your private key will be shown only once. Make sure to save it in a secure location.</p>
-        </div>
-        
-        <button @click="createWallet" class="create-button">
-          Create Wallet
-        </button>
       </div>
 
       <!-- Restore Wallet -->
@@ -63,7 +51,7 @@
       @close="onPrivateKeyConfirmed"
     >
       <div class="private-key-display">
-        <p class="warning">Save this private key in a secure location. It will not be shown again!</p>
+        <p class="warning">Save this private key in a secure location.</p>
         
         <div class="key-container">
           <code>{{ newPrivateKey }}</code>
@@ -112,15 +100,25 @@ export default {
     const newPrivateKey = ref('')
     const hasBackedUp = ref(false)
 
+    const refreshAll = async () => {
+      await Promise.all([
+        store.dispatch('ark/checkConnection'),
+        store.dispatch('fetchBTCPrice'),
+        store.dispatch('connectNostr')
+      ])
+    }
+
     const createWallet = async () => {
       await store.dispatch('createNewWallet')
       newPrivateKey.value = store.getters.walletPrivateKeyEncoded
       showPrivateKey.value = true
+      await refreshAll()
     }
 
     const restoreWallet = async () => {
       try {
         await store.dispatch('restoreWallet', privateKey.value)
+        await refreshAll()
         router.push('/')
       } catch (err) {
         error.value = 'Invalid private key' + (err.cause ? `: ${err.cause}` : '')

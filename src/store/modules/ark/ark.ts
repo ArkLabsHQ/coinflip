@@ -225,7 +225,10 @@ const ark: Module<ArkState, RootState> = {
       
       const btc = Number(balance) / 100_000_000
       return btc.toFixed(8)
-    }
+    },
+    usdBalance: (state, getters, rootState) => {
+      return (Number(getters.balance) * rootState.btcPrice / 100_000_000).toFixed(2)
+    },
   }
 }
 

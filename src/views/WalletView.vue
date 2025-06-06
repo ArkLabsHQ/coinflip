@@ -6,7 +6,7 @@
           <div class="balance-info">
             <span class="balance-label">Available Balance</span>
             <div class="balance-amount">
-              ₿ {{ store.getters['ark/formattedBalance'] }}
+              ₿ {{ balance }}
               <div class="usd-value">
                 ≈ ${{ usdBalance }}
               </div>
@@ -25,7 +25,7 @@
         <h2>Deposit</h2>
         <div class="address-card">
           <div class="qr-code" v-if="arkAddress">
-            <img :src="`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${arkAddress}`" alt="ARK Address QR Code"/>
+            <img :src="`https://api.qrserver.com/v1/create-qr-code/?data=${arkAddress}`" alt="ARK Address QR Code"/>
           </div>
           <div class="address-details">
             <label>Address</label>
@@ -52,6 +52,10 @@
             <div class="info-item network">
               <label>Network</label>
               <span>{{ store.getters['ark/serverNetwork'] || 'Unknown' }}</span>
+            </div>
+            <div class="info-item network">
+              <label>Server URL</label>
+              <span>{{ store.getters['arkServer'] || 'Unknown' }}</span>
             </div>
             <div class="info-item pubkey">
               <label>Server Pubkey</label>
@@ -106,7 +110,7 @@
               <button @click="setMaxAmount" class="max-button">MAX</button>
             </div>
             <div class="available">
-              ₿{{ store.getters['ark/formattedBalance'] }}
+              ₿{{ balance }}
             </div>
           </div>
 
@@ -199,8 +203,8 @@ export default {
   setup() {
     const store = useStore()
     const router = useRouter()
-    const balance = computed(() => store.getters.formattedBalance)
-    const usdBalance = computed(() => store.getters.usdBalance)
+    const balance = computed(() => store.getters['ark/formattedBalance'])
+    const usdBalance = computed(() => store.getters['ark/usdBalance'])
     const publicKey = computed(() => store.state.wallet.publicKey)
     const serverPubkey = computed(() => store.state.ark.info?.pubkey)
     const arkAddress = computed(() => store.getters['ark/address'])
@@ -571,8 +575,8 @@ export default {
       border-radius: 0.75rem;
       box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
       img {
-        width: 150px;
-        height: 150px;
+        width: 100%;
+        height: auto;
         border-radius: 0.25rem;
         display: block;
       }

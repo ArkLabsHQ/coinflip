@@ -241,7 +241,8 @@ export default defineComponent({
     justify-content: space-between;
     margin-bottom: 1.5rem;
 
-    .actions {
+    .actions,
+    .expiry {
       display: flex;
       align-items: center;
       gap: 1rem;

@@ -843,7 +843,7 @@ export default {
 
     .info-grid {
       display: grid;
-      grid-template-columns: 150px 1fr;
+      grid-template-columns: 150px 250px 1fr;
       gap: 1.5rem;
       
       @media (max-width: 768px) {

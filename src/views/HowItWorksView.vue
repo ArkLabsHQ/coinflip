@@ -14,6 +14,21 @@
         </p>
 
         <br>
+        <p>Game flow</p>
+        <br>
+        <ul>
+          <li>Creator initiates a game with a Bitcoin bet amount and expiration of 10 minutes</li>
+          <li>The new game is announced on Nostr (kind 31337)</li>
+          <li>Opponent can join by matching the bet amount</li>
+          <li>Game setup involves both players choosing sides and signing transactions</li>
+          <li>Player A chooses a secret of 15 bytes (Heads) or 16 bytes (Tails)</li>
+          <li>Player B tries to guess player A secret size (Heads or Tails)</li>
+          <li>Players reveal their secrets</li>
+          <li>There are no ties, either player B guessed it or not</li>
+          <li>Winner is determined and can claim the entire pot</li>
+        </ul>
+
+        <br>
         <p>
           The game involves three transactions:
           <br>

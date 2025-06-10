@@ -9,10 +9,19 @@
 
     <div class="game-container">
       <div class="game-header">
-        <div class="game-title">
-          <h3>Game</h3>
-          <div class="game-id">
-            <span class="hash">{{ gameId }}</span>
+        <div class="game-header">
+          <div class="game-title">
+            <h3>Game</h3>
+            <div class="game-id">
+              <span class="hash">{{ gameId }}</span>
+            </div>
+          </div>
+          <div class="game-title">
+            <h3 v-if="isExpired">Expired</h3>
+            <h3 v-else>Expiration</h3>
+            <div class="game-id">
+              <span class="hash">{{ formatExpiry(game?.finalExpiration) }}</span>
+            </div>
           </div>
         </div>
         <StatusBadge :status="gameStatus"></StatusBadge>
@@ -246,6 +255,23 @@ export default {
       if (!amount) return '0'
       return (Number(amount) / 100_000_000).toFixed(8)
     }
+
+    const formatExpiry = (expiryDate = 0) => {
+      if (!expiryDate) return ''
+      return new Date(expiryDate * 1000).toLocaleString('en-GB', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    }
+
+    const isExpired = computed(() => {
+      if (!game.value?.finalExpiration) return false
+      return game.value.finalExpiration * 1000 < Date.now()
+    })
 
     const isCreator = computed(() => {
       if (!game.value?.creator?.pubkey || !store.state.wallet.publicKey) return false
@@ -676,9 +702,11 @@ export default {
       gameId,
       game,
       gameStatus,
+      isExpired,
       isCreator,
       isPlayer,
       canJoin,
+      formatExpiry,
       formatPubkey,
       formatBTC,
       joinGame,
@@ -720,6 +748,7 @@ export default {
 }
 
 .game-header {
+  gap: 1rem;
   display: flex;
   align-items: center;
   justify-content: space-between;

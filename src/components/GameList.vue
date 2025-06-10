@@ -17,6 +17,7 @@
           <div class="actions">
             <div class="expiry" v-if="game.finalExpiration">
               <span class="material-icons">schedule</span>
+              <p>{{ formatExpiry(game.finalExpiration) }}</p>
             </div>
             <button 
               class="remove-button" 
@@ -104,19 +105,20 @@ export default defineComponent({
     const router = useRouter()
     const store = useStore()
 
-    const formatExpiry = (expiryDate: string) => {
-      const expiry = new Date(expiryDate)
+    const formatExpiry = (expiryDate: number) => {
       const now = new Date()
-      const diffMs = expiry.getTime() - now.getTime()
-      const diffMins = Math.round(diffMs / 60000)
+      const diffSeconds = Math.floor(expiryDate - now.getTime() / 1000)
+      const diffMinutes = Math.floor(diffSeconds / 60)
       
-      if (diffMins < 0) {
+      if (diffSeconds < 0) {
         return 'Expired'
-      } else if (diffMins < 60) {
-        return `${diffMins} minutes`
+      } else if (diffSeconds < 60) {
+        return `${diffSeconds} second${diffSeconds === 1 ? '' : 's'}`
+      } else if (diffSeconds < 3600) {
+        return `${diffMinutes} minute${diffMinutes === 1 ? '' : 's'}`
       } else {
-        const hours = Math.floor(diffMins / 60)
-        const mins = diffMins % 60
+        const hours = Math.floor(diffSeconds / 3600)
+        const mins = diffMinutes % 60
         return `${hours}h ${mins}m`
       }
     }
@@ -241,11 +243,16 @@ export default defineComponent({
     justify-content: space-between;
     margin-bottom: 1.5rem;
 
-    .actions,
-    .expiry {
+    .actions {
       display: flex;
       align-items: center;
       gap: 1rem;
+    }
+
+    .expiry {
+      display: flex;
+      align-items: center;
+      gap: 0.21rem;
     }
 
     .remove-button {

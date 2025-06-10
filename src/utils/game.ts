@@ -265,6 +265,10 @@ export function gameFromEvents(...events: GameEvent[]): Game {
 
 // returns the address of the setup transaction output
 // the address has 2 tapscripts, one for the reveal and one for the aborted leaf
+//
+// (A + B + secret A) OR (B after timeout)
+//
+// this forces A to reveal their secret or else B will take the funds after a timeout
 export function getSetupOutputAddress(game: Game): [ArkAddress, reveal: string, aborted: string] {
   const { creator, player } = game
   assertExist(creator, 'creator')
@@ -316,9 +320,18 @@ export function getSetupOutputAddress(game: Game): [ArkAddress, reveal: string, 
   return [address, revealLeaf, abortedLeaf]
 }
 
-// returns the address of the final transaction output
+// returns the address of the final transaction outputfn  
 // the address has 3 tapscripts, one for the creator winning,
 // one for the player winning, and one for the aborted leaf (if the creator doesn't reveal)
+//
+// If len(secret A) == len(secret B)
+//   B + secret B
+// Else if len(secret A) != len(secret B)
+//   A + secret B
+// Else
+//   A after timeout
+//
+// this forces B to reveal their secret or else A will take the funds after a timeout
 function getFinalOutputAddress(game: Game): [ArkAddress, creatorWin: string, playerWin: string, aborted: string] {
   const { player, creator } = game
   assertExist(player, 'player')
@@ -340,32 +353,32 @@ function getFinalOutputAddress(game: Game): [ArkAddress, creatorWin: string, pla
     OP.EQUALVERIFY,  // stack: a b a
     OP.SHA256,       // stack: a b h(a)
     0x20,            // push next 32 bytes
-    ...creator.hash,  // hash to compare against
+    ...creator.hash, // hash to compare against
     OP.EQUALVERIFY,  // stack: a b
     OP.SIZE,         // stack: a b size(b)
     OP.DUP,          // stack: a b size(b) size(b)
-    0x60,              // stack: a b size(b) size(b) 16
+    0x60,            // stack: a b size(b) size(b) 16
     OP.EQUAL,        // stack: a b size(b) isSize16
     OP.SWAP,         // stack: a b isSize16 size(b)
-    0x5f,              // stack: a b isSize16 size(b) 15
+    0x5f,            // stack: a b isSize16 size(b) 15
     OP.EQUAL,        // stack: a b isSize16 isSize15
     OP.BOOLOR,       // stack: a b isValidSize
     OP.NOTIF,
-    OP["2DROP"],         // First DROP of DROP2
-    0x00,               // stack: 0 --> creator wins
+    OP["2DROP"],     // First DROP of DROP2
+    0x00,            // stack: 0 --> creator wins
     OP.ELSE,
     OP.SWAP,         // stack: b a
     OP.SIZE,         // stack: b a size(a)
     OP.DUP,          // stack: b a size(a) size(a)
-    0x60,              // stack: b a size(a) size(a) 16
+    0x60,            // stack: b a size(a) size(a) 16
     OP.EQUAL,        // stack: b a size(a) isSize16
     OP.SWAP,         // stack: b a isSize16 size(a)
-    0x5f,              // stack: b a isSize16 size(a) 15
+    0x5f,            // stack: b a isSize16 size(a) 15
     OP.EQUAL,        // stack: b a isSize16 isSize15
     OP.BOOLOR,       // stack: b a isValidSize
     OP.NOTIF,
     OP["2DROP"],        
-    0x51,               // stack: 1 --> player wins
+    0x51,            // stack: 1 --> player wins
     OP.ELSE,
     OP.SIZE,         // stack: b a size(a)
     OP.SWAP,         // stack: b size(a) a

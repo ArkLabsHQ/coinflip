@@ -13,4 +13,5 @@ module.exports = {
     'node_modules/(?!(@scure|@arkade-os|@noble|@bitcoinerlab|@kukks|@marcbachmann|micro-packed|bip68)/)',
   ],
   moduleFileExtensions: ['ts', 'js', 'json'],
+  setupFiles: ['./src/setup.ts'],
 }

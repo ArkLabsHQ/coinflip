@@ -43,7 +43,7 @@ jobs:
 
       - name: Run unit tests (no regtest needed)
         working-directory: packages/e2e
-        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="coinflip" -t "gameFromEvents|determineWinner|generateSecret|CoinflipSetupScript|CoinflipFinalScript|coinSelect|event type guards"
+        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="coinflip" -t "gameFromEvents|determineWinner|generateSecret|CoinflipSetupScript|CoinflipFinalScript|coinSelect|event type guards|server-as-counterparty"
 
   e2e-tests:
     name: E2E Integration Tests

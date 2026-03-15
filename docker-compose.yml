@@ -1,0 +1,31 @@
+services:
+  server:
+    build: ./packages/server
+    ports:
+      - "3001:3001"
+    # Admin port 3002 intentionally NOT exposed — internal only
+    # To access admin: docker compose exec server wget -qO- http://localhost:3002/
+    volumes:
+      - server-data:/app/data
+    environment:
+      - ARK_SERVER_URL=https://mutinynet.arkade.sh
+      - ESPLORA_URL=https://mutinynet.arkade.sh/esplora
+      - PUBLIC_PORT=3001
+      - ADMIN_PORT=3002
+      - DATA_DIR=/app/data
+    restart: unless-stopped
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    environment:
+      - VITE_API_URL=http://localhost:3001
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  server-data:

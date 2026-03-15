@@ -1,107 +1,89 @@
 <template>
-  <div class="setup-view">
-    <div class="setup-container">
-      <h1>Welcome to CoinFlip</h1>
-      
-      <div class="setup-options">
-        <div class="option-card" @click="mode = 'create'">
-          <span class="material-icons">add_circle</span>
-          <h2>Create New Wallet</h2>
-          <p>Generate a new wallet for playing CoinFlip</p>
-        </div>
-        
-        <div class="option-card" @click="mode = 'restore'">
-          <span class="material-icons">restore</span>
-          <h2>Restore Wallet</h2>
-          <p>Restore your existing wallet using private key</p>
-        </div>
+  <div class="page-centered">
+    <div class="setup-card casino-card-glow">
+      <h1 class="setup-title">Welcome to <span class="text-gold">Arkade Coinflip</span></h1>
+      <p class="setup-subtitle text-muted">Trustless Bitcoin coin flips on Ark</p>
+
+      <div class="setup-options" v-if="!mode">
+        <button class="option-btn" @click="mode = 'create'">
+          <span class="option-icon">+</span>
+          <span class="option-label">Create New Wallet</span>
+          <span class="option-desc text-muted">Generate a fresh keypair</span>
+        </button>
+        <button class="option-btn" @click="mode = 'restore'">
+          <span class="option-icon">&#8634;</span>
+          <span class="option-label">Restore Wallet</span>
+          <span class="option-desc text-muted">Import from nsec key</span>
+        </button>
       </div>
 
-      <!-- Create New Wallet -->
+      <!-- Create flow -->
       <div v-if="mode === 'create'" class="setup-form">
         <div class="warning-box">
-          <h3>Important!</h3>
-          <p>Your private key will be shown only once. Make sure to save it in a secure location.</p>
+          Your private key will be shown once. Save it securely!
         </div>
-        
-        <button @click="createWallet" class="create-button">
-          Create Wallet
+        <button class="btn-gold btn-lg" @click="createWallet" style="width:100%">
+          Generate Wallet
         </button>
+        <button class="btn-outline" @click="mode = ''" style="width:100%;margin-top:8px">Back</button>
       </div>
 
-      <!-- Restore Wallet -->
+      <!-- Restore flow -->
       <div v-if="mode === 'restore'" class="setup-form">
-        <div class="form-group">
-          <label>Private Key</label>
-          <input 
-            type="text"
-            v-model="privateKey"
-            placeholder="Enter your nsec private key"
-          >
-          <div class="error" v-if="error">
-            {{ error }}
-          </div>
-          <div class="hint">
-            Private key should start with nsec1
-          </div>
-        </div>
-        
-        <button 
-          @click="restoreWallet"
+        <input
+          class="input"
+          type="text"
+          v-model="privateKey"
+          placeholder="nsec1..."
+        />
+        <div v-if="error" class="error-msg">{{ error }}</div>
+        <button
+          class="btn-primary btn-lg"
           :disabled="!privateKey"
-          class="restore-button"
+          @click="restoreWallet"
+          style="width:100%;margin-top:12px"
         >
-          Restore Wallet
+          Restore
         </button>
+        <button class="btn-outline" @click="mode = ''" style="width:100%;margin-top:8px">Back</button>
       </div>
     </div>
 
     <!-- Private Key Modal -->
-    <base-modal
-      v-if="showPrivateKey"
-      title="Your Private Key"
-      @close="onPrivateKeyConfirmed"
-    >
-      <div class="private-key-display">
-        <p class="warning">Save this private key in a secure location. It will not be shown again!</p>
-        
-        <div class="key-container">
-          <code>{{ newPrivateKey }}</code>
-          <button @click="copyPrivateKey" class="copy-button">
-            <span class="material-icons">content_copy</span>
-          </button>
+    <div v-if="showPrivateKey" class="overlay">
+      <div class="setup-card casino-card-glow modal-card">
+        <h2 class="text-gold" style="margin-bottom:16px">Your Private Key</h2>
+        <p class="text-muted" style="font-size:0.85rem;margin-bottom:16px">
+          Save this key securely. It cannot be recovered!
+        </p>
+        <div class="key-box" @click="copyKey">
+          <code class="mono">{{ newPrivateKey }}</code>
+          <span class="copy-hint text-muted">click to copy</span>
         </div>
-
-        <div class="confirmation">
-          <label>
-            <input type="checkbox" v-model="hasBackedUp">
-            I have safely stored my private key
-          </label>
-        </div>
-
-        <button 
-          @click="onPrivateKeyConfirmed"
+        <label class="checkbox-label">
+          <input type="checkbox" v-model="hasBackedUp" />
+          I have safely stored my private key
+        </label>
+        <button
+          class="btn-gold btn-lg"
           :disabled="!hasBackedUp"
-          class="confirm-button"
+          @click="onConfirm"
+          style="width:100%;margin-top:16px"
         >
-          I've Saved My Key
+          Continue
         </button>
       </div>
-    </base-modal>
+    </div>
   </div>
 </template>
 
-<script>
-import { ref } from 'vue'
+<script lang="ts">
+import { defineComponent, ref } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
-import BaseModal from '@/components/BaseModal.vue'
 
-export default {
+export default defineComponent({
   name: 'SetupView',
-  components: {
-    BaseModal
-  },
   setup() {
     const store = useStore()
     const router = useRouter()
@@ -112,31 +94,28 @@ export default {
     const newPrivateKey = ref('')
     const hasBackedUp = ref(false)
 
-    const createWallet = async () => {
+    async function createWallet() {
       await store.dispatch('createNewWallet')
       newPrivateKey.value = store.getters.walletPrivateKeyEncoded
       showPrivateKey.value = true
     }
 
-    const restoreWallet = async () => {
+    async function restoreWallet() {
       try {
         await store.dispatch('restoreWallet', privateKey.value)
         router.push('/')
-      } catch (err) {
-        error.value = 'Invalid private key' + (err.cause ? `: ${err.cause}` : '')
+      } catch {
+        error.value = 'Invalid private key'
       }
     }
 
-    const copyPrivateKey = async () => {
+    async function copyKey() {
       try {
         await navigator.clipboard.writeText(newPrivateKey.value)
-        alert('Private key copied to clipboard!')
-      } catch (err) {
-        console.error('Failed to copy:', err)
-      }
+      } catch { /* ignore */ }
     }
 
-    const onPrivateKeyConfirmed = () => {
+    function onConfirm() {
       if (hasBackedUp.value) {
         showPrivateKey.value = false
         router.push('/')
@@ -144,156 +123,150 @@ export default {
     }
 
     return {
-      mode,
-      privateKey,
-      error,
-      showPrivateKey,
-      newPrivateKey,
-      hasBackedUp,
-      createWallet,
-      restoreWallet,
-      copyPrivateKey,
-      onPrivateKeyConfirmed
+      mode, privateKey, error,
+      showPrivateKey, newPrivateKey, hasBackedUp,
+      createWallet, restoreWallet, copyKey, onConfirm,
     }
-  }
-}
+  },
+})
 </script>
 
-<style lang="scss" scoped>
-.setup-view {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem;
-}
-
-.setup-container {
-  max-width: 800px;
+<style scoped>
+.setup-card {
+  max-width: 420px;
   width: 100%;
   text-align: center;
+  padding: 40px 32px;
+}
 
-  h1 {
-    margin-bottom: 3rem;
-  }
+.setup-title {
+  font-size: 1.4rem;
+  margin-bottom: 8px;
+}
+
+.setup-subtitle {
+  font-size: 0.9rem;
+  margin-bottom: 32px;
 }
 
 .setup-options {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 2rem;
-  margin-bottom: 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.option-card {
-  background: var(--card);
-  padding: 2rem;
-  border-radius: 1rem;
+.option-btn {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
   cursor: pointer;
   transition: all 0.2s;
-  
-  &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-  }
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  color: var(--text);
+}
 
-  .material-icons {
-    font-size: 3rem;
-    color: var(--primary);
-    margin-bottom: 1rem;
-  }
+.option-btn:hover {
+  border-color: var(--gold);
+  box-shadow: 0 0 15px var(--gold-glow);
+}
 
-  h2 {
-    margin-bottom: 0.5rem;
-  }
+.option-icon {
+  font-size: 1.5rem;
+  color: var(--gold);
+  width: 40px;
+  text-align: center;
+}
 
-  p {
-    color: var(--text-light);
-  }
+.option-label {
+  font-weight: 600;
+  display: block;
+}
+
+.option-desc {
+  font-size: 0.8rem;
+  display: block;
+  margin-top: 2px;
 }
 
 .setup-form {
-  max-width: 400px;
-  margin: 0 auto;
+  margin-top: 20px;
 }
 
 .warning-box {
-  background: #fef3c7;
-  color: #92400e;
-  padding: 1rem;
-  border-radius: 0.5rem;
-  margin-bottom: 2rem;
-  text-align: left;
-
-  h3 {
-    color: #92400e;
-    margin-bottom: 0.5rem;
-  }
+  background: rgba(255, 215, 0, 0.08);
+  border: 1px solid rgba(255, 215, 0, 0.2);
+  color: var(--gold);
+  padding: 14px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 0.85rem;
 }
 
-.form-group {
-  margin-bottom: 2rem;
-  text-align: left;
-
-  label {
-    display: block;
-    margin-bottom: 0.5rem;
-    font-weight: 500;
-  }
-
-  input {
-    width: 100%;
-    padding: 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
-    font-family: monospace;
-  }
-
-  .error {
-    color: var(--danger);
-    margin-top: 0.5rem;
-    font-size: 0.875rem;
-  }
-
-  .hint {
-    margin-top: 0.5rem;
-    font-size: 0.875rem;
-    color: var(--text-light);
-  }
+.error-msg {
+  color: var(--red);
+  font-size: 0.8rem;
+  margin-top: 8px;
 }
 
-.private-key-display {
-  .warning {
-    color: #92400e;
-    background: #fef3c7;
-    padding: 1rem;
-    border-radius: 0.5rem;
-    margin-bottom: 1.5rem;
-  }
-
-  .key-container {
-    background: var(--background);
-    padding: 1rem;
-    border-radius: 0.5rem;
-    font-family: monospace;
-    display: flex;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-    
-    code {
-      flex: 1;
-      word-break: break-all;
-    }
-  }
-
-  .confirmation {
-    margin-bottom: 1.5rem;
-    
-    label {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-  }
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
 }
-</style> 
+
+.modal-card {
+  animation: slideUp 0.3s ease;
+}
+
+.key-box {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+  word-break: break-all;
+}
+
+.key-box:hover {
+  border-color: var(--blue);
+}
+
+.key-box code {
+  font-size: 0.8rem;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.copy-hint {
+  font-size: 0.7rem;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  justify-content: center;
+}
+
+.checkbox-label input {
+  accent-color: var(--gold);
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+</style>

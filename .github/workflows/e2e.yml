@@ -1,0 +1,105 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [master, refactor/extract-coinflip-library]
+  pull_request:
+    branches: [master]
+
+jobs:
+  unit-tests:
+    name: Unit & Script Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install lib dependencies
+        working-directory: packages/lib
+        run: npm install --include=dev
+
+      - name: Type-check lib
+        working-directory: packages/lib
+        run: npx tsc --noEmit
+
+      - name: Build lib
+        working-directory: packages/lib
+        run: npm run build
+
+      - name: Install server dependencies
+        working-directory: packages/server
+        run: npm install --include=dev
+
+      - name: Type-check server
+        working-directory: packages/server
+        run: npx tsc --noEmit
+
+      - name: Install E2E test dependencies
+        working-directory: packages/e2e
+        run: npm install --include=dev
+
+      - name: Run unit tests (no regtest needed)
+        working-directory: packages/e2e
+        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="coinflip" -t "gameFromEvents|determineWinner|generateSecret|CoinflipSetupScript|CoinflipFinalScript|coinSelect|event type guards"
+
+  e2e-tests:
+    name: E2E Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Start regtest environment
+        run: |
+          cd arkade-regtest
+          chmod +x start-env.sh
+          ./start-env.sh
+        timeout-minutes: 10
+
+      - name: Wait for Ark server
+        run: |
+          echo "Waiting for Ark server to be ready..."
+          for i in $(seq 1 60); do
+            if curl -s http://localhost:7070/v1/info > /dev/null 2>&1; then
+              echo "Ark server is ready!"
+              curl -s http://localhost:7070/v1/info | head -c 200
+              echo
+              break
+            fi
+            echo "Attempt $i/60..."
+            sleep 5
+          done
+
+      - name: Install lib dependencies
+        working-directory: packages/lib
+        run: npm install --include=dev
+
+      - name: Build lib
+        working-directory: packages/lib
+        run: npm run build
+
+      - name: Install E2E test dependencies
+        working-directory: packages/e2e
+        run: npm install --include=dev
+
+      - name: Run E2E tests
+        working-directory: packages/e2e
+        env:
+          ARK_SERVER_URL: http://localhost:7070
+          ESPLORA_URL: http://localhost:3000
+        run: npx jest --runInBand --forceExit --testTimeout=120000 --ci
+
+      - name: Stop regtest environment
+        if: always()
+        run: |
+          cd arkade-regtest
+          chmod +x stop-env.sh
+          ./stop-env.sh || true

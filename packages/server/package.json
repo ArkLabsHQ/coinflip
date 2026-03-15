@@ -1,0 +1,28 @@
+{
+  "name": "arkade-coinflip-server",
+  "version": "0.1.0",
+  "description": "HTTP+SSE game coordination server for arkade-coinflip",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "arkade-coinflip": "file:../lib",
+    "@arkade-os/sdk": "^0.4.6",
+    "@scure/base": "^1.2.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.2",
+    "@types/node": "^22.19.15",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.7.2"
+  },
+  "license": "MIT"
+}

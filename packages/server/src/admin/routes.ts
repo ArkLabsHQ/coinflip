@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express'
 import path from 'path'
 import { getAllConfig, setConfig, getGames, getGameStats } from '../db'
-import { getHouseAddress, getHouseBalanceSats, getHousePubkeyHex, setHouseBalanceSats } from '../house-wallet'
+import { getHouseAddress, getHouseBoardingAddress, getHouseBalance, getHousePubkeyHex, getHouseVtxos } from '../house-wallet'
 
 const router = Router()
 
@@ -11,13 +11,19 @@ router.get('/', (_req: Request, res: Response) => {
 })
 
 // GET /api/status — balance, game counts, profit
-router.get('/api/status', (_req: Request, res: Response) => {
-  const stats = getGameStats()
-  res.json({
-    balance: getHouseBalanceSats(),
-    pubkey: getHousePubkeyHex(),
-    ...stats,
-  })
+router.get('/api/status', async (_req: Request, res: Response) => {
+  try {
+    const stats = getGameStats()
+    const balance = await getHouseBalance()
+    const pubkey = await getHousePubkeyHex()
+    res.json({
+      balance,
+      pubkey,
+      ...stats,
+    })
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
 })
 
 // GET /api/config — current configuration
@@ -98,24 +104,26 @@ router.get('/api/games', (req: Request, res: Response) => {
   })))
 })
 
-// GET /api/wallet — deposit address, balance
-router.get('/api/wallet', (_req: Request, res: Response) => {
-  res.json({
-    address: getHouseAddress(),
-    balance: getHouseBalanceSats(),
-    pubkey: getHousePubkeyHex(),
-  })
-})
-
-// POST /api/wallet/balance — manually set balance (for MVP testing)
-router.post('/api/wallet/balance', (req: Request, res: Response) => {
-  const { balance } = req.body
-  if (typeof balance !== 'number' || balance < 0) {
-    res.status(400).json({ error: 'balance must be a non-negative number' })
-    return
+// GET /api/wallet — addresses, balance, VTXOs
+router.get('/api/wallet', async (_req: Request, res: Response) => {
+  try {
+    const [address, boardingAddress, balance, pubkey, vtxos] = await Promise.all([
+      getHouseAddress(),
+      getHouseBoardingAddress(),
+      getHouseBalance(),
+      getHousePubkeyHex(),
+      getHouseVtxos(),
+    ])
+    res.json({
+      address,
+      boardingAddress,
+      balance,
+      pubkey,
+      vtxoCount: vtxos.length,
+    })
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
   }
-  setHouseBalanceSats(balance)
-  res.json({ balance: getHouseBalanceSats() })
 })
 
 export default router

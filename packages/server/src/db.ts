@@ -277,3 +277,35 @@ export function getGameStats(): { gamesToday: number; profit24h: number; totalGa
 
   return { gamesToday, profit24h, totalGames }
 }
+
+// SQLExecutor adapter for Ark SDK's SQLiteWalletRepository/SQLiteContractRepository.
+// Wraps sql.js (WASM) to match the SDK's driver-agnostic interface.
+export function getSqlExecutor() {
+  return {
+    run: async (sql: string, params?: unknown[]): Promise<void> => {
+      db.run(sql, params as (string | number | null | Uint8Array)[])
+      saveDb()
+    },
+    get: async <T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | undefined> => {
+      const stmt = db.prepare(sql)
+      if (params) stmt.bind(params as (string | number | null | Uint8Array)[])
+      if (stmt.step()) {
+        const row = stmt.getAsObject() as T
+        stmt.free()
+        return row
+      }
+      stmt.free()
+      return undefined
+    },
+    all: async <T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> => {
+      const results: T[] = []
+      const stmt = db.prepare(sql)
+      if (params) stmt.bind(params as (string | number | null | Uint8Array)[])
+      while (stmt.step()) {
+        results.push(stmt.getAsObject() as T)
+      }
+      stmt.free()
+      return results
+    },
+  }
+}

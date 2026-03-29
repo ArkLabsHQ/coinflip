@@ -1,80 +1,104 @@
 import { getHouseWallet, setHouseWallet } from './db'
-import { createHash, randomBytes } from 'crypto'
+import { createHash } from 'crypto'
+import type { IWallet, Identity } from '@arkade-os/sdk'
 
-let housePrivateKey: Uint8Array
-let housePublicKey: Uint8Array
-let houseBalance = 0
-let lockedBalance = 0
+let wallet: IWallet | null = null
+let identity: Identity | null = null
+
+const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'https://mutinynet.com/api'
 
 export async function initHouseWallet(): Promise<void> {
+  const { Wallet, SingleKey } = await import('@arkade-os/sdk')
+
   const existing = getHouseWallet()
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let singleKey: any
   if (existing) {
-    housePrivateKey = Buffer.from(existing.private_key_hex, 'hex')
-    housePublicKey = Buffer.from(existing.public_key_hex, 'hex')
+    singleKey = SingleKey.fromHex(existing.private_key_hex)
     console.log(`House wallet loaded: ${existing.public_key_hex.substring(0, 16)}...`)
   } else {
-    // Generate new keypair using secp256k1
-    const { getPublicKey } = await import('@noble/secp256k1')
-    const privKey = randomBytes(32)
-    const pubKey = getPublicKey(privKey, true) // compressed
+    singleKey = SingleKey.fromRandomBytes()
+    const privHex = singleKey.toHex()
+    const pubkey = await singleKey.compressedPublicKey()
+    const pubHex = Buffer.from(pubkey).toString('hex')
 
-    housePrivateKey = new Uint8Array(privKey)
-    housePublicKey = new Uint8Array(pubKey)
-
-    setHouseWallet(
-      Buffer.from(housePrivateKey).toString('hex'),
-      Buffer.from(housePublicKey).toString('hex')
-    )
-    console.log(`House wallet created: ${Buffer.from(housePublicKey).toString('hex').substring(0, 16)}...`)
+    setHouseWallet(privHex, pubHex)
+    console.log(`House wallet created: ${pubHex.substring(0, 16)}...`)
   }
 
-  // TODO: Initialize SDK Wallet for real VTXO management
-  // For MVP, house balance is tracked manually via admin deposits
-  houseBalance = 0
+  identity = singleKey
+
+  // Use SQLite storage backed by the same sql.js database for persistence
+  // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+  const { SQLiteWalletRepository, SQLiteContractRepository } = require('@arkade-os/sdk/repositories/sqlite')
+  const { getSqlExecutor } = await import('./db')
+  const executor = getSqlExecutor()
+
+  wallet = await Wallet.create({
+    identity: singleKey,
+    arkServerUrl: ARK_SERVER_URL,
+    esploraUrl: ESPLORA_URL,
+    storage: {
+      walletRepository: new SQLiteWalletRepository(executor),
+      contractRepository: new SQLiteContractRepository(executor),
+    },
+  })
+
+  const address = await wallet.getAddress()
+  const boardingAddress = await wallet.getBoardingAddress()
+  console.log(`Ark address: ${address}`)
+  console.log(`Boarding address: ${boardingAddress}`)
 }
 
-export function getHousePubkey(): Uint8Array {
-  return housePublicKey
+function requireWallet(): IWallet {
+  if (!wallet) throw new Error('House wallet not initialized')
+  return wallet
 }
 
-export function getHousePubkeyHex(): string {
-  return Buffer.from(housePublicKey).toString('hex')
+function requireIdentity(): Identity {
+  if (!identity) throw new Error('House wallet not initialized')
+  return identity
 }
 
-export function getHousePrivateKey(): Uint8Array {
-  return housePrivateKey
+export async function getHouseAddress(): Promise<string> {
+  return requireWallet().getAddress()
 }
 
-export function getHouseBalanceSats(): number {
-  return houseBalance
+export async function getHouseBoardingAddress(): Promise<string> {
+  return requireWallet().getBoardingAddress()
 }
 
-export function setHouseBalanceSats(balance: number): void {
-  houseBalance = balance
+export async function getHousePubkeyHex(): Promise<string> {
+  const pubkey = await requireIdentity().compressedPublicKey()
+  return Buffer.from(pubkey).toString('hex')
 }
 
-export function getLockedBalance(): number {
-  return lockedBalance
+export async function getHouseBalanceSats(): Promise<number> {
+  const balance = await requireWallet().getBalance()
+  return balance.available
 }
 
-export function addLockedBalance(amount: number): void {
-  lockedBalance += amount
+export async function getHouseBalance(): Promise<{
+  available: number
+  settled: number
+  preconfirmed: number
+  boarding: { confirmed: number; unconfirmed: number; total: number }
+  total: number
+}> {
+  const balance = await requireWallet().getBalance()
+  return {
+    available: balance.available,
+    settled: balance.settled,
+    preconfirmed: balance.preconfirmed,
+    boarding: balance.boarding,
+    total: balance.total,
+  }
 }
 
-export function releaseLockedBalance(amount: number): void {
-  lockedBalance = Math.max(0, lockedBalance - amount)
-}
-
-export function getAvailableBalance(): number {
-  return Math.max(0, houseBalance - lockedBalance)
-}
-
-export function getHouseAddress(): string {
-  // Generate a deposit address from the house pubkey
-  // For MVP, return a placeholder — real implementation uses ArkAddress from SDK
-  const pubkeyHex = Buffer.from(housePublicKey).toString('hex')
-  return `ark1house${pubkeyHex.substring(0, 32)}`
+export async function getHouseVtxos() {
+  return requireWallet().getVtxos()
 }
 
 export function hashSecret(secret: Uint8Array): string {

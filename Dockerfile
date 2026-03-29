@@ -3,7 +3,7 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Copy package files
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json* yarn.lock* ./
 
 # Install dependencies
 RUN npm install
@@ -22,15 +22,8 @@ FROM nginx:alpine
 # Copy built files
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Nginx config for SPA routing
-RUN printf 'server {\n\
-    listen 80;\n\
-    root /usr/share/nginx/html;\n\
-    index index.html;\n\
-    location / {\n\
-        try_files $uri $uri/ /index.html;\n\
-    }\n\
-}\n' > /etc/nginx/conf.d/default.conf
+# Nginx config: SPA routing + reverse proxy /api to server
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 
 EXPOSE 80
 

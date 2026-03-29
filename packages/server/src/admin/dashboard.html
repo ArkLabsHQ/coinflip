@@ -224,8 +224,16 @@
 
   <div class="stats">
     <div class="stat-card">
-      <div class="label">House Balance</div>
+      <div class="label">Available Balance</div>
       <div class="value balance" id="balance">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Settled / Preconfirmed</div>
+      <div class="value balance" id="balanceDetail">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Boarding (on-chain)</div>
+      <div class="value games" id="boardingBalance">—</div>
     </div>
     <div class="stat-card">
       <div class="label">Games Today</div>
@@ -235,19 +243,24 @@
       <div class="label">Profit (24h)</div>
       <div class="value profit" id="profit24h">—</div>
     </div>
+    <div class="stat-card">
+      <div class="label">VTXOs</div>
+      <div class="value games" id="vtxoCount">—</div>
+    </div>
   </div>
 
   <div class="section">
-    <h2>Deposit</h2>
-    <div class="address-box" onclick="copyAddress()">
+    <h2>Ark Address</h2>
+    <div class="address-box" onclick="copyText('houseAddress')">
       <span id="houseAddress">Loading...</span>
       <button class="copy-btn">Copy</button>
     </div>
-    <div class="balance-input">
-      <label>Set balance (sats):</label>
-      <input type="number" id="balanceInput" placeholder="100000" style="width:140px">
-      <button class="btn btn-small" onclick="setBalance()">Set</button>
+    <h2 style="margin-top:16px">Boarding Address (on-chain deposit)</h2>
+    <div class="address-box" onclick="copyText('boardingAddress')">
+      <span id="boardingAddress">Loading...</span>
+      <button class="copy-btn">Copy</button>
     </div>
+    <p style="color:var(--muted);font-size:0.75rem;margin-top:8px">Send BTC to the boarding address. After confirmation, the wallet will settle it into Ark VTXOs automatically.</p>
   </div>
 
   <div class="section">
@@ -315,10 +328,10 @@
     setTimeout(() => t.classList.remove('show'), 2000);
   }
 
-  async function copyAddress() {
-    const addr = document.getElementById('houseAddress').textContent;
-    await navigator.clipboard.writeText(addr);
-    showToast('Address copied!');
+  async function copyText(elementId) {
+    const text = document.getElementById(elementId).textContent;
+    await navigator.clipboard.writeText(text);
+    showToast('Copied!');
   }
 
   function renderTiers() {
@@ -361,22 +374,13 @@
     showToast('Config saved!');
   }
 
-  async function setBalance() {
-    const val = parseInt(document.getElementById('balanceInput').value);
-    if (isNaN(val) || val < 0) return;
-    await fetch('/api/wallet/balance', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ balance: val }),
-    });
-    showToast('Balance updated!');
-    loadStatus();
-  }
-
   async function loadStatus() {
     const res = await fetch('/api/status');
     const data = await res.json();
-    document.getElementById('balance').textContent = fmt(data.balance) + ' sats';
+    const bal = data.balance;
+    document.getElementById('balance').textContent = fmt(bal.available) + ' sats';
+    document.getElementById('balanceDetail').textContent = fmt(bal.settled) + ' / ' + fmt(bal.preconfirmed);
+    document.getElementById('boardingBalance').textContent = fmt(bal.boarding.total) + ' sats';
     document.getElementById('gamesToday').textContent = data.gamesToday;
     const profitEl = document.getElementById('profit24h');
     profitEl.textContent = (data.profit24h >= 0 ? '+' : '') + fmt(data.profit24h) + ' sats';
@@ -397,6 +401,8 @@
     const res = await fetch('/api/wallet');
     const data = await res.json();
     document.getElementById('houseAddress').textContent = data.address;
+    document.getElementById('boardingAddress').textContent = data.boardingAddress;
+    document.getElementById('vtxoCount').textContent = data.vtxoCount;
   }
 
   async function loadGames() {

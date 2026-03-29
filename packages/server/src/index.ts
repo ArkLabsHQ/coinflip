@@ -6,6 +6,12 @@
  * - ADMIN_PORT (3002): Admin dashboard + config API (internal only)
  */
 
+// Polyfill EventSource for Node.js (Ark SDK's ContractWatcher uses SSE)
+// eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+const { EventSource: NodeEventSource } = require('eventsource')
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+;(globalThis as any).EventSource = NodeEventSource
+
 import express from 'express'
 import cors from 'cors'
 import { initDb } from './db'

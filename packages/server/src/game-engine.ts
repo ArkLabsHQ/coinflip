@@ -13,10 +13,8 @@ import {
   expirePendingGames,
 } from './db'
 import {
+  getHouseBalanceSats,
   getHousePubkeyHex,
-  getAvailableBalance,
-  addLockedBalance,
-  releaseLockedBalance,
   hashSecret,
 } from './house-wallet'
 
@@ -85,14 +83,14 @@ function calculateRake(potAmount: number): number {
   return rakeAmount
 }
 
-export function handlePlay(req: PlayRequest): PlayResult {
+export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
   const tiers = getTiers()
   if (!tiers.includes(req.tier)) {
     throw new Error(`Invalid tier: ${req.tier}. Available: ${tiers.join(', ')}`)
   }
 
-  // Check house balance
-  const available = getAvailableBalance()
+  // Check house balance from real wallet
+  const available = await getHouseBalanceSats()
   if (available < req.tier) {
     throw new Error(`House balance insufficient. Available: ${available}, needed: ${req.tier}`)
   }
@@ -104,15 +102,12 @@ export function handlePlay(req: PlayRequest): PlayResult {
   }
 
   // House is the creator — generate secret
-  // Random choice: heads (15 bytes) or tails (16 bytes)
   const houseChoice = Math.random() < 0.5 ? 'heads' : 'tails'
   const houseSecret = generateSecret(houseChoice as 'heads' | 'tails')
   const houseHash = hashSecret(houseSecret)
 
   const gameId = uuidv4()
-
-  // Lock house funds
-  addLockedBalance(req.tier)
+  const housePubkey = await getHousePubkeyHex()
 
   // Store game
   dbCreateGame({
@@ -123,18 +118,14 @@ export function handlePlay(req: PlayRequest): PlayResult {
     playerHash: req.playerHash,
     houseSecretHex: Buffer.from(houseSecret).toString('hex'),
     // TODO: Build real setup/final transactions using lib's buildGameTransactions()
-    // For MVP, transactions are placeholder — real implementation needs:
-    // 1. House VTXOs as inputs (from SDK wallet)
-    // 2. Player VTXOs as inputs (from request)
-    // 3. CoinflipSetupScript + CoinflipFinalScript construction
-    // 4. Ark server pubkey + checkpoint
+    // Needs: house VTXOs as inputs, player VTXOs, CoinflipSetup/FinalScript, Ark server pubkey
     setupTxHex: 'TODO',
     finalTxHex: 'TODO',
   })
 
   return {
     gameId,
-    housePubkey: getHousePubkeyHex(),
+    housePubkey,
     houseHash,
     setupTx: 'TODO',
     finalTx: 'TODO',
@@ -143,7 +134,7 @@ export function handlePlay(req: PlayRequest): PlayResult {
   }
 }
 
-export function handleSign(gameId: string, req: SignRequest): SignResult {
+export async function handleSign(gameId: string, req: SignRequest): Promise<SignResult> {
   const game = getGame(gameId)
   if (!game) throw new Error(`Game not found: ${gameId}`)
   if (game.status !== 'pending') throw new Error(`Game is not pending: ${game.status}`)
@@ -169,9 +160,6 @@ export function handleSign(gameId: string, req: SignRequest): SignResult {
   const rakeAmount = calculateRake(potAmount)
   const payoutAmount = potAmount - rakeAmount
 
-  // Release locked balance
-  releaseLockedBalance(game.tier)
-
   // Build proof string
   const houseSecretSize = houseSecret.length
   const playerSecretSize = playerSecret.length
@@ -193,7 +181,6 @@ export function handleSign(gameId: string, req: SignRequest): SignResult {
   })
 
   // TODO: Submit setup tx to Ark server, execute winning final tx path
-  // For MVP, game resolution is recorded in DB only
 
   return {
     winner,
@@ -213,8 +200,6 @@ export function startExpiryTimer(): NodeJS.Timeout {
     const expired = expirePendingGames(5)
     if (expired > 0) {
       console.log(`Expired ${expired} pending games`)
-      // Release locked balances for expired games
-      // Note: in a full implementation, we'd track per-game locked amounts
     }
   }, 60_000)
 }

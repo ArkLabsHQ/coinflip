@@ -1,9 +1,6 @@
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
-
-# Install build dependencies for better-sqlite3
-RUN apk add --no-cache python3 make g++
 
 # Copy lib package first (server depends on it)
 COPY packages/lib/package.json packages/lib/package-lock.json* ./packages/lib/
@@ -20,11 +17,9 @@ COPY packages/server/ ./
 RUN npm run build
 
 # Production stage
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
-
-RUN apk add --no-cache python3 make g++
 
 # Copy lib
 COPY --from=builder /app/packages/lib/dist ./packages/lib/dist

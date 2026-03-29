@@ -1,5 +1,6 @@
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3001'
+// In Docker: nginx proxies /api to the server, so BASE_URL is empty.
+// In dev: override via VUE_APP_API_URL to point at the server directly.
+const BASE_URL = process.env.VUE_APP_API_URL || ''
 
 export interface TiersResponse {
   tiers: number[]

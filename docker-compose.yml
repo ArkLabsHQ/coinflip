@@ -6,14 +6,15 @@ services:
     volumes:
       - server-data:/app/data
     environment:
-      - ARK_SERVER_URL=https://mutinynet.arkade.sh
-      - ESPLORA_URL=https://mutinynet.com/api
+      - ARK_SERVER_URL=http://ark:7070
+      - ESPLORA_URL=http://chopsticks:3000
       - PUBLIC_PORT=3001
       - ADMIN_PORT=3002
       - DATA_DIR=/app/data
-    # Admin port exposed for local dev only — remove in production
     ports:
       - "3002:3002"
+    networks:
+      - nigiri
     restart: unless-stopped
 
   client:
@@ -27,7 +28,13 @@ services:
       - API_PORT=3001
     depends_on:
       - server
+    networks:
+      - nigiri
     restart: unless-stopped
+
+networks:
+  nigiri:
+    external: true
 
 volumes:
   server-data:

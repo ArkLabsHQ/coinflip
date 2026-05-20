@@ -22,3 +22,6 @@ pnpm-debug.log*
 dist/
 node_modules/
 .DS_Store
+
+# Superpowers docs
+docs/superpowers

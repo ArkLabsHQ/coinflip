@@ -29,10 +29,10 @@ export const Networks: Networks = {
 
 export class ArkAddress {
     readonly hrp: string;
-    readonly serverPubKey: Buffer;
-    readonly vtxoTapKey: Buffer;
+    readonly serverPubKey: Uint8Array;
+    readonly vtxoTapKey: Uint8Array;
 
-    constructor(hrp: string, serverPubKey: Buffer | Uint8Array, vtxoTapKey: Buffer | Uint8Array) {
+    constructor(hrp: string, serverPubKey: Uint8Array, vtxoTapKey: Uint8Array) {
         if (!['ark', 'tark', 'rark'].includes(hrp)) {
             throw new Error('Invalid HRP');
         }
@@ -44,11 +44,11 @@ export class ArkAddress {
         }
 
         this.hrp = hrp;
-        this.serverPubKey = Buffer.from(serverPubKey);
-        this.vtxoTapKey = Buffer.from(vtxoTapKey);
+        this.serverPubKey = new Uint8Array(serverPubKey);
+        this.vtxoTapKey = new Uint8Array(vtxoTapKey);
     }
 
-    static fromP2TR(hrp: string,pay: ReturnType<typeof p2tr>, serverPubKey: Buffer | Uint8Array): ArkAddress {
+    static fromP2TR(hrp: string,pay: ReturnType<typeof p2tr>, serverPubKey: Uint8Array): ArkAddress {
         if (!pay || !pay.tweakedPubkey) {
             throw new Error('Invalid P2TR output: missing output script');
         }
@@ -66,7 +66,7 @@ export class ArkAddress {
     static fromPubKey(pubKey: Bytes, serverPubKey: Bytes, network: string = 'testnet'): ArkAddress {
         const tapscripts = defaultVtxoTapscripts(pubKey, serverPubKey)
         const pay = vtxoScript(tapscripts)
-        const hrp = network === 'mainnet' ? 'ark' : network === 'testnet' ? 'tark' : 'rark';
+        const hrp = network === 'mainnet' ? 'ark' : 'tark';
         return new ArkAddress(hrp, serverPubKey, pay.tweakedPubkey);
     }
 
@@ -78,15 +78,14 @@ export class ArkAddress {
             throw new Error("missing vtxo tap public key");
         }
 
-        // Combine the two public keys
-        const combinedKey = Buffer.concat([
-            this.serverPubKey,
-            this.vtxoTapKey
-        ]);
+        // Version byte + two public keys (65 bytes total)
+        const combined = new Uint8Array(65);
+        combined[0] = 0x00; // v0 address format
+        combined.set(this.serverPubKey, 1);
+        combined.set(this.vtxoTapKey, 33);
 
-        // Convert to 5-bit words
-        const words = bech32m.toWords(Array.from(combinedKey));
-        // Encode with bech32m
+        // Convert to 5-bit words and encode
+        const words = bech32m.toWords(Array.from(combined));
         return bech32m.encode(this.hrp, words, 1023);
     }
 
@@ -103,13 +102,13 @@ export class ArkAddress {
             throw new Error("invalid prefix");
         }
 
-        // Convert from 5-bit words to bytes
+        // Convert from 5-bit words to bytes (first byte is version)
         const bytes = bech32m.fromWords(words);
 
-        // Split into Server and VTXO keys
-        const serverPubKey = bytes.slice(0, 32);
-        const vtxoTapKey = bytes.slice(32, 64);
+        // Skip version byte (first byte), split into Server and VTXO keys
+        const serverPubKey = new Uint8Array(bytes.slice(1, 33));
+        const vtxoTapKey = new Uint8Array(bytes.slice(33, 65));
 
-        return new ArkAddress(prefix, Buffer.from(serverPubKey), Buffer.from(vtxoTapKey));
+        return new ArkAddress(prefix, serverPubKey, vtxoTapKey);
     }
 }

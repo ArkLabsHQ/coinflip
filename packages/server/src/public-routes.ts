@@ -87,10 +87,12 @@ router.get('/api/game/:id', (req: Request, res: Response) => {
     res.status(404).json({ error: 'Game not found' })
     return
   }
+  const isResolved = game.status === 'resolved'
   res.json({
     id: game.id,
     tier: game.tier,
-    playerChoice: game.player_choice,
+    // Only reveal player choice after resolution to prevent information leakage
+    playerChoice: isResolved ? game.player_choice : undefined,
     winner: game.winner,
     rakeAmount: game.rake_amount,
     payoutAmount: game.payout_amount,

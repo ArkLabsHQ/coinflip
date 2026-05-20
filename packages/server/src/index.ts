@@ -55,8 +55,9 @@ async function main() {
 
   adminApp.use(adminRoutes)
 
-  adminApp.listen(ADMIN_PORT, () => {
-    console.log(`Admin dashboard listening on port ${ADMIN_PORT}`)
+  const ADMIN_HOST = process.env.ADMIN_HOST || '127.0.0.1'
+  adminApp.listen(ADMIN_PORT, ADMIN_HOST, () => {
+    console.log(`Admin dashboard listening on ${ADMIN_HOST}:${ADMIN_PORT}`)
   })
 }
 

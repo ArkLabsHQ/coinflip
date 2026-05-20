@@ -11,7 +11,8 @@
       :disabled="tier > maxAvailable || tier > playerBalance"
       @click="$emit('select', tier)"
     >
-      {{ formatTier(tier) }}
+      <span class="tier-amount">{{ formatTier(tier) }}</span>
+      <span class="tier-unit">sats</span>
     </button>
   </div>
 </template>
@@ -41,49 +42,69 @@ export default defineComponent({
 <style scoped>
 .tier-selector {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   justify-content: center;
   flex-wrap: wrap;
 }
 
 .tier-chip {
-  background: var(--bg);
-  border: 2px solid var(--gold);
-  color: var(--gold);
-  border-radius: 28px;
-  padding: 10px 24px;
+  background: var(--bg-elevated);
+  border: 1.5px solid var(--border-light);
+  color: var(--text-dim);
+  border-radius: 12px;
+  padding: 12px 22px;
   font-family: var(--font-mono);
   font-size: 1rem;
   font-weight: 700;
   cursor: pointer;
   transition: all 0.2s ease;
-  min-width: 80px;
+  min-width: 90px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.tier-unit {
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
 .tier-chip:hover:not(.disabled) {
-  background: rgba(255, 215, 0, 0.08);
-  box-shadow: 0 0 15px var(--gold-glow);
+  border-color: var(--gold);
+  color: var(--gold);
+  background: rgba(247, 201, 72, 0.06);
+  box-shadow: 0 0 16px var(--gold-glow);
 }
 
 .tier-chip.selected {
-  background: var(--gold);
+  background: linear-gradient(135deg, var(--gold) 0%, var(--gold-dim) 100%);
   color: var(--bg);
-  transform: scale(1.08);
-  box-shadow: 0 0 25px var(--gold-glow), 0 0 50px var(--gold-glow);
+  border-color: var(--gold);
+  transform: scale(1.06);
+  box-shadow: 0 4px 20px var(--gold-glow), 0 0 40px var(--gold-glow);
+}
+
+.tier-chip.selected .tier-unit {
+  color: rgba(8, 8, 13, 0.6);
 }
 
 .tier-chip.disabled {
-  opacity: 0.25;
+  opacity: 0.2;
   cursor: not-allowed;
-  border-color: var(--text-muted);
+  border-color: var(--border);
   color: var(--text-muted);
 }
 
 @media (max-width: 640px) {
   .tier-chip {
-    padding: 8px 18px;
+    padding: 10px 16px;
     font-size: 0.9rem;
-    min-width: 64px;
+    min-width: 72px;
   }
 }
 </style>

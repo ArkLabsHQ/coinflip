@@ -50,6 +50,7 @@ export async function initDb(): Promise<void> {
       player_pubkey TEXT NOT NULL,
       player_choice TEXT NOT NULL,
       player_hash TEXT NOT NULL,
+      player_change_address TEXT,
       house_secret_hex TEXT NOT NULL,
       player_secret_hex TEXT,
       winner TEXT,
@@ -137,6 +138,7 @@ export interface GameRow {
   player_pubkey: string
   player_choice: string
   player_hash: string
+  player_change_address: string | null
   house_secret_hex: string
   player_secret_hex: string | null
   winner: string | null
@@ -155,14 +157,15 @@ export function createGame(game: {
   playerPubkey: string
   playerChoice: string
   playerHash: string
+  playerChangeAddress?: string
   houseSecretHex: string
   setupTxHex?: string
   finalTxHex?: string
 }): void {
   db.run(
-    `INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, setup_tx_hex, final_tx_hex)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [game.id, game.tier, game.playerPubkey, game.playerChoice, game.playerHash, game.houseSecretHex, game.setupTxHex || null, game.finalTxHex || null]
+    `INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, player_change_address, house_secret_hex, setup_tx_hex, final_tx_hex)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [game.id, game.tier, game.playerPubkey, game.playerChoice, game.playerHash, game.playerChangeAddress || null, game.houseSecretHex, game.setupTxHex || null, game.finalTxHex || null]
   )
   saveDb()
 }
@@ -262,8 +265,8 @@ export function getGameStats(): { gamesToday: number; profit24h: number; totalGa
 
   stmt = db.prepare(`
     SELECT COALESCE(SUM(
-      CASE WHEN winner = 'house' THEN tier - rake_amount
-           WHEN winner = 'player' THEN -tier + rake_amount
+      CASE WHEN winner = 'house' THEN tier
+           WHEN winner = 'player' THEN rake_amount - tier
            ELSE 0 END
     ), 0) as profit FROM games
     WHERE status = 'resolved' AND created_at > datetime('now', '-1 day')

@@ -4,7 +4,7 @@
     <div class="casino-card-glow history-card">
       <GameHistoryList :games="games" />
     </div>
-    <router-link to="/" class="btn-outline back-btn">Back to Play</router-link>
+    <router-link to="/" class="btn-outline">Back to Play</router-link>
   </div>
 </template>
 
@@ -33,23 +33,22 @@ export default defineComponent({
 
 <style scoped>
 .history-page {
-  max-width: 600px;
+  max-width: 560px;
   margin: 0 auto;
   gap: 20px;
 }
 
 .page-title {
-  color: var(--gold);
-  font-size: 1.2rem;
-  letter-spacing: 2px;
+  color: var(--text);
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 1px;
   text-align: center;
 }
 
 .history-card {
   width: 100%;
-}
-
-.back-btn {
-  margin-top: 8px;
+  padding: 0;
+  overflow: hidden;
 }
 </style>

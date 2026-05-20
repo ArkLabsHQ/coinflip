@@ -1,19 +1,30 @@
 <template>
   <div class="page-centered">
     <div class="setup-card casino-card-glow">
-      <h1 class="setup-title">Welcome to <span class="text-gold">Arkade Coinflip</span></h1>
+      <div class="setup-brand">
+        <span class="brand-icon">&#x20BF;</span>
+      </div>
+      <h1 class="setup-title">Arkade Coinflip</h1>
       <p class="setup-subtitle text-muted">Trustless Bitcoin coin flips on Ark</p>
 
       <div class="setup-options" v-if="!mode">
         <button class="option-btn" @click="mode = 'create'">
-          <span class="option-icon">+</span>
-          <span class="option-label">Create New Wallet</span>
-          <span class="option-desc text-muted">Generate a fresh keypair</span>
+          <div class="option-icon-wrap">
+            <span class="option-icon">+</span>
+          </div>
+          <div class="option-text">
+            <span class="option-label">Create New Wallet</span>
+            <span class="option-desc">Generate a fresh keypair</span>
+          </div>
         </button>
         <button class="option-btn" @click="mode = 'restore'">
-          <span class="option-icon">&#8634;</span>
-          <span class="option-label">Restore Wallet</span>
-          <span class="option-desc text-muted">Import from nsec key</span>
+          <div class="option-icon-wrap">
+            <span class="option-icon">&#8634;</span>
+          </div>
+          <div class="option-text">
+            <span class="option-label">Restore Wallet</span>
+            <span class="option-desc">Import from nsec key</span>
+          </div>
         </button>
       </div>
 
@@ -25,55 +36,40 @@
         <button class="btn-gold btn-lg" @click="createWallet" style="width:100%">
           Generate Wallet
         </button>
-        <button class="btn-outline" @click="mode = ''" style="width:100%;margin-top:8px">Back</button>
+        <button class="btn-outline" @click="mode = ''" style="width:100%">Back</button>
       </div>
 
       <!-- Restore flow -->
       <div v-if="mode === 'restore'" class="setup-form">
-        <input
-          class="input"
-          type="text"
-          v-model="privateKey"
-          placeholder="nsec1..."
-        />
+        <input class="input" type="text" v-model="privateKey" placeholder="nsec1..." />
         <div v-if="error" class="error-msg">{{ error }}</div>
-        <button
-          class="btn-primary btn-lg"
-          :disabled="!privateKey"
-          @click="restoreWallet"
-          style="width:100%;margin-top:12px"
-        >
+        <button class="btn-primary btn-lg" :disabled="!privateKey" @click="restoreWallet" style="width:100%">
           Restore
         </button>
-        <button class="btn-outline" @click="mode = ''" style="width:100%;margin-top:8px">Back</button>
+        <button class="btn-outline" @click="mode = ''" style="width:100%">Back</button>
       </div>
     </div>
 
     <!-- Private Key Modal -->
-    <div v-if="showPrivateKey" class="overlay">
-      <div class="setup-card casino-card-glow modal-card">
-        <h2 class="text-gold" style="margin-bottom:16px">Your Private Key</h2>
-        <p class="text-muted" style="font-size:0.85rem;margin-bottom:16px">
-          Save this key securely. It cannot be recovered!
-        </p>
-        <div class="key-box" @click="copyKey">
-          <code class="mono">{{ newPrivateKey }}</code>
-          <span class="copy-hint text-muted">click to copy</span>
+    <transition name="fade">
+      <div v-if="showPrivateKey" class="overlay">
+        <div class="setup-card casino-card-glow modal-card">
+          <h2 class="modal-title text-gold">Your Private Key</h2>
+          <p class="modal-desc text-muted">Save this key securely. It cannot be recovered!</p>
+          <div class="key-box" @click="copyKey">
+            <code class="mono">{{ newPrivateKey }}</code>
+            <span class="key-hint">Click to copy</span>
+          </div>
+          <label class="checkbox-label">
+            <input type="checkbox" v-model="hasBackedUp" />
+            I have safely stored my private key
+          </label>
+          <button class="btn-gold btn-lg" :disabled="!hasBackedUp" @click="onConfirm" style="width:100%">
+            Continue
+          </button>
         </div>
-        <label class="checkbox-label">
-          <input type="checkbox" v-model="hasBackedUp" />
-          I have safely stored my private key
-        </label>
-        <button
-          class="btn-gold btn-lg"
-          :disabled="!hasBackedUp"
-          @click="onConfirm"
-          style="width:100%;margin-top:16px"
-        >
-          Continue
-        </button>
       </div>
-    </div>
+    </transition>
   </div>
 </template>
 
@@ -133,33 +129,53 @@ export default defineComponent({
 
 <style scoped>
 .setup-card {
-  max-width: 420px;
+  max-width: 440px;
   width: 100%;
   text-align: center;
-  padding: 40px 32px;
+  padding: 44px 36px;
+}
+
+.setup-brand {
+  margin-bottom: 20px;
+}
+
+.brand-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  font-size: 1.8rem;
+  font-weight: 800;
+  color: var(--gold);
+  background: rgba(247, 201, 72, 0.08);
+  border: 1.5px solid rgba(247, 201, 72, 0.15);
+  border-radius: 16px;
 }
 
 .setup-title {
-  font-size: 1.4rem;
-  margin-bottom: 8px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: var(--text);
 }
 
 .setup-subtitle {
   font-size: 0.9rem;
-  margin-bottom: 32px;
+  margin-bottom: 36px;
 }
 
 .setup-options {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .option-btn {
   background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 20px;
+  border: 1px solid var(--border-light);
+  border-radius: 14px;
+  padding: 18px 20px;
   cursor: pointer;
   transition: all 0.2s;
   text-align: left;
@@ -171,85 +187,117 @@ export default defineComponent({
 
 .option-btn:hover {
   border-color: var(--gold);
-  box-shadow: 0 0 15px var(--gold-glow);
+  background: rgba(247, 201, 72, 0.03);
+  box-shadow: 0 0 16px var(--gold-glow);
+}
+
+.option-icon-wrap {
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(247, 201, 72, 0.08);
+  border-radius: 10px;
+  flex-shrink: 0;
 }
 
 .option-icon {
-  font-size: 1.5rem;
+  font-size: 1.3rem;
   color: var(--gold);
-  width: 40px;
-  text-align: center;
+}
+
+.option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .option-label {
   font-weight: 600;
-  display: block;
+  font-size: 0.95rem;
 }
 
 .option-desc {
   font-size: 0.8rem;
-  display: block;
-  margin-top: 2px;
+  color: var(--text-muted);
 }
 
 .setup-form {
-  margin-top: 20px;
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .warning-box {
-  background: rgba(255, 215, 0, 0.08);
-  border: 1px solid rgba(255, 215, 0, 0.2);
+  background: rgba(247, 201, 72, 0.06);
+  border: 1px solid rgba(247, 201, 72, 0.12);
   color: var(--gold);
-  padding: 14px;
-  border-radius: 8px;
-  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 10px;
   font-size: 0.85rem;
+  line-height: 1.4;
 }
 
 .error-msg {
   color: var(--red);
   font-size: 0.8rem;
-  margin-top: 8px;
 }
 
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.85);
+  background: rgba(0, 0, 0, 0.80);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
   padding: 16px;
+  backdrop-filter: blur(4px);
 }
 
 .modal-card {
   animation: slideUp 0.3s ease;
 }
 
+.modal-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.modal-desc {
+  font-size: 0.85rem;
+  margin-bottom: 16px;
+}
+
 .key-box {
   background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
   padding: 16px;
   margin-bottom: 16px;
   cursor: pointer;
-  transition: border-color 0.2s;
+  transition: all 0.2s;
   word-break: break-all;
 }
 
 .key-box:hover {
   border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-glow);
 }
 
 .key-box code {
   font-size: 0.8rem;
   display: block;
   margin-bottom: 8px;
+  line-height: 1.5;
 }
 
-.copy-hint {
+.key-hint {
   font-size: 0.7rem;
+  color: var(--text-muted);
 }
 
 .checkbox-label {
@@ -259,14 +307,17 @@ export default defineComponent({
   font-size: 0.85rem;
   color: var(--text-muted);
   justify-content: center;
+  margin-bottom: 4px;
 }
 
 .checkbox-label input {
   accent-color: var(--gold);
+  width: 16px;
+  height: 16px;
 }
 
 @keyframes slideUp {
-  from { opacity: 0; transform: translateY(20px); }
+  from { opacity: 0; transform: translateY(16px); }
   to { opacity: 1; transform: translateY(0); }
 }
 </style>

@@ -30,7 +30,7 @@ export default createStore<State>({
     walletBalance: 0,
     btcPrice: 0,
     ark: {
-      server: localStorage.getItem('ark_server') || 'https://master.mutinynet.arklabs.to',
+      server: localStorage.getItem('ark_server') || 'http://localhost:7070',
       status: 'disconnected',
       lastError: null,
       info: null

@@ -1,44 +1,52 @@
 <template>
   <div class="page play-page">
-    <h1 class="title">ARKADE COINFLIP</h1>
-
-    <CoinFlip :state="coinState" />
-
-    <div class="section-label">PICK YOUR BET</div>
-    <TierSelector
-      :tiers="tiers"
-      :selected-tier="selectedTier"
-      :max-available="maxAvailable"
-      :player-balance="playerBalance"
-      @select="selectedTier = $event"
-    />
-
-    <div class="section-label">PICK YOUR SIDE</div>
-    <div class="side-selector">
-      <button
-        class="side-btn"
-        :class="{ selected: selectedSide === 'heads' }"
-        @click="selectedSide = 'heads'"
-      >
-        HEADS
-      </button>
-      <button
-        class="side-btn"
-        :class="{ selected: selectedSide === 'tails' }"
-        @click="selectedSide = 'tails'"
-      >
-        TAILS
-      </button>
+    <div class="coin-area">
+      <CoinFlip :state="coinState" />
     </div>
 
-    <button
-      class="flip-btn"
-      :class="{ active: canFlip }"
-      :disabled="!canFlip || isFlipping"
-      @click="doFlip"
-    >
-      {{ isFlipping ? 'FLIPPING...' : 'FLIP IT' }}
-    </button>
+    <div class="controls">
+      <div class="control-group">
+        <div class="control-label">BET AMOUNT</div>
+        <TierSelector
+          :tiers="tiers"
+          :selected-tier="selectedTier"
+          :max-available="maxAvailable"
+          :player-balance="playerBalance"
+          @select="selectedTier = $event"
+        />
+      </div>
+
+      <div class="control-group">
+        <div class="control-label">YOUR CALL</div>
+        <div class="side-selector">
+          <button
+            class="side-btn"
+            :class="{ selected: selectedSide === 'heads' }"
+            @click="selectedSide = 'heads'"
+          >
+            <span class="side-icon">&#x20BF;</span>
+            HEADS
+          </button>
+          <button
+            class="side-btn"
+            :class="{ selected: selectedSide === 'tails' }"
+            @click="selectedSide = 'tails'"
+          >
+            <span class="side-icon flipped">&#x20BF;</span>
+            TAILS
+          </button>
+        </div>
+      </div>
+
+      <button
+        class="flip-btn"
+        :class="{ active: canFlip }"
+        :disabled="!canFlip || isFlipping"
+        @click="doFlip"
+      >
+        {{ isFlipping ? 'FLIPPING...' : 'FLIP IT' }}
+      </button>
+    </div>
 
     <div v-if="error" class="error-toast">{{ error }}</div>
 
@@ -100,14 +108,12 @@ export default defineComponent({
 
       try {
         const pubkey = store.state.wallet.publicKey
-        // Generate player secret: 15 bytes for heads, 16 bytes for tails
         const secretLen = selectedSide.value === 'heads' ? 15 : 16
         const secretBytes = new Uint8Array(secretLen)
         crypto.getRandomValues(secretBytes)
         const secretHex = Array.from(secretBytes).map(b => b.toString(16).padStart(2, '0')).join('')
         const playerHash = await createHash(secretBytes)
 
-        // Step 1: Create game
         const playResult = await play(
           selectedTier.value,
           selectedSide.value,
@@ -115,7 +121,6 @@ export default defineComponent({
           playerHash,
         )
 
-        // Step 2: Sign and resolve
         const signResult = await sign(
           playResult.gameId,
           [],
@@ -123,11 +128,9 @@ export default defineComponent({
           secretHex,
         )
 
-        // Show result
         coinState.value = signResult.winner === 'player' ? selectedSide.value : (selectedSide.value === 'heads' ? 'tails' : 'heads')
         gameResult.value = signResult
 
-        // Save to local history
         const history = JSON.parse(localStorage.getItem('gameHistory') || '[]')
         history.unshift({
           id: playResult.gameId,
@@ -174,87 +177,136 @@ export default defineComponent({
 
 <style scoped>
 .play-page {
-  gap: 24px;
-  max-width: 500px;
+  gap: 0;
+  max-width: 520px;
   margin: 0 auto;
-  padding-top: 32px;
+  padding-top: 20px;
 }
 
-.title {
-  color: var(--gold);
-  font-size: 1.3rem;
-  letter-spacing: 4px;
-  text-align: center;
-  margin-bottom: 8px;
+.coin-area {
+  padding: 24px 0 20px;
 }
 
-.section-label {
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  width: 100%;
+}
+
+.control-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.control-label {
   color: var(--text-muted);
-  font-size: 0.75rem;
+  font-size: 0.7rem;
+  font-weight: 600;
   letter-spacing: 2px;
   text-transform: uppercase;
-  text-align: center;
 }
 
 .side-selector {
   display: flex;
-  gap: 16px;
+  gap: 12px;
   justify-content: center;
+  width: 100%;
+  max-width: 340px;
 }
 
 .side-btn {
-  background: var(--bg-card);
-  border: 2px solid var(--border);
-  color: var(--text);
-  border-radius: 12px;
-  padding: 16px 40px;
-  font-size: 1.1rem;
+  flex: 1;
+  background: var(--bg-elevated);
+  border: 1.5px solid var(--border-light);
+  color: var(--text-dim);
+  border-radius: 14px;
+  padding: 18px 16px;
+  font-size: 0.9rem;
   font-weight: 700;
-  letter-spacing: 2px;
+  letter-spacing: 1.5px;
   cursor: pointer;
   transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.side-icon {
+  font-size: 1.6rem;
+  line-height: 1;
+  color: var(--gold);
+  opacity: 0.5;
+  transition: opacity 0.2s;
+}
+
+.side-icon.flipped {
+  transform: scaleX(-1);
+  filter: brightness(0.8);
 }
 
 .side-btn:hover {
   border-color: var(--blue);
+  color: var(--text);
+}
+
+.side-btn:hover .side-icon {
+  opacity: 0.8;
 }
 
 .side-btn.selected {
   border-color: var(--blue);
-  background: rgba(0, 212, 255, 0.1);
+  background: rgba(56, 189, 248, 0.08);
   color: var(--blue);
-  box-shadow: 0 0 20px var(--blue-glow);
+  box-shadow: 0 0 20px var(--blue-glow), inset 0 0 20px rgba(56, 189, 248, 0.03);
+}
+
+.side-btn.selected .side-icon {
+  opacity: 1;
+  color: var(--blue);
 }
 
 .flip-btn {
-  background: var(--bg-card);
-  border: 2px solid var(--text-muted);
+  width: 100%;
+  max-width: 340px;
+  align-self: center;
+  background: var(--bg-elevated);
+  border: 2px solid var(--border-light);
   color: var(--text-muted);
-  border-radius: 12px;
-  padding: 18px 56px;
-  font-size: 1.2rem;
+  border-radius: 14px;
+  padding: 18px 48px;
+  font-size: 1.1rem;
   font-weight: 800;
   letter-spacing: 3px;
   cursor: not-allowed;
-  transition: all 0.3s ease;
-  margin-top: 8px;
+  transition: all 0.25s ease;
+  margin-top: 4px;
 }
 
 .flip-btn.active {
-  border-color: var(--blue);
-  color: var(--blue);
+  border-color: var(--gold);
+  color: var(--gold);
   cursor: pointer;
-  box-shadow: 0 0 20px var(--blue-glow);
+  background: rgba(247, 201, 72, 0.06);
+  box-shadow: 0 0 20px var(--gold-glow);
 }
 
 .flip-btn.active:hover {
-  background: var(--blue);
+  background: linear-gradient(135deg, var(--gold) 0%, var(--gold-dim) 100%);
   color: var(--bg);
-  box-shadow: 0 0 40px var(--blue-glow), 0 0 80px var(--blue-glow);
+  box-shadow: 0 4px 32px var(--gold-glow), 0 0 60px var(--gold-glow);
+  transform: translateY(-1px);
+}
+
+.flip-btn.active:active {
+  transform: translateY(0) scale(0.99);
 }
 
 .flip-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
@@ -266,15 +318,17 @@ export default defineComponent({
   background: var(--red);
   color: #fff;
   padding: 10px 24px;
-  border-radius: 8px;
+  border-radius: 10px;
   font-size: 0.85rem;
   font-weight: 600;
   z-index: 999;
   animation: slideUp 0.3s ease;
+  box-shadow: 0 4px 20px var(--red-glow);
 }
 
 @media (max-width: 640px) {
-  .side-btn { padding: 12px 28px; font-size: 1rem; }
-  .flip-btn { padding: 14px 40px; font-size: 1rem; }
+  .side-btn { padding: 14px 12px; font-size: 0.85rem; }
+  .flip-btn { padding: 16px 36px; font-size: 1rem; }
+  .side-icon { font-size: 1.3rem; }
 }
 </style>

@@ -1,4 +1,5 @@
-import { nip19 } from 'nostr-tools'
+import { bech32 } from 'bech32'
+import { hex } from '@scure/base'
 import { NostrEvent } from '@/types/nostr'
 import { GameEvent } from './game'
 
@@ -14,5 +15,6 @@ export function parseGameEvent(event: NostrEvent): GameEvent {
 }
 
 export function privateKeyToNsec(privateKey: string): string {
-  return nip19.nsecEncode(privateKey)
-} 
+  const words = bech32.toWords(Array.from(hex.decode(privateKey)))
+  return bech32.encode('nsec', words, 1023)
+}

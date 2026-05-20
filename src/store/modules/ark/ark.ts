@@ -1,19 +1,15 @@
 import { Module } from 'vuex'
 import type { State as RootState } from '@/store'
-import { ArkAddress } from './address'
-import { defaultVtxoTapscripts } from '@/utils/taproot'
-import { hex } from '@scure/base'
+import { Wallet, SingleKey, type WalletBalance, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { initSwaps, destroySwaps } from '@/services/boltz'
 
 export interface ArkServerInfo {
   pubkey: string
-  roundLifetime: string
-  unilateralExitDelay: string
-  roundInterval: string
   network: string
   dust: string
-  boardingDescriptorTemplate: string
-  vtxoDescriptorTemplates: string[]
-  forfeitAddress: string
+  unilateralExitDelay: string
+  boardingExitDelay?: string
+  sessionDuration?: string
 }
 
 export interface ArkVTXO {
@@ -21,20 +17,38 @@ export interface ArkVTXO {
     txid: string
     vout: number
   }
-  redeemTx?: string;
-  amount: string;
-  tapscripts: string[];
+  redeemTx?: string
+  amount: string
+  tapscripts: string[]
+  isPreconfirmed?: boolean
+}
+
+export interface BoardingUtxo {
+  outpoint: { txid: string; vout: number }
+  amount: string
+  confirmations?: number
 }
 
 interface ArkState {
   server: string
+  esplora: string
   status: 'disconnected' | 'connecting' | 'connected' | 'error'
   lastError: Error | null
   info: ArkServerInfo | null
   vtxos: ArkVTXO[]
+  boardingUtxos: BoardingUtxo[]
+  walletBalance: WalletBalance | null
+  arkAddress: string | null
+  boardingAddress: string | null
 }
 
-// Get cached server info from localStorage
+// SDK wallet instance (kept outside Vuex state to avoid reactivity issues with complex objects)
+let sdkWallet: Wallet | null = null
+
+export function getSDKWallet(): Wallet | null {
+  return sdkWallet
+}
+
 const getCachedServerInfo = (): ArkServerInfo | null => {
   const cached = localStorage.getItem('ark_server_info')
   return cached ? JSON.parse(cached) : null
@@ -44,11 +58,16 @@ const ark: Module<ArkState, RootState> = {
   namespaced: true,
 
   state: {
-    server: localStorage.getItem('ark_server') || 'https://mutinynet.arkade.sh',
+    server: localStorage.getItem('ark_server') || 'http://localhost:7070',
+    esplora: localStorage.getItem('ark_esplora') || 'http://localhost:3000',
     status: 'disconnected',
     lastError: null,
     info: getCachedServerInfo(),
-    vtxos: []
+    vtxos: [],
+    boardingUtxos: [],
+    walletBalance: null,
+    arkAddress: null,
+    boardingAddress: null
   },
 
   mutations: {
@@ -62,13 +81,28 @@ const ark: Module<ArkState, RootState> = {
     SET_ERROR(state, error: Error | null) {
       state.lastError = error
     },
-    SET_INFO(state, info: ArkServerInfo) {
+    SET_INFO(state, info: ArkServerInfo | null) {
       state.info = info
-      // Cache the server info
-      localStorage.setItem('ark_server_info', JSON.stringify(info))
+      if (info) {
+        localStorage.setItem('ark_server_info', JSON.stringify(info))
+      } else {
+        localStorage.removeItem('ark_server_info')
+      }
     },
     SET_VTXOS(state, vtxos: ArkVTXO[]) {
       state.vtxos = vtxos
+    },
+    SET_BOARDING_UTXOS(state, utxos: BoardingUtxo[]) {
+      state.boardingUtxos = utxos
+    },
+    SET_WALLET_BALANCE(state, balance: WalletBalance | null) {
+      state.walletBalance = balance
+    },
+    SET_ARK_ADDRESS(state, address: string | null) {
+      state.arkAddress = address
+    },
+    SET_BOARDING_ADDRESS(state, address: string | null) {
+      state.boardingAddress = address
     }
   },
 
@@ -77,156 +111,157 @@ const ark: Module<ArkState, RootState> = {
       commit('SET_SERVER', server)
     },
 
-    async checkConnection({ commit, state, dispatch }) {
+    async checkConnection({ commit, state, rootState, dispatch }) {
       try {
         commit('SET_STATUS', 'connecting')
+
+        const privateKey = rootState.wallet.privateKey
+        if (!privateKey) {
+          throw new Error('No wallet key available')
+        }
+
+        // Create SDK wallet
+        const identity = SingleKey.fromHex(privateKey)
+        const wallet = await Wallet.create({
+          identity,
+          arkServerUrl: state.server,
+          esploraUrl: state.esplora,
+        })
+
+        sdkWallet = wallet
+
+        // Get server info via REST for display
         const response = await fetch(`${state.server}/v1/info`, {
           signal: AbortSignal.timeout(5000)
         })
-        if (response.ok) {
-          const info = await response.json()
-          
-          if (!info.pubkey || !info.network) {
-            throw new Error('Invalid server info: missing required fields')
-          }
-
-          commit('SET_STATUS', 'connected')
-          commit('SET_ERROR', null)
-          commit('SET_INFO', info)
-
-          await dispatch('fetchVTXOs')
-
-          return info
-        } else {
-          const errorText = await response.text()
-          throw new Error(`Server returned ${response.status}: ${errorText}`)
+        if (!response.ok) {
+          throw new Error(`Server returned ${response.status}`)
         }
+        const raw = await response.json()
+        const info: ArkServerInfo = {
+          pubkey: raw.pubkey || raw.signerPubkey,
+          network: raw.network,
+          dust: raw.dust || raw.utxoMinAmount,
+          unilateralExitDelay: raw.unilateralExitDelay,
+          boardingExitDelay: raw.boardingExitDelay,
+          sessionDuration: raw.sessionDuration,
+        }
+
+        commit('SET_INFO', info)
+
+        // Get addresses from SDK
+        const arkAddress = await wallet.getAddress()
+        const boardingAddress = await wallet.getBoardingAddress()
+        commit('SET_ARK_ADDRESS', arkAddress)
+        commit('SET_BOARDING_ADDRESS', boardingAddress)
+
+        commit('SET_STATUS', 'connected')
+        commit('SET_ERROR', null)
+
+        // Initialize swap service (Lightning + chain swaps via Boltz)
+        try {
+          const boltzApi = localStorage.getItem('boltz_api') || (info.network === 'regtest' ? 'http://localhost:9069' : undefined)
+          await initSwaps(wallet, boltzApi)
+        } catch (swapErr) {
+          console.warn('Swap service unavailable:', swapErr)
+        }
+
+        await dispatch('refreshBalance')
+
+        return info
       } catch (error) {
         console.error('Failed to connect to Ark server:', error)
+        await destroySwaps().catch(() => {})
+        sdkWallet = null
         commit('SET_STATUS', 'error')
-        commit('SET_ERROR', new Error(`Failed to connect to Ark server: ${(error as Error).message}`))
+        commit('SET_ERROR', new Error(`Failed to connect: ${(error as Error).message}`))
         commit('SET_INFO', null)
-        localStorage.removeItem('ark_server_info')
+        commit('SET_ARK_ADDRESS', null)
+        commit('SET_BOARDING_ADDRESS', null)
         return null
       }
     },
 
-    async fetchVTXOs({ commit, state, getters }) {
-      const address = getters.address
-      if (!address || state.status !== 'connected') return;
-      
+    async refreshBalance({ commit, state }) {
+      if (!sdkWallet || state.status !== 'connected') return
+
       try {
-        const response = await fetch(`${state.server}/v1/vtxos/${address}`);
-        if (response.ok) {
-          const data = await response.json();
-          const spendable = data['spendableVtxos']
+        const balance = await sdkWallet.getBalance()
+        commit('SET_WALLET_BALANCE', balance)
 
-          const defaultTapscripts = defaultVtxoTapscripts(getters.walletPublicKey, hex.decode(state.info!.pubkey.slice(2)))
-
-          const vtxos = spendable.map((vtxo: ArkVTXO) => ({
-            outpoint: vtxo.outpoint,
-            amount: vtxo.amount,
-            tapscripts: vtxo.tapscripts || defaultTapscripts
+        // Also fetch VTXOs for detailed display
+        const vtxos = await sdkWallet.getVtxos()
+        commit('SET_VTXOS', vtxos
+          .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
+          .map((v: ExtendedVirtualCoin) => ({
+            outpoint: { txid: v.txid, vout: v.vout },
+            amount: String(v.value),
+            tapscripts: [],
+            isPreconfirmed: v.virtualStatus.state === 'preconfirmed',
           }))
+        )
 
-          commit('SET_VTXOS', vtxos);
-          return spendable;
-        } else {
-          const errorText = await response.text();
-          throw new Error(`Server returned ${response.status}: ${errorText}`);
-        }
+        // Fetch boarding UTXOs
+        const boardingUtxos = await sdkWallet.getBoardingUtxos()
+        commit('SET_BOARDING_UTXOS', boardingUtxos.map((u) => ({
+          outpoint: { txid: u.txid, vout: u.vout },
+          amount: String(u.value),
+          confirmations: u.status.confirmed && u.status.block_height ? u.status.block_height : 0,
+        })))
       } catch (error) {
-        console.error('Failed to fetch VTXOs:', error);
-        return null;
+        console.error('Failed to refresh balance:', error)
       }
     },
 
-    async broadcastRedeemTx({ state, dispatch }, { redeemTx }: { redeemTx: string }) {
-      try {
-        const response = await fetch(`${state.server}/v1/redeem-tx`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ redeemTx })
-        })
+    async sendBitcoin(_ctx, { address, amount }: { address: string; amount: number }) {
+      if (!sdkWallet) throw new Error('Wallet not connected')
 
-        if (!response.ok) {
-          const errorText = await response.text()
-          throw new Error(`Server returned ${response.status}: ${errorText}`)
-        }
+      const txid = await sdkWallet.sendBitcoin({ address, amount })
 
-        const data = await response.json()
+      // Refresh balance after send
+      await _ctx.dispatch('refreshBalance')
 
-        // Optionally update VTXOs after successful broadcast
-        await dispatch('fetchVTXOs')
+      return txid
+    },
 
-        return data.txid as string
+    async settle(_ctx, params?: { eventCallback?: (event: unknown) => void }) {
+      if (!sdkWallet) throw new Error('Wallet not connected')
 
-      } catch (error: unknown) {
-        if (error instanceof Error) {
-          throw new Error(`Failed to broadcast transaction: ${error.message}`)
-        }
-        throw new Error('Failed to broadcast transaction')
-      }
+      const txid = await sdkWallet.settle(undefined, params?.eventCallback as never)
+
+      await _ctx.dispatch('refreshBalance')
+
+      return txid
     }
   },
 
   getters: {
     serverPubkey: (state) => state.info?.pubkey || null,
     serverNetwork: (state) => state.info?.network || null,
-    roundLifetime: (state) => {
-      if (!state.info?.roundLifetime) return null
-      const seconds = parseInt(state.info.roundLifetime)
-      const hours = Math.floor(seconds / 3600)
-      return `${hours} hours`
-    },
-    unilateralExitDelay: (state) => {
-      if (!state.info?.unilateralExitDelay) return null
-      const seconds = parseInt(state.info.unilateralExitDelay)
-      const minutes = Math.floor(seconds / 60)
-      return `${minutes} minutes`
-    },
-    roundInterval: (state) => {
-      if (!state.info?.roundInterval) return null
-      const seconds = parseInt(state.info.roundInterval)
-      const minutes = Math.floor(seconds / 60)
-      return `${minutes} minutes`
-    },
     dust: (state) => state.info?.dust ? parseInt(state.info.dust) : null,
-    walletPublicKey: (state, getters, rootState) => hex.decode(rootState.wallet.publicKey!),
-    address: (state, getters, rootState) => {
-      const publicKey = rootState.wallet.publicKey
-      const serverPubkey = state.info?.pubkey
-
-      if (!publicKey || !serverPubkey) {
-        return null
-      }
-
-      try {
-        const pubkeyBuffer = Buffer.from(publicKey, 'hex')
-        const serverPubkeyBuffer = Buffer.from(serverPubkey.slice(2), 'hex')
-        const address = ArkAddress.fromPubKey(pubkeyBuffer, serverPubkeyBuffer, 'testnet')
-        return address.encode()
-      } catch (err) {
-        console.error('Failed to generate address:', err)
-        return null
-      }
-    },
+    address: (state) => state.arkAddress,
+    boardingAddress: (state) => state.boardingAddress,
     vtxos: (state) => state.vtxos,
     balance: (state) => {
-      return state.vtxos.reduce((sum, vtxo) => {
-        return sum + BigInt(vtxo.amount);
-      }, BigInt(0));
+      if (state.walletBalance) {
+        return BigInt(state.walletBalance.available)
+      }
+      return state.vtxos.reduce((sum, vtxo) => sum + BigInt(vtxo.amount), BigInt(0))
     },
-    formattedBalance: (state, getters): string => {
+    formattedBalance: (_state, getters): string => {
       const balance = getters.balance
-      if (balance === null) return '0'
-      
-      const btc = Number(balance) / 100_000_000
-      return btc.toFixed(8)
-    }
+      if (!balance) return '0'
+      return Number(balance).toLocaleString()
+    },
+    boardingUtxos: (state) => state.boardingUtxos,
+    boardingBalance: (state) => {
+      if (state.walletBalance) {
+        return BigInt(state.walletBalance.boarding.total)
+      }
+      return state.boardingUtxos.reduce((sum, u) => sum + BigInt(u.amount), BigInt(0))
+    },
+    walletBalance: (state) => state.walletBalance,
   }
 }
 
-export default ark 
+export default ark

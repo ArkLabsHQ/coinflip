@@ -1,9 +1,11 @@
 import { getHouseWallet, setHouseWallet } from './db'
 import { createHash } from 'crypto'
-import type { IWallet, Identity } from '@arkade-os/sdk'
+import type { Identity, ArkInfo, Wallet } from '@arkade-os/sdk'
 
-let wallet: IWallet | null = null
+// Use Wallet (concrete) for arkProvider access
+let wallet: Wallet | null = null
 let identity: Identity | null = null
+let arkInfo: ArkInfo | null = null
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'https://mutinynet.com/api'
@@ -46,13 +48,24 @@ export async function initHouseWallet(): Promise<void> {
     },
   })
 
+  // Fetch Ark server info for transaction building
+  arkInfo = await wallet.arkProvider.getInfo()
+
   const address = await wallet.getAddress()
   const boardingAddress = await wallet.getBoardingAddress()
   console.log(`Ark address: ${address}`)
   console.log(`Boarding address: ${boardingAddress}`)
+  console.log(`Ark server pubkey: ${arkInfo.signerPubkey.substring(0, 16)}...`)
+  console.log(`Network: ${arkInfo.network}`)
+
+  // Warn about plaintext key storage
+  if (process.env.NODE_ENV !== 'test') {
+    console.warn('⚠️  WARNING: House private key is stored in plaintext in SQLite.')
+    console.warn('   This is acceptable for testnet/regtest. For production, use a secrets manager.')
+  }
 }
 
-function requireWallet(): IWallet {
+function requireWallet(): Wallet {
   if (!wallet) throw new Error('House wallet not initialized')
   return wallet
 }
@@ -104,3 +117,29 @@ export async function getHouseVtxos() {
 export function hashSecret(secret: Uint8Array): string {
   return createHash('sha256').update(secret).digest('hex')
 }
+
+export function getHouseWalletInstance(): Wallet {
+  return requireWallet()
+}
+
+export function getHouseIdentity(): Identity {
+  return requireIdentity()
+}
+
+export function getArkInfo(): ArkInfo {
+  if (!arkInfo) throw new Error('Ark info not loaded')
+  return arkInfo
+}
+
+export function getNetworkHrp(): string {
+  if (!arkInfo) throw new Error('Ark info not loaded')
+  // Map network name to address HRP
+  const network = arkInfo.network
+  if (network === 'bitcoin' || network === 'mainnet') return 'ark'
+  if (network === 'testnet') return 'tark'
+  if (network === 'signet') return 'tark'
+  if (network === 'mutinynet') return 'tark'
+  if (network === 'regtest') return 'tark'
+  return 'tark'
+}
+

@@ -1,24 +1,54 @@
+// ─── Design Tokens ────────────────────────────────────────────
 :root {
-  --bg: #0a0a0f;
-  --bg-card: #12121a;
-  --bg-elevated: #1a1a28;
-  --border: #1e1e2e;
-  --text: #e8e8f0;
-  --text-muted: #6e6e8a;
-  --blue: #00d4ff;
-  --blue-glow: rgba(0, 212, 255, 0.3);
-  --gold: #ffd700;
-  --gold-glow: rgba(255, 215, 0, 0.3);
-  --green: #00ff88;
-  --green-glow: rgba(0, 255, 136, 0.3);
-  --red: #ff4444;
-  --red-glow: rgba(255, 68, 68, 0.3);
-  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  --radius: 12px;
+  // Backgrounds — layered depth
+  --bg:          #08080d;
+  --bg-subtle:   #0c0c14;
+  --bg-card:     #111119;
+  --bg-elevated: #181824;
+  --bg-hover:    #1e1e2e;
+
+  // Borders
+  --border:       rgba(255, 255, 255, 0.06);
+  --border-light: rgba(255, 255, 255, 0.10);
+
+  // Text
+  --text:        #eeeef4;
+  --text-dim:    #a0a0b8;
+  --text-muted:  #5c5c78;
+
+  // Accents
+  --gold:      #f7c948;
+  --gold-dim:  #d4a530;
+  --gold-glow: rgba(247, 201, 72, 0.20);
+
+  --blue:      #38bdf8;
+  --blue-dim:  #0ea5e9;
+  --blue-glow: rgba(56, 189, 248, 0.18);
+
+  --green:      #34d399;
+  --green-dim:  #10b981;
+  --green-glow: rgba(52, 211, 153, 0.18);
+
+  --red:      #f87171;
+  --red-dim:  #ef4444;
+  --red-glow: rgba(248, 113, 113, 0.18);
+
+  // Typography
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+
+  // Radius
+  --radius:    14px;
   --radius-sm: 8px;
+  --radius-xs: 6px;
+
+  // Shadows
+  --shadow-card: 0 2px 8px rgba(0,0,0,0.3), 0 0 1px rgba(255,255,255,0.04);
+  --shadow-glow: 0 4px 24px rgba(0,0,0,0.5), 0 0 1px rgba(255,255,255,0.06);
+  --shadow-modal: 0 16px 48px rgba(0,0,0,0.6), 0 0 1px rgba(255,255,255,0.06);
 }
 
+// ─── Reset ────────────────────────────────────────────────────
 *, *::before, *::after {
   margin: 0;
   padding: 0;
@@ -29,8 +59,19 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+// Subtle background noise texture via radial gradient
+body {
+  background-image:
+    radial-gradient(ellipse 80% 60% at 50% 0%, rgba(247, 201, 72, 0.03) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 100%, rgba(56, 189, 248, 0.02) 0%, transparent 50%);
+  background-attachment: fixed;
 }
 
 #app {
@@ -39,48 +80,62 @@ html, body {
   flex-direction: column;
 }
 
-// Cards
+// ─── Cards ────────────────────────────────────────────────────
 .casino-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 24px;
+  box-shadow: var(--shadow-card);
 }
 
 .casino-card-glow {
   @extend .casino-card;
-  box-shadow: 0 0 20px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  box-shadow: var(--shadow-glow);
+  border-color: var(--border-light);
 }
 
-// Buttons
+// ─── Buttons ──────────────────────────────────────────────────
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 12px 24px;
+  padding: 11px 22px;
   border: none;
   border-radius: var(--radius-sm);
   font-family: var(--font-sans);
-  font-size: 0.9rem;
+  font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
   text-decoration: none;
+  letter-spacing: 0.01em;
 
   &:disabled {
     opacity: 0.35;
     cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
   }
 }
 
 .btn-primary {
   @extend .btn;
   background: var(--blue);
-  color: var(--bg);
+  color: #fff;
+  font-weight: 700;
 
   &:not(:disabled):hover {
-    box-shadow: 0 0 20px var(--blue-glow), 0 0 40px var(--blue-glow);
+    background: var(--blue-dim);
+    box-shadow: 0 0 20px var(--blue-glow);
+  }
+  &:not(:disabled):active {
+    transform: scale(0.98);
   }
 }
 
@@ -88,9 +143,14 @@ html, body {
   @extend .btn;
   background: var(--gold);
   color: var(--bg);
+  font-weight: 700;
 
   &:not(:disabled):hover {
-    box-shadow: 0 0 20px var(--gold-glow), 0 0 40px var(--gold-glow);
+    background: var(--gold-dim);
+    box-shadow: 0 0 20px var(--gold-glow);
+  }
+  &:not(:disabled):active {
+    transform: scale(0.98);
   }
 }
 
@@ -98,8 +158,10 @@ html, body {
   @extend .btn;
   background: var(--red);
   color: #fff;
+  font-weight: 700;
 
   &:not(:disabled):hover {
+    background: var(--red-dim);
     box-shadow: 0 0 20px var(--red-glow);
   }
 }
@@ -107,37 +169,45 @@ html, body {
 .btn-outline {
   @extend .btn;
   background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text);
+  border: 1px solid var(--border-light);
+  color: var(--text-dim);
 
   &:not(:disabled):hover {
     border-color: var(--blue);
     color: var(--blue);
+    background: rgba(56, 189, 248, 0.05);
   }
 }
 
 .btn-lg {
-  padding: 16px 40px;
-  font-size: 1.1rem;
+  padding: 14px 36px;
+  font-size: 1rem;
   border-radius: var(--radius);
-  letter-spacing: 1px;
+  letter-spacing: 0.03em;
 }
 
-// Input
+.btn-sm {
+  padding: 7px 14px;
+  font-size: 0.8rem;
+  border-radius: var(--radius-xs);
+}
+
+// ─── Input ────────────────────────────────────────────────────
 .input {
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-light);
   border-radius: var(--radius-sm);
-  padding: 10px 14px;
+  padding: 11px 14px;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 0.9rem;
+  font-size: 0.875rem;
   width: 100%;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
 
   &:focus {
     outline: none;
     border-color: var(--blue);
+    box-shadow: 0 0 0 3px var(--blue-glow);
   }
 
   &::placeholder {
@@ -145,19 +215,17 @@ html, body {
   }
 }
 
-// Monospace amounts
-.mono {
-  font-family: var(--font-mono);
-}
+// ─── Utilities ────────────────────────────────────────────────
+.mono { font-family: var(--font-mono); }
 
-// Text colors
-.text-gold { color: var(--gold); }
-.text-blue { color: var(--blue); }
+.text-gold  { color: var(--gold); }
+.text-blue  { color: var(--blue); }
 .text-green { color: var(--green); }
-.text-red { color: var(--red); }
+.text-red   { color: var(--red); }
 .text-muted { color: var(--text-muted); }
+.text-dim   { color: var(--text-dim); }
 
-// Animations
+// ─── Animations ───────────────────────────────────────────────
 @keyframes coinFloat {
   0%, 100% { transform: translateY(0) rotateY(0); }
   50% { transform: translateY(-10px) rotateY(15deg); }
@@ -174,29 +242,34 @@ html, body {
 }
 
 @keyframes slideUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes fadeIn {
   from { opacity: 0; }
-  to { opacity: 1; }
+  to   { opacity: 1; }
+}
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
 }
 
 .fade-enter-active, .fade-leave-active {
-  transition: opacity 0.25s ease;
+  transition: opacity 0.2s ease;
 }
 .fade-enter-from, .fade-leave-to {
   opacity: 0;
 }
 
-// Layout
+// ─── Layout ───────────────────────────────────────────────────
 .page {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 24px 16px;
+  padding: 28px 16px;
   animation: slideUp 0.3s ease;
 }
 
@@ -205,14 +278,13 @@ html, body {
   justify-content: center;
 }
 
-// Responsive
+// ─── Responsive ───────────────────────────────────────────────
 @media (max-width: 640px) {
-  .casino-card {
-    padding: 16px;
-  }
+  html { font-size: 14px; }
 
+  .casino-card { padding: 18px; }
   .btn-lg {
-    padding: 14px 32px;
-    font-size: 1rem;
+    padding: 13px 28px;
+    font-size: 0.95rem;
   }
 }

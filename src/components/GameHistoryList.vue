@@ -1,32 +1,27 @@
 <template>
   <div class="history-list">
     <div v-if="games.length === 0" class="empty-state">
-      No games yet. Go flip some coins!
+      <div class="empty-icon">&#9824;</div>
+      <div class="empty-text">No games yet</div>
+      <div class="empty-sub">Go flip some coins!</div>
     </div>
     <div v-else>
       <div
         v-for="game in games"
         :key="game.id"
         class="history-row"
-        :class="game.winner === 'player' ? 'row-win' : game.winner === 'house' ? 'row-loss' : 'row-pending'"
       >
         <div class="row-left">
           <span class="badge" :class="badgeClass(game)">
             {{ badgeText(game) }}
           </span>
-          <span class="tier mono">{{ formatSats(game.tier) }} sats</span>
+          <span class="tier mono">{{ formatSats(game.tier) }}</span>
         </div>
         <div class="row-right">
-          <span
-            v-if="game.winner === 'player'"
-            class="payout mono text-green"
-          >+{{ formatSats(game.payoutAmount || 0) }}</span>
-          <span
-            v-else-if="game.winner === 'house'"
-            class="payout mono text-red"
-          >-{{ formatSats(game.tier) }}</span>
-          <span v-else class="payout mono text-muted">pending</span>
-          <span class="time text-muted">{{ timeAgo(game.createdAt) }}</span>
+          <span class="payout mono" :class="payoutClass(game)">
+            {{ payoutText(game) }}
+          </span>
+          <span class="time">{{ timeAgo(game.createdAt) }}</span>
         </div>
       </div>
     </div>
@@ -75,6 +70,16 @@ export default defineComponent({
       if (game.winner === 'house') return 'LOSS'
       return game.status.toUpperCase()
     },
+    payoutClass(game: GameHistoryItem): string {
+      if (game.winner === 'player') return 'payout-win'
+      if (game.winner === 'house') return 'payout-loss'
+      return 'payout-pending'
+    },
+    payoutText(game: GameHistoryItem): string {
+      if (game.winner === 'player') return `+${this.formatSats(game.payoutAmount || 0)}`
+      if (game.winner === 'house') return `-${this.formatSats(game.tier)}`
+      return 'pending'
+    },
   },
 })
 </script>
@@ -86,22 +91,46 @@ export default defineComponent({
 
 .empty-state {
   text-align: center;
-  color: var(--text-muted);
   padding: 48px 16px;
-  font-style: italic;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.empty-icon {
+  font-size: 2rem;
+  color: var(--text-muted);
+  opacity: 0.4;
+  margin-bottom: 8px;
+}
+
+.empty-text {
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.empty-sub {
+  color: var(--text-muted);
+  font-size: 0.85rem;
 }
 
 .history-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 14px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
   transition: background 0.15s;
 }
 
+.history-row:last-child {
+  border-bottom: none;
+}
+
 .history-row:hover {
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 255, 255, 0.015);
 }
 
 .row-left, .row-right {
@@ -113,35 +142,51 @@ export default defineComponent({
 .badge {
   display: inline-block;
   padding: 3px 10px;
-  border-radius: 4px;
-  font-size: 0.7rem;
+  border-radius: 6px;
+  font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
-.badge-win { background: rgba(0, 255, 136, 0.12); color: var(--green); }
-.badge-loss { background: rgba(255, 68, 68, 0.12); color: var(--red); }
-.badge-pending { background: rgba(0, 212, 255, 0.12); color: var(--blue); }
+.badge-win {
+  background: rgba(52, 211, 153, 0.10);
+  color: var(--green);
+}
+
+.badge-loss {
+  background: rgba(248, 113, 113, 0.10);
+  color: var(--red);
+}
+
+.badge-pending {
+  background: rgba(56, 189, 248, 0.10);
+  color: var(--blue);
+}
 
 .tier {
-  font-size: 0.9rem;
-  color: var(--text);
+  font-size: 0.88rem;
+  color: var(--text-dim);
 }
 
 .payout {
-  font-size: 0.9rem;
+  font-size: 0.88rem;
   font-weight: 600;
 }
 
+.payout-win { color: var(--green); }
+.payout-loss { color: var(--red); }
+.payout-pending { color: var(--text-muted); }
+
 .time {
-  font-size: 0.75rem;
-  min-width: 60px;
+  font-size: 0.73rem;
+  color: var(--text-muted);
+  min-width: 52px;
   text-align: right;
 }
 
 @media (max-width: 640px) {
-  .history-row { padding: 10px 12px; }
-  .tier, .payout { font-size: 0.8rem; }
+  .history-row { padding: 12px 14px; }
+  .tier, .payout { font-size: 0.82rem; }
 }
 </style>

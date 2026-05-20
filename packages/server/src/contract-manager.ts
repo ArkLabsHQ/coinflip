@@ -32,6 +32,12 @@ import {
   getGames,
   getGameByContractScript,
 } from './db'
+import { attemptAutoClaim } from './auto-claim'
+import {
+  getArkInfo,
+  getHouseIdentity,
+  getHouseWalletInstance,
+} from './house-wallet'
 
 let manager: ContractManager | null = null
 
@@ -183,7 +189,25 @@ async function annotateFallback(contract: Contract, vtxos: ContractVtxo[]): Prom
     `[ContractManager] !! trustless fallback triggered for game ${game.id} ` +
     `(status=${game.status}, winner=${game.winner ?? 'unresolved'}). ` +
     `${vtxos.length} vtxo(s) at coinflip-final, total ${vtxos.reduce((a, v) => a + v.value, 0)} sats. ` +
-    `Spending paths registered for this contract: ${pathSummary}. ` +
-    `Auto-claim is not yet automated end-to-end — operator should inspect and resolve manually.`,
+    `Spending paths registered for this contract: ${pathSummary}.`,
   )
+
+  try {
+    const result = await attemptAutoClaim(contract, vtxos, game, {
+      wallet: getHouseWalletInstance(),
+      identity: getHouseIdentity(),
+      arkInfo: getArkInfo(),
+    })
+    if (result.attempted) {
+      console.log(
+        `[ContractManager] auto-claim succeeded for game ${game.id} via ${result.path}, ` +
+        `arkTxid=${result.arkTxid}`,
+      )
+    } else {
+      console.warn(`[ContractManager] auto-claim skipped for game ${game.id}: ${result.reason}`)
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[ContractManager] auto-claim failed for game ${game.id}: ${msg}`)
+  }
 }

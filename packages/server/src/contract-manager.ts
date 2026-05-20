@@ -28,45 +28,53 @@ import {
   type CoinflipFinalOptions,
   type CoinflipSetupOptions,
 } from 'arkade-coinflip'
-import {
-  getGames,
-  getGameByContractScript,
-} from './db'
+
 import { attemptAutoClaim } from './auto-claim'
-import {
-  getArkInfo,
-  getHouseIdentity,
-  getHouseWalletInstance,
-} from './house-wallet'
+import type { AppDeps } from './deps'
 
-let manager: ContractManager | null = null
+/**
+ * Build the ContractManager from the live Wallet, hook up the event
+ * subscriber, and reconcile any orphaned active contracts left behind by
+ * a crash during a previous resolve/expire.
+ *
+ * Returns the live ContractManager so the boot sequence can attach it to
+ * AppDeps and pass it through to consumers.
+ */
+export async function initContractManager(
+  wallet: Wallet,
+  deps: Pick<AppDeps, 'repos'>,
+): Promise<ContractManager> {
+  const manager = await wallet.getContractManager()
 
-export async function initContractManager(wallet: Wallet): Promise<void> {
-  manager = await wallet.getContractManager()
+  // Reconcile any games that resolved/expired since last boot but didn't
+  // get their contracts flipped to "inactive" — usually a crash between
+  // the games-table update and the setContractState call.
+  await reconcileGameContracts(manager, deps)
 
-  manager.onContractEvent((event) => {
-    handleContractEvent(event).catch((err) => {
+  // Subscriber needs access to the full AppDeps to drive auto-claim;
+  // index.ts wires it up *after* it has built AppDeps so we can read
+  // the final `deps` reference here.
+  return manager
+}
+
+/**
+ * Attach the event subscriber once the full AppDeps is available.
+ * Split from initContractManager so the AppDeps cycle (which needs
+ * contractManager to be populated first) stays well-typed.
+ */
+export function attachContractEventHandler(deps: AppDeps): void {
+  deps.contractManager.onContractEvent((event) => {
+    handleContractEvent(event, deps).catch((err) => {
       console.error('[ContractManager] event handler error:', err)
     })
   })
 
-  // Restart recovery: any game that was pending at shutdown left its contracts
-  // in the SQLite repo with state="active", so the watcher already resumed
-  // watching them via ContractManager.initialize(). Sweep any *resolved* /
-  // *expired* games whose contracts still show active — these can leak past
-  // a crash that landed between updateGame() and setContractState().
-  await reconcileGameContracts()
-
-  const counts = await summarizeContracts()
-  console.log(
-    `[ContractManager] ready — watching ${counts.activeSetup} coinflip-setup ` +
-    `and ${counts.activeFinal} coinflip-final contracts`,
-  )
-}
-
-export function getContractManager(): ContractManager {
-  if (!manager) throw new Error('ContractManager not initialized')
-  return manager
+  summarizeContracts(deps).then((counts) => {
+    console.log(
+      `[ContractManager] ready — watching ${counts.activeSetup} coinflip-setup ` +
+      `and ${counts.activeFinal} coinflip-final contracts`,
+    )
+  })
 }
 
 /**
@@ -74,13 +82,15 @@ export function getContractManager(): ContractManager {
  * watcher will fire `vtxo_received` if either trustless-fallback tx ever
  * lands on-Ark.
  */
-export async function createGameContracts(args: {
-  gameId: string
-  setup: { params: CoinflipSetupOptions; script: string; address: string }
-  final: { params: CoinflipFinalOptions; script: string; address: string }
-}): Promise<void> {
-  const mgr = getContractManager()
-  await mgr.createContract({
+export async function createGameContracts(
+  deps: AppDeps,
+  args: {
+    gameId: string
+    setup: { params: CoinflipSetupOptions; script: string; address: string }
+    final: { params: CoinflipFinalOptions; script: string; address: string }
+  },
+): Promise<void> {
+  await deps.contractManager.createContract({
     type: COINFLIP_SETUP_TYPE,
     params: CoinflipSetupContractHandler.serializeParams(args.setup.params),
     script: args.setup.script,
@@ -88,7 +98,7 @@ export async function createGameContracts(args: {
     state: 'active',
     label: `coinflip-setup:${args.gameId}`,
   })
-  await mgr.createContract({
+  await deps.contractManager.createContract({
     type: COINFLIP_FINAL_TYPE,
     params: CoinflipFinalContractHandler.serializeParams(args.final.params),
     script: args.final.script,
@@ -100,19 +110,19 @@ export async function createGameContracts(args: {
 
 /**
  * Flip both contracts for a game to `inactive` so the watcher stops polling
- * them. Called on resolve and on expiry.
- *
- * Best-effort: a missing contract (already inactivated, or never created
- * because the game pre-dates the contract subsystem) is not fatal.
+ * them. Best-effort: a missing contract (already inactivated, or never
+ * created because the game pre-dates the contract subsystem) is not fatal.
  */
-export async function markGameContractsInactive(setupScript?: string | null, finalScript?: string | null): Promise<void> {
-  if (!manager) return
+export async function markGameContractsInactive(
+  deps: Pick<AppDeps, 'contractManager'>,
+  setupScript?: string | null,
+  finalScript?: string | null,
+): Promise<void> {
   for (const script of [setupScript, finalScript]) {
     if (!script) continue
     try {
-      await manager.setContractState(script, 'inactive')
+      await deps.contractManager.setContractState(script, 'inactive')
     } catch (err) {
-      // setContractState throws if the contract doesn't exist — fine.
       const msg = err instanceof Error ? err.message : String(err)
       if (!msg.includes('not found')) {
         console.warn(`[ContractManager] setContractState(${script.substring(0, 16)}…, inactive) failed: ${msg}`)
@@ -121,32 +131,28 @@ export async function markGameContractsInactive(setupScript?: string | null, fin
   }
 }
 
-/**
- * After a crash between updateGame(status='resolved') and setContractState,
- * the SQLite contract repo can hold rows in `state="active"` whose game is
- * actually terminal. On boot, scan resolved/expired games and inactivate.
- */
-async function reconcileGameContracts(): Promise<void> {
-  if (!manager) return
+async function reconcileGameContracts(
+  manager: ContractManager,
+  deps: Pick<AppDeps, 'repos'>,
+): Promise<void> {
   const terminal = [
-    ...getGames({ status: 'resolved', limit: 500 }),
-    ...getGames({ status: 'expired', limit: 500 }),
+    ...(await deps.repos.games.list({ status: 'resolved', limit: 500 })),
+    ...(await deps.repos.games.list({ status: 'expired', limit: 500 })),
   ]
   for (const game of terminal) {
-    await markGameContractsInactive(game.setup_script_hex, game.final_script_hex)
+    await markGameContractsInactive({ contractManager: manager }, game.setup_script_hex, game.final_script_hex)
   }
 }
 
-async function summarizeContracts(): Promise<{ activeSetup: number; activeFinal: number }> {
-  if (!manager) return { activeSetup: 0, activeFinal: 0 }
+async function summarizeContracts(deps: AppDeps): Promise<{ activeSetup: number; activeFinal: number }> {
   const [setupActive, finalActive] = await Promise.all([
-    manager.getContracts({ type: COINFLIP_SETUP_TYPE, state: 'active' }),
-    manager.getContracts({ type: COINFLIP_FINAL_TYPE, state: 'active' }),
+    deps.contractManager.getContracts({ type: COINFLIP_SETUP_TYPE, state: 'active' }),
+    deps.contractManager.getContracts({ type: COINFLIP_FINAL_TYPE, state: 'active' }),
   ])
   return { activeSetup: setupActive.length, activeFinal: finalActive.length }
 }
 
-async function handleContractEvent(event: ContractEvent): Promise<void> {
+async function handleContractEvent(event: ContractEvent, deps: AppDeps): Promise<void> {
   if (event.type === 'connection_reset') {
     console.warn('[ContractManager] watcher connection reset')
     return
@@ -160,24 +166,23 @@ async function handleContractEvent(event: ContractEvent): Promise<void> {
     `(${event.vtxos.length} vtxo${event.vtxos.length === 1 ? '' : 's'}, ${totalSats} sats)`,
   )
 
-  // Fallback was triggered — surface the row in DB and (best-effort) try the
-  // auto-claim path. The actual on-chain spend is deferred to a follow-up
-  // because it needs careful tx-graph construction; here we log enough that
-  // a human operator can intervene immediately.
   if (event.type === 'vtxo_received' && type === COINFLIP_FINAL_TYPE) {
-    await annotateFallback(event.contract, event.vtxos)
+    await annotateFallback(event.contract, event.vtxos, deps)
   }
 }
 
-async function annotateFallback(contract: Contract, vtxos: ContractVtxo[]): Promise<void> {
-  if (!manager) return
-  const game = getGameByContractScript(contract.script)
+async function annotateFallback(
+  contract: Contract,
+  vtxos: ContractVtxo[],
+  deps: AppDeps,
+): Promise<void> {
+  const game = await deps.repos.games.findByContractScript(contract.script)
   if (!game) {
     console.warn(`[ContractManager] vtxo_received on unknown final contract ${contract.script.substring(0, 32)}…`)
     return
   }
 
-  const allPaths = await manager.getAllSpendingPaths({
+  const allPaths = await deps.contractManager.getAllSpendingPaths({
     contractScript: contract.script,
     collaborative: true,
   })
@@ -194,9 +199,9 @@ async function annotateFallback(contract: Contract, vtxos: ContractVtxo[]): Prom
 
   try {
     const result = await attemptAutoClaim(contract, vtxos, game, {
-      wallet: getHouseWalletInstance(),
-      identity: getHouseIdentity(),
-      arkInfo: getArkInfo(),
+      wallet: deps.wallet,
+      identity: deps.identity,
+      arkInfo: deps.arkInfo,
     })
     if (result.attempted) {
       console.log(

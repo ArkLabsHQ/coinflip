@@ -1,45 +1,62 @@
-import { getHouseWallet, setHouseWallet } from './db'
-import { createHash } from 'crypto'
-import type { Identity, ArkInfo, Wallet } from '@arkade-os/sdk'
+/**
+ * House wallet bootstrap.
+ *
+ * Returns the wallet/identity/arkInfo trio that gets placed on `AppDeps`.
+ * Consumers downstream read from `deps.wallet` etc. directly rather than
+ * reaching for module state here.
+ */
 
-// Use Wallet (concrete) for arkProvider access
-let wallet: Wallet | null = null
-let identity: Identity | null = null
-let arkInfo: ArkInfo | null = null
+import { createHash } from 'crypto'
+import type { ArkInfo, Identity, Wallet } from '@arkade-os/sdk'
+import type { ConfigRepository, HouseWalletRepository } from './repositories/types'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'https://mutinynet.com/api'
 
-export async function initHouseWallet(): Promise<void> {
+export interface HouseWalletBundle {
+  wallet: Wallet
+  identity: Identity
+  arkInfo: ArkInfo
+}
+
+export async function initHouseWallet(repos: {
+  houseWallet: HouseWalletRepository
+  config: ConfigRepository
+  // config is not strictly required today but kept on the signature so
+  // future bootstrap-time tweaks (custom URLs, fee policy) have somewhere
+  // to read from without re-threading the deps.
+}): Promise<HouseWalletBundle> {
+  void repos.config
   const { Wallet, SingleKey } = await import('@arkade-os/sdk')
-
-  const existing = getHouseWallet()
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let singleKey: any
-  if (existing) {
-    singleKey = SingleKey.fromHex(existing.private_key_hex)
-    console.log(`House wallet loaded: ${existing.public_key_hex.substring(0, 16)}...`)
-  } else {
-    singleKey = SingleKey.fromRandomBytes()
-    const privHex = singleKey.toHex()
-    const pubkey = await singleKey.compressedPublicKey()
-    const pubHex = Buffer.from(pubkey).toString('hex')
-
-    setHouseWallet(privHex, pubHex)
-    console.log(`House wallet created: ${pubHex.substring(0, 16)}...`)
-  }
-
-  identity = singleKey
-
-  // Use SQLite storage backed by the same sql.js database for persistence
+  // The subpath import resolves at runtime via the SDK's `exports` field,
+  // but the server tsconfig still uses legacy `moduleResolution: "node"`
+  // which won't statically resolve it — use require() to skip TS resolution.
   // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
   const { SQLiteWalletRepository, SQLiteContractRepository } = require('@arkade-os/sdk/repositories/sqlite')
   const { getSqlExecutor } = await import('./db')
   const executor = getSqlExecutor()
 
-  wallet = await Wallet.create({
-    identity: singleKey,
+  const existing = await repos.houseWallet.get()
+
+  // SingleKey implements Identity; assign through `any` to satisfy
+  // the structural-typing gymnastics around the SingleKey static
+  // factories that live in the SDK's dist/cjs world.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let identity: any
+  if (existing) {
+    identity = SingleKey.fromHex(existing.private_key_hex)
+    console.log(`House wallet loaded: ${existing.public_key_hex.substring(0, 16)}...`)
+  } else {
+    identity = SingleKey.fromRandomBytes()
+    const privHex = identity.toHex()
+    const pubkey = await identity.compressedPublicKey()
+    const pubHex = Buffer.from(pubkey).toString('hex')
+    await repos.houseWallet.set(privHex, pubHex)
+    console.log(`House wallet created: ${pubHex.substring(0, 16)}...`)
+  }
+
+  const wallet = await Wallet.create({
+    identity,
     arkServerUrl: ARK_SERVER_URL,
     esploraUrl: ESPLORA_URL,
     storage: {
@@ -48,8 +65,7 @@ export async function initHouseWallet(): Promise<void> {
     },
   })
 
-  // Fetch Ark server info for transaction building
-  arkInfo = await wallet.arkProvider.getInfo()
+  const arkInfo = await wallet.arkProvider.getInfo()
 
   const address = await wallet.getAddress()
   const boardingAddress = await wallet.getBoardingAddress()
@@ -58,88 +74,21 @@ export async function initHouseWallet(): Promise<void> {
   console.log(`Ark server pubkey: ${arkInfo.signerPubkey.substring(0, 16)}...`)
   console.log(`Network: ${arkInfo.network}`)
 
-  // Warn about plaintext key storage
   if (process.env.NODE_ENV !== 'test') {
     console.warn('⚠️  WARNING: House private key is stored in plaintext in SQLite.')
     console.warn('   This is acceptable for testnet/regtest. For production, use a secrets manager.')
   }
-}
 
-function requireWallet(): Wallet {
-  if (!wallet) throw new Error('House wallet not initialized')
-  return wallet
-}
-
-function requireIdentity(): Identity {
-  if (!identity) throw new Error('House wallet not initialized')
-  return identity
-}
-
-export async function getHouseAddress(): Promise<string> {
-  return requireWallet().getAddress()
-}
-
-export async function getHouseBoardingAddress(): Promise<string> {
-  return requireWallet().getBoardingAddress()
-}
-
-export async function getHousePubkeyHex(): Promise<string> {
-  const pubkey = await requireIdentity().compressedPublicKey()
-  return Buffer.from(pubkey).toString('hex')
-}
-
-export async function getHouseBalanceSats(): Promise<number> {
-  const balance = await requireWallet().getBalance()
-  return balance.available
-}
-
-export async function getHouseBalance(): Promise<{
-  available: number
-  settled: number
-  preconfirmed: number
-  boarding: { confirmed: number; unconfirmed: number; total: number }
-  total: number
-}> {
-  const balance = await requireWallet().getBalance()
-  return {
-    available: balance.available,
-    settled: balance.settled,
-    preconfirmed: balance.preconfirmed,
-    boarding: balance.boarding,
-    total: balance.total,
-  }
-}
-
-export async function getHouseVtxos() {
-  return requireWallet().getVtxos()
+  return { wallet, identity, arkInfo }
 }
 
 export function hashSecret(secret: Uint8Array): string {
   return createHash('sha256').update(secret).digest('hex')
 }
 
-export function getHouseWalletInstance(): Wallet {
-  return requireWallet()
-}
-
-export function getHouseIdentity(): Identity {
-  return requireIdentity()
-}
-
-export function getArkInfo(): ArkInfo {
-  if (!arkInfo) throw new Error('Ark info not loaded')
-  return arkInfo
-}
-
-export function getNetworkHrp(): string {
-  if (!arkInfo) throw new Error('Ark info not loaded')
-  // Map network name to address HRP
+export function networkHrpFromArkInfo(arkInfo: ArkInfo): string {
   const network = arkInfo.network
   if (network === 'bitcoin' || network === 'mainnet') return 'ark'
-  if (network === 'testnet') return 'tark'
-  if (network === 'signet') return 'tark'
-  if (network === 'mutinynet') return 'tark'
-  if (network === 'regtest') return 'tark'
+  // testnet / signet / mutinynet / regtest → tark
   return 'tark'
 }
-

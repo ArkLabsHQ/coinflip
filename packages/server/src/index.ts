@@ -15,33 +15,43 @@ const { EventSource: NodeEventSource } = require('eventsource')
 import express from 'express'
 import cors from 'cors'
 import { registerCoinflipContracts } from 'arkade-coinflip'
-import { initDb } from './db'
-import { getHouseWalletInstance, initHouseWallet } from './house-wallet'
-import { initContractManager } from './contract-manager'
+import { getSqlExecutor, initDb } from './db'
+import { makeRepos } from './repositories'
+import { initHouseWallet } from './house-wallet'
+import { attachContractEventHandler, initContractManager } from './contract-manager'
 import { startExpiryTimer } from './game-engine'
-import publicRoutes from './public-routes'
-import adminRoutes from './admin/routes'
+import { createPublicRoutes } from './public-routes'
+import { createAdminRoutes } from './admin/routes'
+import type { AppDeps } from './deps'
 
 const PUBLIC_PORT = parseInt(process.env.PUBLIC_PORT || '3001', 10)
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '3002', 10)
 
 async function main() {
-  // Register coinflip-setup and coinflip-final with the SDK contract registry
-  // so they can be resolved via contractHandlers / ContractManager / arkcontract=.
+  // 1. Register coinflip-setup and coinflip-final with the SDK contract registry
+  //    so they can be resolved via contractHandlers / ContractManager / arkcontract=.
   registerCoinflipContracts()
 
-  // Initialize database and house wallet
+  // 2. Bootstrap SQLite and the typed repositories that wrap it.
   console.log('Initializing database...')
   await initDb()
+  const repos = makeRepos(getSqlExecutor())
 
+  // 3. House wallet — depends on the houseWallet + config repos.
   console.log('Initializing house wallet...')
-  await initHouseWallet()
+  const { wallet, identity, arkInfo } = await initHouseWallet(repos)
 
+  // 4. ContractManager — depends on the live Wallet + repos for reconciliation.
   console.log('Initializing contract manager...')
-  await initContractManager(getHouseWalletInstance())
+  const contractManager = await initContractManager(wallet, { repos })
 
-  // Start game expiry timer
-  startExpiryTimer()
+  // 5. Assemble the AppDeps bundle and attach the event subscriber now that
+  //    every field is populated.
+  const deps: AppDeps = { repos, wallet, identity, arkInfo, contractManager }
+  attachContractEventHandler(deps)
+
+  // 6. Start game expiry timer
+  startExpiryTimer(deps)
 
   // Public API server
   const publicApp = express()
@@ -52,7 +62,7 @@ async function main() {
     res.json({ status: 'ok' })
   })
 
-  publicApp.use(publicRoutes)
+  publicApp.use(createPublicRoutes(deps))
 
   publicApp.listen(PUBLIC_PORT, () => {
     console.log(`Public API listening on port ${PUBLIC_PORT}`)
@@ -62,7 +72,7 @@ async function main() {
   const adminApp = express()
   adminApp.use(express.json())
 
-  adminApp.use(adminRoutes)
+  adminApp.use(createAdminRoutes(deps))
 
   const ADMIN_HOST = process.env.ADMIN_HOST || '127.0.0.1'
   adminApp.listen(ADMIN_PORT, ADMIN_HOST, () => {

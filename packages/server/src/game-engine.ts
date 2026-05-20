@@ -14,29 +14,9 @@ import {
   type VtxoInput,
 } from 'arkade-coinflip'
 import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
-import {
-  createGame as dbCreateGame,
-  updateGame,
-  getGame,
-  getGames,
-  getConfig,
-  getPendingGamesCount,
-  expirePendingGames,
-} from './db'
-import {
-  getHouseBalanceSats,
-  getHousePubkeyHex,
-  getHouseVtxos,
-  hashSecret,
-  getHouseWalletInstance,
-  getHouseIdentity,
-  getArkInfo,
-  getNetworkHrp,
-} from './house-wallet'
-import {
-  createGameContracts,
-  markGameContractsInactive,
-} from './contract-manager'
+import { hashSecret, networkHrpFromArkInfo } from './house-wallet'
+import { createGameContracts, markGameContractsInactive } from './contract-manager'
+import type { AppDeps } from './deps'
 
 export interface PlayRequest {
   tier: number
@@ -76,19 +56,19 @@ export interface SignResult {
   txid: string
 }
 
-function getTiers(): number[] {
-  const tiersStr = getConfig('tiers') || '[1000,5000,10000,50000]'
+async function getTiers(deps: AppDeps): Promise<number[]> {
+  const tiersStr = (await deps.repos.config.get('tiers')) || '[1000,5000,10000,50000]'
   return JSON.parse(tiersStr)
 }
 
-function getRake(): { type: 'percentage' | 'flat'; value: number } {
-  const rakeType = (getConfig('rake_type') || 'percentage') as 'percentage' | 'flat'
-  const rakeValue = parseInt(getConfig('rake_value') || '2', 10)
+async function getRake(deps: AppDeps): Promise<{ type: 'percentage' | 'flat'; value: number }> {
+  const rakeType = ((await deps.repos.config.get('rake_type')) || 'percentage') as 'percentage' | 'flat'
+  const rakeValue = parseInt((await deps.repos.config.get('rake_value')) || '2', 10)
   return { type: rakeType, value: rakeValue }
 }
 
-function calculateRake(potAmount: number): number {
-  const rake = getRake()
+async function calculateRake(potAmount: number, deps: AppDeps): Promise<number> {
+  const rake = await getRake(deps)
   let rakeAmount: number
 
   if (rake.type === 'percentage') {
@@ -126,8 +106,8 @@ function vtxoToInput(vtxo: ExtendedVirtualCoin): VtxoInput {
  * disappears, the other can use them to claim on-chain via the abort path.
  * The happy path uses a simple Ark payment after winner determination.
  */
-export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
-  const tiers = getTiers()
+export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayResult> {
+  const tiers = await getTiers(deps)
   if (!tiers.includes(req.tier)) {
     throw new Error(`Invalid tier: ${req.tier}. Available: ${tiers.join(', ')}`)
   }
@@ -141,13 +121,14 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
   }
 
   // Check house balance from real wallet
-  const available = await getHouseBalanceSats()
+  const balance = await deps.wallet.getBalance()
+  const available = balance.available
   if (available < req.tier) {
     throw new Error(`House balance insufficient. Available: ${available}, needed: ${req.tier}`)
   }
 
   // Rate limit: max 3 pending per player
-  const pendingCount = getPendingGamesCount(req.playerPubkey)
+  const pendingCount = await deps.repos.games.countPendingForPlayer(req.playerPubkey)
   if (pendingCount >= 3) {
     throw new Error('Too many pending games. Complete or wait for existing games to expire.')
   }
@@ -158,14 +139,12 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
   const houseHash = hashSecret(houseSecret)
 
   const gameId = uuidv4()
-  const identity = getHouseIdentity()
-  const housePubkey = await getHousePubkeyHex()
-  const houseXOnly = await identity.xOnlyPublicKey()
-  const arkInfo = getArkInfo()
-  const networkHrp = getNetworkHrp()
+  const houseXOnly = await deps.identity.xOnlyPublicKey()
+  const housePubkey = Buffer.from(await deps.identity.compressedPublicKey()).toString('hex')
+  const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
 
   // Select house VTXOs for the bet
-  const allHouseVtxos = await getHouseVtxos()
+  const allHouseVtxos = await deps.wallet.getVtxos()
   const houseVtxoInputs = allHouseVtxos.map(vtxoToInput)
   const { inputs: selectedHouseVtxos } = coinSelect(houseVtxoInputs, BigInt(req.tier))
   if (!selectedHouseVtxos) {
@@ -173,15 +152,14 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
   }
 
   // Get house change address
-  const wallet = getHouseWalletInstance()
-  const houseChangeAddress = await wallet.getAddress()
+  const houseChangeAddress = await deps.wallet.getAddress()
 
   // Build the Game object for the lib
   const playerPubBytes = hex.decode(req.playerPubkey)
   const now = Math.floor(Date.now() / 1000)
 
   // Server pubkey from Ark info (x-only, 32 bytes)
-  const signerPub = hex.decode(arkInfo.signerPubkey)
+  const signerPub = hex.decode(deps.arkInfo.signerPubkey)
   const serverPubkey = signerPub.length === 33 ? signerPub.slice(1) : signerPub
 
   const game: Game = {
@@ -205,15 +183,14 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
   }
 
   // Build setup and final transactions using the lib
-  const { setup, final: finalTx } = buildGameTransactions(game, arkInfo, networkHrp)
+  const { setup, final: finalTx } = buildGameTransactions(game, deps.arkInfo, networkHrp)
 
   // Sign setup transaction (house's VTXO inputs) with house identity
-  // identity.sign(tx, inputIndices) returns a new Transaction with signatures applied
   const houseInputIndices = selectedHouseVtxos.map((_, i) => i)
-  const signedSetup = await identity.sign(setup, houseInputIndices)
+  const signedSetup = await deps.identity.sign(setup, houseInputIndices)
 
   // Sign final transaction (house as creator signs the reveal leaf on input 0)
-  const signedFinal = await identity.sign(finalTx, [0])
+  const signedFinal = await deps.identity.sign(finalTx, [0])
 
   // Extract house signatures for the player
   const houseSetupSignatures: string[] = []
@@ -221,7 +198,6 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
     const input = signedSetup.getInput(i)
     const sigs = input.tapScriptSig
     if (sigs && sigs.length > 0) {
-      // tapScriptSig is an array of [{ pubKey, leafHash }, signature] pairs
       houseSetupSignatures.push(hex.encode(sigs[sigs.length - 1][1]))
     }
   }
@@ -246,7 +222,7 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
   const finalScriptHex = hex.encode(finalVtxoScript.pkScript)
 
   // Store game in DB
-  dbCreateGame({
+  await deps.repos.games.save({
     id: gameId,
     tier: req.tier,
     playerPubkey: req.playerPubkey,
@@ -265,7 +241,7 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
   // block the play response — the game is still tradeable via the synchronous
   // happy path; the contract subsystem is purely defensive plumbing.
   try {
-    await createGameContracts({
+    await createGameContracts(deps, {
       gameId,
       setup: {
         params: {
@@ -309,12 +285,9 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
 /**
  * Handle sign request: player reveals their secret, server determines winner,
  * and settles the game by sending the payout via a normal Ark payment.
- *
- * The signed game transactions (setup + final) remain as trustless fallback —
- * if the house doesn't pay, the player can claim on-chain using the final tx.
  */
-export async function handleSign(gameId: string, req: SignRequest): Promise<SignResult> {
-  const game = getGame(gameId)
+export async function handleSign(gameId: string, req: SignRequest, deps: AppDeps): Promise<SignResult> {
+  const game = await deps.repos.games.get(gameId)
   if (!game) throw new Error(`Game not found: ${gameId}`)
   if (game.status !== 'pending') throw new Error(`Game is not pending: ${game.status}`)
 
@@ -329,14 +302,14 @@ export async function handleSign(gameId: string, req: SignRequest): Promise<Sign
   const houseSecret = Buffer.from(game.house_secret_hex, 'hex')
   const winnerRole = determineWinner(
     new Uint8Array(houseSecret),
-    new Uint8Array(playerSecret)
+    new Uint8Array(playerSecret),
   )
 
   // Map creator → house
   const winner: 'house' | 'player' = winnerRole === 'creator' ? 'house' : 'player'
 
   const potAmount = game.tier * 2
-  const rakeAmount = calculateRake(potAmount)
+  const rakeAmount = await calculateRake(potAmount, deps)
   const payoutAmount = potAmount - rakeAmount
 
   // Build proof string
@@ -353,32 +326,26 @@ export async function handleSign(gameId: string, req: SignRequest): Promise<Sign
   // Settle the game: send payout to winner via Ark
   let txid = ''
   try {
-    const wallet = getHouseWalletInstance()
-
     if (winner === 'player') {
-      // Player won — house sends the payout to the player's Ark address
       const payoutAddress = game.player_change_address
       if (!payoutAddress) {
         throw new Error('No player change address stored — cannot send payout')
       }
-      txid = await wallet.sendBitcoin({
+      txid = await deps.wallet.sendBitcoin({
         address: payoutAddress,
         amount: payoutAmount,
       })
       console.log(`Player won game ${gameId}. Payout ${payoutAmount} sats, txid: ${txid}`)
     } else {
-      // House won — no payment needed, house keeps the pot (minus rake, which it also keeps)
       console.log(`House won game ${gameId}. Kept ${game.tier} sats (player's bet).`)
       txid = 'house-win-no-transfer'
     }
   } catch (err) {
     console.error(`Failed to settle game ${gameId}:`, err)
-    // Game still resolves in DB even if settlement fails.
-    // The player has the signed transactions as fallback.
   }
 
   // Update game in DB
-  updateGame(gameId, {
+  await deps.repos.games.update(gameId, {
     playerSecretHex: req.playerSecretHex,
     winner,
     rakeAmount,
@@ -387,10 +354,8 @@ export async function handleSign(gameId: string, req: SignRequest): Promise<Sign
   })
 
   // Stop the watcher polling the (now-defunct) coinflip-setup / coinflip-final
-  // addresses for this game. The trustless-fallback txs remain signed and the
-  // player can still broadcast them, but we don't need to react to that any
-  // more — the pot was already paid out via the synchronous happy path above.
-  await markGameContractsInactive(game.setup_script_hex, game.final_script_hex)
+  // addresses for this game.
+  await markGameContractsInactive(deps, game.setup_script_hex, game.final_script_hex)
 
   return {
     winner,
@@ -406,20 +371,19 @@ export async function handleSign(gameId: string, req: SignRequest): Promise<Sign
 }
 
 // Cleanup expired pending games every 60 seconds
-export function startExpiryTimer(): NodeJS.Timeout {
-  return setInterval(() => {
-    // Snapshot which pending games are about to flip to "expired" so we can
-    // also inactivate their contracts. Stay below the DB call; the SQL UPDATE
-    // doesn't tell us which rows changed.
-    const aboutToExpire = getGames({ status: 'pending', limit: 500 })
-      .filter((g) => Date.parse(`${g.created_at} UTC`) < Date.now() - 5 * 60_000)
-    const expired = expirePendingGames(5)
-    if (expired > 0) {
-      console.log(`Expired ${expired} pending games`)
-      for (const g of aboutToExpire) {
-        markGameContractsInactive(g.setup_script_hex, g.final_script_hex)
-          .catch((err) => console.warn(`[expiry ${g.id}] inactivate failed: ${err}`))
+export function startExpiryTimer(deps: AppDeps): NodeJS.Timeout {
+  return setInterval(async () => {
+    try {
+      const { expired, rows } = await deps.repos.games.expirePending(5)
+      if (expired > 0) {
+        console.log(`Expired ${expired} pending games`)
+        for (const g of rows) {
+          markGameContractsInactive(deps, g.setup_script_hex, g.final_script_hex)
+            .catch((err) => console.warn(`[expiry ${g.id}] inactivate failed: ${err}`))
+        }
       }
+    } catch (err) {
+      console.error('Expiry timer error:', err)
     }
   }, 60_000)
 }

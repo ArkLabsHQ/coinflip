@@ -29,8 +29,8 @@ import {
   type CoinflipSetupOptions,
 } from 'arkade-coinflip'
 
-import { attemptAutoClaim } from './auto-claim'
-import type { AppDeps } from './deps'
+import { attemptAutoClaim } from './auto-claim.js'
+import type { AppDeps } from './deps.js'
 
 /**
  * Build the ContractManager from the live Wallet, hook up the event

@@ -1,12 +1,12 @@
-export * from './types'
-export { SQLiteGameRepository } from './gameRepository'
-export { SQLiteHouseWalletRepository } from './houseWalletRepository'
-export { SQLiteConfigRepository } from './configRepository'
+export * from './types.js'
+export { SQLiteGameRepository } from './gameRepository.js'
+export { SQLiteHouseWalletRepository } from './houseWalletRepository.js'
+export { SQLiteConfigRepository } from './configRepository.js'
 
-import type { Repos, SQLExecutor } from './types'
-import { SQLiteGameRepository } from './gameRepository'
-import { SQLiteHouseWalletRepository } from './houseWalletRepository'
-import { SQLiteConfigRepository } from './configRepository'
+import type { Repos, SQLExecutor } from './types.js'
+import { SQLiteGameRepository } from './gameRepository.js'
+import { SQLiteHouseWalletRepository } from './houseWalletRepository.js'
+import { SQLiteConfigRepository } from './configRepository.js'
 
 /** Build the three SQLite-backed repos from a shared SQLExecutor. */
 export function makeRepos(db: SQLExecutor): Repos {

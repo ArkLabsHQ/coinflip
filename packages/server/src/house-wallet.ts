@@ -8,7 +8,7 @@
 
 import { createHash } from 'crypto'
 import type { ArkInfo, Identity, Wallet } from '@arkade-os/sdk'
-import type { ConfigRepository, HouseWalletRepository } from './repositories/types'
+import type { ConfigRepository, HouseWalletRepository } from './repositories/types.js'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'https://mutinynet.com/api'
@@ -28,12 +28,8 @@ export async function initHouseWallet(repos: {
 }): Promise<HouseWalletBundle> {
   void repos.config
   const { Wallet, SingleKey } = await import('@arkade-os/sdk')
-  // The subpath import resolves at runtime via the SDK's `exports` field,
-  // but the server tsconfig still uses legacy `moduleResolution: "node"`
-  // which won't statically resolve it — use require() to skip TS resolution.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
-  const { SQLiteWalletRepository, SQLiteContractRepository } = require('@arkade-os/sdk/repositories/sqlite')
-  const { getSqlExecutor } = await import('./db')
+  const { SQLiteWalletRepository, SQLiteContractRepository } = await import('@arkade-os/sdk/repositories/sqlite')
+  const { getSqlExecutor } = await import('./db.js')
   const executor = getSqlExecutor()
 
   const existing = await repos.houseWallet.get()

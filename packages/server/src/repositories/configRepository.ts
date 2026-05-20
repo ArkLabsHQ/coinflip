@@ -1,4 +1,4 @@
-import type { ConfigRepository, SQLExecutor } from './types'
+import type { ConfigRepository, SQLExecutor } from './types.js'
 
 export class SQLiteConfigRepository implements ConfigRepository {
   constructor(private readonly db: SQLExecutor) {}

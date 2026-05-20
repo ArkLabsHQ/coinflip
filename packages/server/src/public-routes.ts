@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
-import { handlePlay, handleSign, PlayRequest, SignRequest } from './game-engine'
-import type { AppDeps } from './deps'
+import { handlePlay, handleSign, PlayRequest, SignRequest } from './game-engine.js'
+import type { AppDeps } from './deps.js'
 
 export function createPublicRoutes(deps: AppDeps): Router {
   const router = Router()

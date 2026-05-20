@@ -42,7 +42,7 @@ import {
 } from '@arkade-os/sdk'
 import { CoinflipFinalContractHandler } from 'arkade-coinflip'
 
-import type { GameRow } from './repositories/types'
+import type { GameRow } from './repositories/types.js'
 
 export type ClaimPath = 'creator-win' | 'abort'
 

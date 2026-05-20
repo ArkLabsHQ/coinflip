@@ -15,14 +15,14 @@ const { EventSource: NodeEventSource } = require('eventsource')
 import express from 'express'
 import cors from 'cors'
 import { registerCoinflipContracts } from 'arkade-coinflip'
-import { getSqlExecutor, initDb } from './db'
-import { makeRepos } from './repositories'
-import { initHouseWallet } from './house-wallet'
-import { attachContractEventHandler, initContractManager } from './contract-manager'
-import { startExpiryTimer } from './game-engine'
-import { createPublicRoutes } from './public-routes'
-import { createAdminRoutes } from './admin/routes'
-import type { AppDeps } from './deps'
+import { getSqlExecutor, initDb } from './db.js'
+import { makeRepos } from './repositories/index.js'
+import { initHouseWallet } from './house-wallet.js'
+import { attachContractEventHandler, initContractManager } from './contract-manager.js'
+import { startExpiryTimer } from './game-engine.js'
+import { createPublicRoutes } from './public-routes.js'
+import { createAdminRoutes } from './admin/routes.js'
+import type { AppDeps } from './deps.js'
 
 const PUBLIC_PORT = parseInt(process.env.PUBLIC_PORT || '3001', 10)
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '3002', 10)

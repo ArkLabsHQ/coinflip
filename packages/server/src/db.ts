@@ -10,7 +10,7 @@
 import initSqlJs, { Database } from 'sql.js'
 import fs from 'fs'
 import path from 'path'
-import type { SQLExecutor } from './repositories/types'
+import type { SQLExecutor } from './repositories/types.js'
 
 const DATA_DIR = process.env.DATA_DIR || './data'
 const DB_PATH = path.join(DATA_DIR, 'coinflip.db')

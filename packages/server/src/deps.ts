@@ -10,7 +10,7 @@
  */
 
 import type { ArkInfo, ContractManager, Identity, Wallet } from '@arkade-os/sdk'
-import type { Repos } from './repositories/types'
+import type { Repos } from './repositories/types.js'
 
 export interface AppDeps {
   repos: Repos

@@ -7,18 +7,11 @@
  * find every read/write of a given table.
  */
 
-/**
- * Driver-agnostic SQL execution interface. Mirrors `SQLExecutor` from
- * `@arkade-os/sdk/repositories/sqlite` (inlined here because the server
- * tsconfig uses legacy `moduleResolution: "node"`, which doesn't honor
- * subpath `exports` fields — the SDK reaches the interface anyway at
- * runtime because both impls share the same structural shape).
- */
-export interface SQLExecutor {
-  run(sql: string, params?: unknown[]): Promise<void>
-  get<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | undefined>
-  all<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>
-}
+// Re-export the SDK's driver-agnostic SQL interface so consumers depend on
+// our `repositories/types.js` instead of the SDK subpath directly. The
+// server's `moduleResolution: "nodenext"` honors `@arkade-os/sdk`'s
+// `exports` map, so this resolves cleanly at both compile and run time.
+export type { SQLExecutor } from '@arkade-os/sdk/repositories/sqlite'
 
 // ── Game ──────────────────────────────────────────────────────────────────
 

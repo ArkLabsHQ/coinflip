@@ -2,7 +2,7 @@ import type {
   HouseWalletRepository,
   HouseWalletRow,
   SQLExecutor,
-} from './types'
+} from './types.js'
 
 export class SQLiteHouseWalletRepository implements HouseWalletRepository {
   constructor(private readonly db: SQLExecutor) {}

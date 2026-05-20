@@ -14,9 +14,9 @@ import {
   type VtxoInput,
 } from 'arkade-coinflip'
 import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
-import { hashSecret, networkHrpFromArkInfo } from './house-wallet'
-import { createGameContracts, markGameContractsInactive } from './contract-manager'
-import type { AppDeps } from './deps'
+import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
+import { createGameContracts, markGameContractsInactive } from './contract-manager.js'
+import type { AppDeps } from './deps.js'
 
 export interface PlayRequest {
   tier: number

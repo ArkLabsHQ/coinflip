@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import path from 'path'
-import type { AppDeps } from '../deps'
+import type { AppDeps } from '../deps.js'
 
 export function createAdminRoutes(deps: AppDeps): Router {
   const router = Router()

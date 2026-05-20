@@ -6,7 +6,7 @@ import type {
   GameUpdate,
   NewGame,
   SQLExecutor,
-} from './types'
+} from './types.js'
 
 export class SQLiteGameRepository implements GameRepository {
   constructor(private readonly db: SQLExecutor) {}

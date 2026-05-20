@@ -308,6 +308,142 @@ describe('event type guards', () => {
   })
 })
 
+describe('CoinflipSetupContractHandler', () => {
+  const {
+    CoinflipSetupContractHandler,
+    COINFLIP_SETUP_TYPE,
+    registerCoinflipContracts,
+  } = require('arkade-coinflip')
+
+  const creatorPubkey = new Uint8Array(32).fill(1)
+  const playerPubkey = new Uint8Array(32).fill(2)
+  const serverPubkey = new Uint8Array(32).fill(3)
+  const creatorHash = new Uint8Array(32).fill(0xaa)
+  const setupExpiration = 1_700_000_000n // unix time threshold
+
+  const typedParams = { creatorPubkey, playerPubkey, serverPubkey, creatorHash, setupExpiration }
+
+  it('round-trips params through serialize/deserialize', () => {
+    const serialized = CoinflipSetupContractHandler.serializeParams(typedParams)
+    expect(serialized.creator).toBe(hex.encode(creatorPubkey))
+    expect(serialized.setupExpiration).toBe(setupExpiration.toString())
+    const back = CoinflipSetupContractHandler.deserializeParams(serialized)
+    expect(hex.encode(back.creatorPubkey)).toBe(hex.encode(creatorPubkey))
+    expect(back.setupExpiration).toBe(setupExpiration)
+  })
+
+  it('createScript yields a CoinflipSetupScript with reveal + abort leaves', () => {
+    const params = CoinflipSetupContractHandler.serializeParams(typedParams)
+    const script = CoinflipSetupContractHandler.createScript(params)
+    expect(script.leaves.length).toBe(2)
+    expect(script.reveal()).toBeTruthy()
+    expect(script.abort()).toBeTruthy()
+  })
+
+  it('selectPath picks reveal when collaborative + creatorSecret present', () => {
+    const params = CoinflipSetupContractHandler.serializeParams(typedParams)
+    const script = CoinflipSetupContractHandler.createScript(params)
+    const creatorSecret = hex.encode(new Uint8Array(15).fill(7))
+    const contract = { type: 'coinflip-setup', params: { ...params, creatorSecret }, script: '', address: '', state: 'active' as const, createdAt: 0 }
+    const ctx = { collaborative: true, currentTime: 0 }
+    const sel = CoinflipSetupContractHandler.selectPath(script, contract, ctx)
+    expect(sel).not.toBeNull()
+    expect(hex.encode(sel!.extraWitness![0])).toBe(creatorSecret)
+  })
+
+  it('selectPath picks abort when CLTV is satisfied', () => {
+    const params = CoinflipSetupContractHandler.serializeParams(typedParams)
+    const script = CoinflipSetupContractHandler.createScript(params)
+    const contract = { type: 'coinflip-setup', params, script: '', address: '', state: 'active' as const, createdAt: 0 }
+    const futureMs = Number(setupExpiration + 1n) * 1000
+    const ctx = { collaborative: false, currentTime: futureMs }
+    const sel = CoinflipSetupContractHandler.selectPath(script, contract, ctx)
+    expect(sel).not.toBeNull()
+    expect(sel!.leaf).toBeTruthy()
+  })
+
+  it('selectPath returns null when neither path is available', () => {
+    const params = CoinflipSetupContractHandler.serializeParams(typedParams)
+    const script = CoinflipSetupContractHandler.createScript(params)
+    const contract = { type: 'coinflip-setup', params, script: '', address: '', state: 'active' as const, createdAt: 0 }
+    const ctx = { collaborative: false, currentTime: 0 }
+    expect(CoinflipSetupContractHandler.selectPath(script, contract, ctx)).toBeNull()
+  })
+
+  it('registerCoinflipContracts is idempotent and uses lib registry', () => {
+    // Import contractHandlers from the lib (re-exported) to guarantee the
+    // same singleton instance regardless of node_modules layout.
+    const { contractHandlers: libRegistry } = require('arkade-coinflip')
+    registerCoinflipContracts()
+    registerCoinflipContracts()
+    expect(libRegistry.has(COINFLIP_SETUP_TYPE)).toBe(true)
+  })
+})
+
+describe('CoinflipFinalContractHandler', () => {
+  const { CoinflipFinalContractHandler } = require('arkade-coinflip')
+
+  const creatorPubkey = new Uint8Array(32).fill(1)
+  const playerPubkey = new Uint8Array(32).fill(2)
+  const serverPubkey = new Uint8Array(32).fill(3)
+  const creatorSecret = new Uint8Array(15).fill(7) // heads (15 bytes)
+  const playerSecret = new Uint8Array(16).fill(8)  // tails (16 bytes)
+  const { createHash } = require('crypto')
+  const creatorHash = new Uint8Array(createHash('sha256').update(creatorSecret).digest())
+  const playerHash = new Uint8Array(createHash('sha256').update(playerSecret).digest())
+  const finalExpiration = 1_700_000_000n
+
+  const typedParams = { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration }
+  const serialized = CoinflipFinalContractHandler.serializeParams(typedParams)
+  const script = CoinflipFinalContractHandler.createScript(serialized)
+
+  it('createScript yields a CoinflipFinalScript with 3 leaves', () => {
+    expect(script.leaves.length).toBe(3)
+    expect(script.creatorWin()).toBeTruthy()
+    expect(script.playerWin()).toBeTruthy()
+    expect(script.abort()).toBeTruthy()
+  })
+
+  it('selectPath picks creatorWin when secret sizes differ (heads vs tails)', () => {
+    const contract = {
+      type: 'coinflip-final',
+      params: { ...serialized, creatorSecret: hex.encode(creatorSecret), playerSecret: hex.encode(playerSecret) },
+      script: '', address: '', state: 'active' as const, createdAt: 0,
+    }
+    const sel = CoinflipFinalContractHandler.selectPath(script, contract, { collaborative: true, currentTime: 0 })
+    expect(sel).not.toBeNull()
+    expect(sel!.leaf).toEqual(script.creatorWin())
+    expect(sel!.extraWitness).toHaveLength(2)
+  })
+
+  it('selectPath picks playerWin when secret sizes match', () => {
+    // Both 15-byte secrets → sizes match → player wins
+    const sameSize = new Uint8Array(15).fill(9)
+    const sameSizeHash = new Uint8Array(createHash('sha256').update(sameSize).digest())
+    const params = CoinflipFinalContractHandler.serializeParams({
+      ...typedParams, creatorHash: sameSizeHash, playerHash: sameSizeHash,
+    })
+    const sameScript = CoinflipFinalContractHandler.createScript(params)
+    const contract = {
+      type: 'coinflip-final',
+      params: { ...params, creatorSecret: hex.encode(sameSize), playerSecret: hex.encode(sameSize) },
+      script: '', address: '', state: 'active' as const, createdAt: 0,
+    }
+    const sel = CoinflipFinalContractHandler.selectPath(sameScript, contract, { collaborative: true, currentTime: 0 })
+    expect(sel!.leaf).toEqual(sameScript.playerWin())
+  })
+
+  it('selectPath picks abort when finalExpiration has passed', () => {
+    const contract = {
+      type: 'coinflip-final', params: serialized,
+      script: '', address: '', state: 'active' as const, createdAt: 0,
+    }
+    const futureMs = Number(finalExpiration + 1n) * 1000
+    const sel = CoinflipFinalContractHandler.selectPath(script, contract, { collaborative: false, currentTime: futureMs })
+    expect(sel!.leaf).toEqual(script.abort())
+  })
+})
+
 // -- Integration Tests (require regtest) --
 
 /** Strip prefix byte from compressed pubkey to get x-only (32 bytes) */

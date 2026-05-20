@@ -58,3 +58,18 @@ export {
 
 // Coin selection
 export { coinSelect } from './coinselect'
+
+// SDK Contract handlers
+export {
+  CoinflipSetupContractHandler,
+  CoinflipFinalContractHandler,
+  COINFLIP_SETUP_TYPE,
+  COINFLIP_FINAL_TYPE,
+  registerCoinflipContracts,
+} from './contract'
+
+// Re-export the SDK's global contract registry so consumers that resolve
+// the lib via npm workspaces get the same singleton the handlers register
+// against — avoids dueling-instance issues when the SDK ends up installed
+// in multiple package node_modules trees.
+export { contractHandlers } from '@arkade-os/sdk'

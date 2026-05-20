@@ -14,6 +14,7 @@ const { EventSource: NodeEventSource } = require('eventsource')
 
 import express from 'express'
 import cors from 'cors'
+import { registerCoinflipContracts } from 'arkade-coinflip'
 import { initDb } from './db'
 import { initHouseWallet } from './house-wallet'
 import { startExpiryTimer } from './game-engine'
@@ -24,6 +25,10 @@ const PUBLIC_PORT = parseInt(process.env.PUBLIC_PORT || '3001', 10)
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '3002', 10)
 
 async function main() {
+  // Register coinflip-setup and coinflip-final with the SDK contract registry
+  // so they can be resolved via contractHandlers / ContractManager / arkcontract=.
+  registerCoinflipContracts()
+
   // Initialize database and house wallet
   console.log('Initializing database...')
   await initDb()

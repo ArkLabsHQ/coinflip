@@ -59,10 +59,18 @@ export async function initDb(): Promise<void> {
       status TEXT NOT NULL DEFAULT 'pending',
       setup_tx_hex TEXT,
       final_tx_hex TEXT,
+      setup_script_hex TEXT,
+      final_script_hex TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       resolved_at TEXT
     )
   `)
+  // Backfill columns for pre-existing DBs that predate the contract-subsystem wiring.
+  // sql.js raises a parse error for ALTER TABLE on a missing column; swallow if it
+  // already exists.
+  for (const col of ['setup_script_hex', 'final_script_hex']) {
+    try { db.run(`ALTER TABLE games ADD COLUMN ${col} TEXT`) } catch { /* already there */ }
+  }
 
   // Seed default config
   const seedSql = "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)"
@@ -147,6 +155,8 @@ export interface GameRow {
   status: string
   setup_tx_hex: string | null
   final_tx_hex: string | null
+  setup_script_hex: string | null
+  final_script_hex: string | null
   created_at: string
   resolved_at: string | null
 }
@@ -161,13 +171,28 @@ export function createGame(game: {
   houseSecretHex: string
   setupTxHex?: string
   finalTxHex?: string
+  setupScriptHex?: string
+  finalScriptHex?: string
 }): void {
   db.run(
-    `INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, player_change_address, house_secret_hex, setup_tx_hex, final_tx_hex)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [game.id, game.tier, game.playerPubkey, game.playerChoice, game.playerHash, game.playerChangeAddress || null, game.houseSecretHex, game.setupTxHex || null, game.finalTxHex || null]
+    `INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, player_change_address, house_secret_hex, setup_tx_hex, final_tx_hex, setup_script_hex, final_script_hex)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [game.id, game.tier, game.playerPubkey, game.playerChoice, game.playerHash, game.playerChangeAddress || null, game.houseSecretHex, game.setupTxHex || null, game.finalTxHex || null, game.setupScriptHex || null, game.finalScriptHex || null]
   )
   saveDb()
+}
+
+/** Look up a game by either its setup or final contract script (used by event handlers). */
+export function getGameByContractScript(scriptHex: string): GameRow | undefined {
+  const stmt = db.prepare('SELECT * FROM games WHERE setup_script_hex = ? OR final_script_hex = ? LIMIT 1')
+  stmt.bind([scriptHex, scriptHex])
+  if (stmt.step()) {
+    const row = stmt.getAsObject() as unknown as GameRow
+    stmt.free()
+    return row
+  }
+  stmt.free()
+  return undefined
 }
 
 export function updateGame(id: string, updates: Partial<{

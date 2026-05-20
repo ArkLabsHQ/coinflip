@@ -6,6 +6,10 @@ import {
   determineWinner,
   buildGameTransactions,
   coinSelect,
+  getSetupScript,
+  getFinalScript,
+  getSetupAddress,
+  getFinalAddress,
   type Game,
   type VtxoInput,
 } from 'arkade-coinflip'
@@ -14,6 +18,7 @@ import {
   createGame as dbCreateGame,
   updateGame,
   getGame,
+  getGames,
   getConfig,
   getPendingGamesCount,
   expirePendingGames,
@@ -28,6 +33,10 @@ import {
   getArkInfo,
   getNetworkHrp,
 } from './house-wallet'
+import {
+  createGameContracts,
+  markGameContractsInactive,
+} from './contract-manager'
 
 export interface PlayRequest {
   tier: number
@@ -227,6 +236,15 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
   const setupTxHex = hex.encode(signedSetup.toPSBT())
   const finalTxHex = hex.encode(signedFinal.toPSBT())
 
+  // Derive contract scripts/addresses so we can register them with the SDK
+  // ContractManager (and persist them on the game row for later lookup).
+  const setupVtxoScript = getSetupScript(game)
+  const finalVtxoScript = getFinalScript(game)
+  const setupAddress = getSetupAddress(game, networkHrp)
+  const finalAddress = getFinalAddress(game, networkHrp)
+  const setupScriptHex = hex.encode(setupVtxoScript.pkScript)
+  const finalScriptHex = hex.encode(finalVtxoScript.pkScript)
+
   // Store game in DB
   dbCreateGame({
     id: gameId,
@@ -238,7 +256,44 @@ export async function handlePlay(req: PlayRequest): Promise<PlayResult> {
     houseSecretHex: Buffer.from(houseSecret).toString('hex'),
     setupTxHex,
     finalTxHex,
+    setupScriptHex,
+    finalScriptHex,
   })
+
+  // Register both contracts as `active` so the watcher fires if a player ever
+  // broadcasts the trustless-fallback setup/final tx. Failures here mustn't
+  // block the play response — the game is still tradeable via the synchronous
+  // happy path; the contract subsystem is purely defensive plumbing.
+  try {
+    await createGameContracts({
+      gameId,
+      setup: {
+        params: {
+          creatorPubkey: game.creator!.pubkey!,
+          playerPubkey: game.player!.pubkey!,
+          serverPubkey: game.serverPubkey!,
+          creatorHash: game.creator!.hash!,
+          setupExpiration: BigInt(game.setupExpiration!),
+        },
+        script: setupScriptHex,
+        address: setupAddress.encode(),
+      },
+      final: {
+        params: {
+          creatorPubkey: game.creator!.pubkey!,
+          playerPubkey: game.player!.pubkey!,
+          serverPubkey: game.serverPubkey!,
+          creatorHash: game.creator!.hash!,
+          playerHash: game.player!.hash!,
+          finalExpiration: BigInt(game.finalExpiration!),
+        },
+        script: finalScriptHex,
+        address: finalAddress.encode(),
+      },
+    })
+  } catch (err) {
+    console.warn(`[game ${gameId}] createGameContracts failed: ${err instanceof Error ? err.message : err}`)
+  }
 
   return {
     gameId,
@@ -331,6 +386,12 @@ export async function handleSign(gameId: string, req: SignRequest): Promise<Sign
     status: 'resolved',
   })
 
+  // Stop the watcher polling the (now-defunct) coinflip-setup / coinflip-final
+  // addresses for this game. The trustless-fallback txs remain signed and the
+  // player can still broadcast them, but we don't need to react to that any
+  // more — the pot was already paid out via the synchronous happy path above.
+  await markGameContractsInactive(game.setup_script_hex, game.final_script_hex)
+
   return {
     winner,
     houseSecret: game.house_secret_hex,
@@ -347,9 +408,18 @@ export async function handleSign(gameId: string, req: SignRequest): Promise<Sign
 // Cleanup expired pending games every 60 seconds
 export function startExpiryTimer(): NodeJS.Timeout {
   return setInterval(() => {
+    // Snapshot which pending games are about to flip to "expired" so we can
+    // also inactivate their contracts. Stay below the DB call; the SQL UPDATE
+    // doesn't tell us which rows changed.
+    const aboutToExpire = getGames({ status: 'pending', limit: 500 })
+      .filter((g) => Date.parse(`${g.created_at} UTC`) < Date.now() - 5 * 60_000)
     const expired = expirePendingGames(5)
     if (expired > 0) {
       console.log(`Expired ${expired} pending games`)
+      for (const g of aboutToExpire) {
+        markGameContractsInactive(g.setup_script_hex, g.final_script_hex)
+          .catch((err) => console.warn(`[expiry ${g.id}] inactivate failed: ${err}`))
+      }
     }
   }, 60_000)
 }

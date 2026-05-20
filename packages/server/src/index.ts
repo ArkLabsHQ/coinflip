@@ -16,7 +16,8 @@ import express from 'express'
 import cors from 'cors'
 import { registerCoinflipContracts } from 'arkade-coinflip'
 import { initDb } from './db'
-import { initHouseWallet } from './house-wallet'
+import { getHouseWalletInstance, initHouseWallet } from './house-wallet'
+import { initContractManager } from './contract-manager'
 import { startExpiryTimer } from './game-engine'
 import publicRoutes from './public-routes'
 import adminRoutes from './admin/routes'
@@ -35,6 +36,9 @@ async function main() {
 
   console.log('Initializing house wallet...')
   await initHouseWallet()
+
+  console.log('Initializing contract manager...')
+  await initContractManager(getHouseWalletInstance())
 
   // Start game expiry timer
   startExpiryTimer()

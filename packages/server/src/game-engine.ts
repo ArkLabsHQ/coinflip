@@ -13,7 +13,7 @@ import {
   type Game,
   type VtxoInput,
 } from 'arkade-coinflip'
-import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { isVtxoExpiringSoon, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
 import { createGameContracts, markGameContractsInactive } from './contract-manager.js'
 import type { AppDeps } from './deps.js'
@@ -108,6 +108,53 @@ function vtxoToInput(vtxo: ExtendedVirtualCoin): VtxoInput {
 }
 
 /**
+ * Minimum remaining VTXO lifetime when selecting house VTXOs for a new
+ * game. The fallback path requires the input VTXO to remain spendable
+ * up to `setupExpiration` (10 min) plus a safety margin for the Ark
+ * server's settlement round.
+ */
+export const VTXO_LIFETIME_BUFFER_MS = 30 * 60_000
+
+/**
+ * Drop VTXOs that would expire before the fallback's final tx window has
+ * a chance to settle. The wallet's auto-renewal loop *should* keep these
+ * out of `getVtxos()` already, but we filter explicitly so a broken
+ * renewal config can't silently poison a game.
+ *
+ * Exported for unit testing.
+ */
+export function selectableHouseVtxos(
+  vtxos: ExtendedVirtualCoin[],
+  bufferMs = VTXO_LIFETIME_BUFFER_MS,
+): { selectable: ExtendedVirtualCoin[]; dropped: ExtendedVirtualCoin[] } {
+  const selectable: ExtendedVirtualCoin[] = []
+  const dropped: ExtendedVirtualCoin[] = []
+  for (const v of vtxos) {
+    if (isVtxoExpiringSoon(v, bufferMs)) {
+      dropped.push(v)
+    } else {
+      selectable.push(v)
+    }
+  }
+  return { selectable, dropped }
+}
+
+/**
+ * Try to renew house VTXOs by joining a settlement batch. Returns true if
+ * a settle round was triggered, false if the wallet has no expiring VTXOs
+ * to renew. Called from `handlePlay` when the selectable house balance
+ * would otherwise be insufficient.
+ */
+export async function renewExpiringHouseVtxos(deps: AppDeps): Promise<boolean> {
+  const all = await deps.wallet.getVtxos()
+  const { dropped } = selectableHouseVtxos(all)
+  if (dropped.length === 0) return false
+  console.log(`[house wallet] renewing ${dropped.length} expiring VTXOs via settle()`)
+  await deps.wallet.settle()
+  return true
+}
+
+/**
  * Handle a play request: house generates secret, builds game transactions,
  * signs the house's inputs, and returns everything to the player.
  *
@@ -152,9 +199,27 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
   const housePubkey = Buffer.from(await deps.identity.compressedPublicKey()).toString('hex')
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
 
-  // Select house VTXOs for the bet
-  const allHouseVtxos = await deps.wallet.getVtxos()
-  const houseVtxoInputs = allHouseVtxos.map(vtxoToInput)
+  // Select house VTXOs for the bet, filtering out anything that would
+  // expire before the trustless-fallback window closes. If filtering
+  // leaves us short of the tier amount, try renewing via batch settle()
+  // once before giving up — the wallet's auto-renewal might be disabled
+  // or stuck on a fee-config issue.
+  let allHouseVtxos = await deps.wallet.getVtxos()
+  let { selectable: usableHouseVtxos, dropped } =
+    selectableHouseVtxos(allHouseVtxos)
+  let usableSum = usableHouseVtxos.reduce((acc, v) => acc + v.value, 0)
+  if (usableSum < req.tier && dropped.length > 0) {
+    await renewExpiringHouseVtxos(deps)
+    allHouseVtxos = await deps.wallet.getVtxos()
+    ;({ selectable: usableHouseVtxos } = selectableHouseVtxos(allHouseVtxos))
+    usableSum = usableHouseVtxos.reduce((acc, v) => acc + v.value, 0)
+  }
+  if (usableSum < req.tier) {
+    throw new Error(
+      `House balance insufficient after expiry filter. Usable: ${usableSum}, needed: ${req.tier}`,
+    )
+  }
+  const houseVtxoInputs = usableHouseVtxos.map(vtxoToInput)
   const { inputs: selectedHouseVtxos } = coinSelect(houseVtxoInputs, BigInt(req.tier))
   if (!selectedHouseVtxos) {
     throw new Error('Could not select enough house VTXOs for the bet')

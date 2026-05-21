@@ -290,3 +290,76 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
     expect(resp.status).toBe(404)
   })
 })
+
+describe('selectableHouseVtxos: VTXO expiry filter', () => {
+  // Constructed VTXOs with explicit batchExpiry (milliseconds, see
+  // isVtxoExpiringSoon in @arkade-os/sdk/wallet/vtxo-manager). The SDK
+  // ignores expiries before year 2025 as a regtest workaround, so we
+  // anchor all fixtures off Date.now() rather than synthetic small ints.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+  const { selectableHouseVtxos, VTXO_LIFETIME_BUFFER_MS } = require('arkade-coinflip-server/dist/game-engine.js')
+
+  function fakeVtxo(batchExpiryMs: number, value = 1000): unknown {
+    return {
+      txid: 'a'.repeat(64),
+      vout: 0,
+      value,
+      script: '00'.repeat(34),
+      intentTapLeafScript: [new Uint8Array(33), new Uint8Array(34)],
+      tapTree: new Uint8Array(0),
+      virtualStatus: { state: 'settled', batchExpiry: batchExpiryMs },
+      createdAt: 0,
+      isPreconfirmed: false,
+      isSwept: false,
+      isUnrolled: false,
+      isSpent: false,
+      spentBy: '',
+      settledBy: '',
+      arkTxid: '',
+    }
+  }
+
+  const MS = 1
+  const MIN = 60_000
+
+  it('keeps VTXOs whose batchExpiry is beyond the buffer', () => {
+    const now = Date.now()
+    const fresh = fakeVtxo(now + 2 * 60 * MIN) // 2h ahead → safe
+    const expiring = fakeVtxo(now + 1 * MIN)   // 1min ahead → drop
+    const { selectable, dropped } = selectableHouseVtxos([fresh, expiring])
+    expect(selectable).toHaveLength(1)
+    expect(dropped).toHaveLength(1)
+    expect(VTXO_LIFETIME_BUFFER_MS).toBe(30 * MIN)
+  })
+
+  it('drops every VTXO when all are inside the buffer window', () => {
+    const now = Date.now()
+    const vtxos = [fakeVtxo(now + 1 * MIN), fakeVtxo(now + 5 * MIN), fakeVtxo(now + 10 * MIN)]
+    const { selectable, dropped } = selectableHouseVtxos(vtxos as never)
+    expect(selectable).toHaveLength(0)
+    expect(dropped).toHaveLength(3)
+  })
+
+  it('keeps every VTXO when all are comfortably fresh', () => {
+    const now = Date.now()
+    const vtxos = [fakeVtxo(now + 60 * MIN), fakeVtxo(now + 120 * MIN)]
+    const { selectable, dropped } = selectableHouseVtxos(vtxos as never)
+    expect(selectable).toHaveLength(2)
+    expect(dropped).toHaveLength(0)
+  })
+
+  it('respects an explicit bufferMs override', () => {
+    const now = Date.now()
+    const v = fakeVtxo(now + 10 * MIN) // 10 min remaining
+    const tight = selectableHouseVtxos([v] as never, 5 * MIN) // 5-min buffer
+    expect(tight.selectable).toHaveLength(1) // 10 > 5 → keep
+    const wide = selectableHouseVtxos([v] as never, 20 * MIN) // 20-min buffer
+    expect(wide.selectable).toHaveLength(0) // 10 < 20 → drop
+  })
+
+  // Avoid an unused-var lint by referencing MS once.
+  it('exports VTXO_LIFETIME_BUFFER_MS as a positive number', () => {
+    expect(VTXO_LIFETIME_BUFFER_MS).toBeGreaterThan(0)
+    expect(MS).toBe(1)
+  })
+})

@@ -70,7 +70,12 @@ const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
 const BOLTZ_API_URL = process.env.BOLTZ_API_URL || 'http://localhost:9069'
 
 const FUND_AMOUNT_BTC = 0.005 // 500k sats — enough headroom for swaps + fees
-const SUBMARINE_INVOICE_SATS = 30_000
+// Submarine runs first to pre-warm the channel; it must shift enough
+// outbound liquidity from boltz-lnd to lnd to cover the reverse swap.
+// Keep submarine ≥ 2× reverse + fees so a fresh arkade-regtest channel
+// (which opens with all outbound on the boltz-lnd side) has room to
+// route the subsequent reverse swap.
+const SUBMARINE_INVOICE_SATS = 150_000
 const REVERSE_INVOICE_SATS = 50_000
 
 function sleep(ms: number): Promise<void> {

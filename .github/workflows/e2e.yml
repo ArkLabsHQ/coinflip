@@ -43,7 +43,10 @@ jobs:
 
       - name: Run unit tests (no regtest needed)
         working-directory: packages/e2e
-        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="coinflip" -t "gameFromEvents|determineWinner|generateSecret|CoinflipSetupScript|CoinflipFinalScript|coinSelect|event type guards|server-as-counterparty"
+        # Path anchored to `coinflip.test.ts` only — the broader `coinflip`
+        # substring matches every test file in this repo because the working
+        # directory itself contains "coinflip", which is not what we want.
+        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="src/coinflip\\.test\\.ts$" -t "gameFromEvents|determineWinner|generateSecret|CoinflipSetupScript|CoinflipFinalScript|coinSelect|event type guards|server-as-counterparty|ContractHandler"
 
   e2e-tests:
     name: E2E Integration Tests

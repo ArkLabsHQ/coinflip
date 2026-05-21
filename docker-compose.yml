@@ -10,6 +10,11 @@ services:
       - ESPLORA_URL=http://chopsticks:3000
       - PUBLIC_PORT=3001
       - ADMIN_PORT=3002
+      # Bind admin listener inside the container to all interfaces so
+      # the docker port mapping below can reach it. ADMIN_HOST defaults
+      # to 127.0.0.1 in src/index.ts for production-style isolation;
+      # the docker-compose port map is the right access boundary here.
+      - ADMIN_HOST=0.0.0.0
       - DATA_DIR=/app/data
     ports:
       - "3002:3002"

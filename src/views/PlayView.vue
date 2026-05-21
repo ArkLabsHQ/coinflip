@@ -72,7 +72,8 @@ import { createHash } from '@/utils/crypto'
 export default defineComponent({
   name: 'PlayView',
   components: { CoinFlip, TierSelector, ResultOverlay },
-  setup() {
+  emits: ['open-wallet'],
+  setup(_props, { emit }) {
     const store = useStore()
 
     const tiers = ref<number[]>([1000, 5000, 10000, 50000])
@@ -162,7 +163,25 @@ export default defineComponent({
       loadTiers()
     }
 
-    onMounted(loadTiers)
+    onMounted(async () => {
+      await loadTiers()
+
+      // Trigger Ark connection if not already connected. We need this for
+      // the wallet drawer's deposit/withdraw flows AND for the balance
+      // shown in the topbar pill.
+      if (store.state.ark.status !== 'connected' && store.state.ark.status !== 'connecting') {
+        store.dispatch('ark/checkConnection').catch(() => { /* surfaced in drawer */ })
+      }
+
+      // First-time user has no balance — auto-open the wallet drawer
+      // pointing at Receive so the "deposit first" step isn't a hidden
+      // pre-requisite. We check after connection settles to avoid a flash.
+      setTimeout(() => {
+        const settled = Number(store.getters['ark/balance'] || 0)
+        const boarding = Number(store.getters['ark/boardingBalance'] || 0)
+        if (settled === 0 && boarding === 0) emit('open-wallet')
+      }, 1500)
+    })
 
     return {
       tiers, maxAvailable, houseReady,

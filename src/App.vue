@@ -6,17 +6,17 @@
         <span class="logo-text">COINFLIP</span>
       </router-link>
       <div class="topbar-right">
-        <span class="balance mono" v-if="walletBalance > 0">
-          {{ formatSats(walletBalance) }}
+        <button class="balance-pill mono" @click="walletOpen = true" :title="connTitle">
+          <span class="conn-dot" :class="arkStatus"></span>
+          <span class="balance-num">{{ formatSats(walletBalance) }}</span>
           <span class="balance-unit">sats</span>
-        </span>
-        <router-link to="/wallet" class="nav-link">Wallet</router-link>
+        </button>
       </div>
     </nav>
 
     <router-view v-slot="{ Component }">
       <transition name="fade" mode="out-in">
-        <component :is="Component" />
+        <component :is="Component" @open-wallet="walletOpen = true" />
       </transition>
     </router-view>
 
@@ -25,34 +25,68 @@
         <span class="bottom-icon">&#9824;</span>
         Play
       </router-link>
-      <router-link to="/wallet" class="bottom-link" :class="{ active: $route.path === '/wallet' }">
+      <button class="bottom-link" :class="{ active: walletOpen }" @click="walletOpen = true">
         <span class="bottom-icon">&#9830;</span>
         Wallet
-      </router-link>
+      </button>
       <router-link to="/history" class="bottom-link" :class="{ active: $route.path === '/history' }">
         <span class="bottom-icon">&#9827;</span>
         History
       </router-link>
     </nav>
+
+    <WalletDrawer v-model:open="walletOpen" />
   </div>
 </template>
 
 <script lang="ts">
-import { defineComponent, computed } from 'vue'
+import { defineComponent, computed, ref, watch } from 'vue'
 import { useStore } from 'vuex'
+import { useRoute, useRouter } from 'vue-router'
+import WalletDrawer from '@/components/WalletDrawer.vue'
 
 export default defineComponent({
   name: 'App',
+  components: { WalletDrawer },
   setup() {
     const store = useStore()
+    const route = useRoute()
+    const router = useRouter()
     const isInitialized = computed(() => store.state.wallet?.isInitialized)
-    const walletBalance = computed(() => store.state.walletBalance || 0)
+    const walletBalance = computed(() => {
+      const settled = store.getters['ark/balance']
+      return settled !== undefined ? Number(settled) : (store.state.walletBalance || 0)
+    })
+    const arkStatus = computed(() => store.state.ark?.status as string)
+    const connTitle = computed(() => {
+      if (arkStatus.value === 'connected') return 'Connected to Ark'
+      if (arkStatus.value === 'connecting') return 'Connecting…'
+      if (arkStatus.value === 'error') return store.state.ark?.lastError?.message || 'Connection error'
+      return 'Disconnected'
+    })
 
-    function formatSats(n: number): string {
-      return n.toLocaleString()
+    const walletOpen = ref(false)
+
+    // Deep-link support: /wallet (legacy) or /?wallet=open both open the drawer.
+    function maybeOpenFromRoute() {
+      if (route.path === '/wallet' || route.query.wallet === 'open') {
+        walletOpen.value = true
+        if (route.path === '/wallet') router.replace('/')
+      }
     }
+    watch(() => [route.path, route.query.wallet], maybeOpenFromRoute, { immediate: true })
 
-    return { isInitialized, walletBalance, formatSats }
+    // Strip ?wallet=open from URL when the drawer closes (so reload doesn't re-open).
+    watch(walletOpen, (open) => {
+      if (!open && route.query.wallet) {
+        const q = { ...route.query }; delete q.wallet
+        router.replace({ query: q })
+      }
+    })
+
+    function formatSats(n: number): string { return n.toLocaleString() }
+
+    return { isInitialized, walletBalance, formatSats, walletOpen, arkStatus, connTitle }
   },
 })
 </script>
@@ -80,127 +114,54 @@ export default defineComponent({
 }
 
 .logo {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  text-decoration: none;
+  display: flex; align-items: center; gap: 8px;
+  text-decoration: none; color: var(--text);
+  font-weight: 800; letter-spacing: 2px;
+  .logo-icon { color: var(--gold); font-size: 1.3rem; }
+  .logo-text { font-size: 0.9rem; }
 }
 
-.logo-icon {
-  color: var(--gold);
-  font-size: 1.25rem;
-  font-weight: 800;
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(247, 201, 72, 0.10);
-  border-radius: 8px;
-  border: 1px solid rgba(247, 201, 72, 0.15);
-}
+.topbar-right { display: flex; align-items: center; gap: 12px; }
 
-.logo-text {
+.balance-pill {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg-elevated); border: 1px solid var(--border-light);
   color: var(--text);
-  font-size: 0.8rem;
-  font-weight: 700;
-  letter-spacing: 2.5px;
+  padding: 8px 14px; border-radius: 999px;
+  font-size: 0.9rem; font-weight: 600;
+  cursor: pointer; transition: all 0.18s ease;
+  &:hover { border-color: var(--gold); box-shadow: 0 0 12px var(--gold-glow); }
+  .balance-num { color: var(--gold); }
+  .balance-unit { color: var(--text-muted); font-size: 0.72rem; }
 }
 
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 20px;
+.conn-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-muted);
+  &.connected { background: var(--green, #22c55e); box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }
+  &.connecting { background: var(--blue); animation: pulse 1.4s ease-in-out infinite; }
+  &.error { background: var(--red); }
 }
-
-.balance {
-  color: var(--gold);
-  font-size: 0.85rem;
-  font-weight: 600;
-  padding: 6px 14px;
-  background: rgba(247, 201, 72, 0.06);
-  border: 1px solid rgba(247, 201, 72, 0.10);
-  border-radius: 20px;
-}
-
-.balance-unit {
-  color: var(--text-muted);
-  font-weight: 400;
-  font-size: 0.75rem;
-  margin-left: 2px;
-}
-
-.nav-link {
-  color: var(--text-dim);
-  text-decoration: none;
-  font-size: 0.85rem;
-  font-weight: 500;
-  padding: 6px 12px;
-  border-radius: 6px;
-  transition: all 0.2s;
-
-  &:hover {
-    color: var(--text);
-    background: var(--bg-hover);
-  }
-}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
 .bottom-nav {
-  display: none;
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: var(--bg-subtle);
-  border-top: 1px solid var(--border);
-  padding: 6px 0 calc(6px + env(safe-area-inset-bottom));
-  z-index: 100;
-  backdrop-filter: blur(12px);
-}
-
-.bottom-link {
-  flex: 1;
-  text-align: center;
-  padding: 6px 8px;
-  color: var(--text-muted);
-  text-decoration: none;
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  transition: color 0.2s;
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-
-  &.active {
-    color: var(--gold);
-  }
+  justify-content: space-around;
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+  padding: 10px 0 14px;
+  position: sticky; bottom: 0; z-index: 50;
+}
+.bottom-link {
+  background: none; border: none;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  text-decoration: none; color: var(--text-muted);
+  font-size: 0.72rem; font-weight: 600; letter-spacing: 1px;
+  cursor: pointer; font-family: inherit;
+  .bottom-icon { font-size: 1.2rem; }
+  &.active, &.router-link-active { color: var(--gold); }
 }
 
-.bottom-icon {
-  font-size: 1.1rem;
-  line-height: 1;
-}
-
-@media (max-width: 640px) {
-  .bottom-nav {
-    display: flex;
-  }
-
-  .topbar-right .nav-link {
-    display: none;
-  }
-
-  .app {
-    padding-bottom: 64px;
-  }
-}
-
-.fade-enter-active, .fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-.fade-enter-from, .fade-leave-to {
-  opacity: 0;
-}
+.fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

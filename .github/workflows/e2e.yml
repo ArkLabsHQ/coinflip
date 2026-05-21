@@ -93,6 +93,14 @@ jobs:
         working-directory: packages/lib
         run: npm run build
 
+      - name: Install server dependencies
+        working-directory: packages/server
+        run: npm install --include=dev
+
+      - name: Build server
+        working-directory: packages/server
+        run: npm run build
+
       - name: Install E2E test dependencies
         working-directory: packages/e2e
         run: npm install --include=dev
@@ -102,7 +110,7 @@ jobs:
         env:
           ARK_SERVER_URL: http://localhost:7070
           ESPLORA_URL: http://localhost:3000
-        run: npx jest --runInBand --forceExit --testTimeout=120000 --ci
+        run: npx jest --runInBand --forceExit --testTimeout=300000 --ci
 
       - name: Capture logs on failure
         if: failure()

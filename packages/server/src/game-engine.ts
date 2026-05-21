@@ -85,9 +85,18 @@ async function calculateRake(potAmount: number, deps: AppDeps): Promise<number> 
   return rakeAmount
 }
 
-/** Convert SDK ExtendedVirtualCoin to lib VtxoInput */
+/**
+ * Convert SDK ExtendedVirtualCoin to lib VtxoInput.
+ *
+ * `intentTapLeafScript[1]` is the raw script with the Taproot leaf-version
+ * byte (0xc0) appended. `VtxoScript`'s constructor in the lib re-appends the
+ * version byte when it builds the tap tree, so we must strip the trailing
+ * byte here — otherwise the version ends up doubled and the script parser
+ * trips on `Unknown opcode=c0` when the tree is rebuilt downstream.
+ */
 function vtxoToInput(vtxo: ExtendedVirtualCoin): VtxoInput {
-  const leafHex = hex.encode(vtxo.intentTapLeafScript[1])
+  const rawScript = vtxo.intentTapLeafScript[1].slice(0, -1)
+  const leafHex = hex.encode(rawScript)
   return {
     vtxo: {
       outpoint: { txid: vtxo.txid, vout: vtxo.vout },

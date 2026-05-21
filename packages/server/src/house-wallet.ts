@@ -7,7 +7,9 @@
  */
 
 import { createHash } from 'crypto'
-import type { ArkInfo, Identity, Wallet } from '@arkade-os/sdk'
+import { SingleKey, Wallet, type ArkInfo, type Identity } from '@arkade-os/sdk'
+import { SQLiteContractRepository, SQLiteWalletRepository } from '@arkade-os/sdk/repositories/sqlite'
+import { getSqlExecutor } from './db.js'
 import type { ConfigRepository, HouseWalletRepository } from './repositories/types.js'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh'
@@ -19,17 +21,27 @@ export interface HouseWalletBundle {
   arkInfo: ArkInfo
 }
 
-export async function initHouseWallet(repos: {
-  houseWallet: HouseWalletRepository
-  config: ConfigRepository
-  // config is not strictly required today but kept on the signature so
-  // future bootstrap-time tweaks (custom URLs, fee policy) have somewhere
-  // to read from without re-threading the deps.
-}): Promise<HouseWalletBundle> {
+export interface InitHouseWalletOptions {
+  /**
+   * Settlement configuration forwarded to `Wallet.create`. Set to `false`
+   * to disable the wallet's auto-renewal loop (useful for tests that
+   * don't want a background ticker firing INTENT_INSUFFICIENT_FEE every
+   * 30 seconds against the regtest fee config).
+   */
+  settlementConfig?: false | object
+}
+
+export async function initHouseWallet(
+  repos: {
+    houseWallet: HouseWalletRepository
+    config: ConfigRepository
+    // config is not strictly required today but kept on the signature so
+    // future bootstrap-time tweaks (custom URLs, fee policy) have somewhere
+    // to read from without re-threading the deps.
+  },
+  options: InitHouseWalletOptions = {},
+): Promise<HouseWalletBundle> {
   void repos.config
-  const { Wallet, SingleKey } = await import('@arkade-os/sdk')
-  const { SQLiteWalletRepository, SQLiteContractRepository } = await import('@arkade-os/sdk/repositories/sqlite')
-  const { getSqlExecutor } = await import('./db.js')
   const executor = getSqlExecutor()
 
   const existing = await repos.houseWallet.get()
@@ -59,6 +71,8 @@ export async function initHouseWallet(repos: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
     },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...(options.settlementConfig !== undefined ? { settlementConfig: options.settlementConfig as any } : {}),
   })
 
   const arkInfo = await wallet.arkProvider.getInfo()

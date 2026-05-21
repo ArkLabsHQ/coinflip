@@ -209,18 +209,42 @@ export const CoinflipFinalContractHandler: ContractHandler<
 }
 
 /**
- * Register the coinflip setup + final contract handlers with the SDK's
- * global `contractHandlers` registry. Safe to call multiple times; subsequent
- * calls are no-ops because the registry rejects double-registration.
- *
- * Call once at startup on both server and any client that needs to
- * resolve coinflip contracts through the SDK contract system.
+ * Minimal registry shape — `register` + `has` — so consumers can register
+ * the coinflip handlers against ANY ContractHandlerRegistry instance, not
+ * just the one inside the lib's own SDK copy. In a multi-package install
+ * each package typically gets its own `@arkade-os/sdk` under
+ * `node_modules`, with its own module-scoped `contractHandlers` singleton;
+ * the caller must pass the registry from its own SDK to make the handler
+ * visible to the ContractManager it later constructs.
  */
-export function registerCoinflipContracts(): void {
-  if (!contractHandlers.has(COINFLIP_SETUP_TYPE)) {
-    contractHandlers.register(CoinflipSetupContractHandler)
+export interface CoinflipContractRegistry {
+  register(handler: unknown): void
+  has(type: string): boolean
+}
+
+/**
+ * Register the coinflip setup + final contract handlers with a SDK
+ * `contractHandlers` registry. Defaults to the lib's own SDK registry,
+ * but accepts any registry-shaped object so multi-package installs can
+ * register against the right singleton.
+ *
+ * Idempotent: safe to call multiple times against the same registry.
+ *
+ * @example
+ * ```ts
+ * // From a consumer that has its own @arkade-os/sdk copy:
+ * import { contractHandlers } from '@arkade-os/sdk'
+ * import { registerCoinflipContracts } from 'arkade-coinflip'
+ * registerCoinflipContracts(contractHandlers)
+ * ```
+ */
+export function registerCoinflipContracts(
+  registry: CoinflipContractRegistry = contractHandlers as unknown as CoinflipContractRegistry,
+): void {
+  if (!registry.has(COINFLIP_SETUP_TYPE)) {
+    registry.register(CoinflipSetupContractHandler)
   }
-  if (!contractHandlers.has(COINFLIP_FINAL_TYPE)) {
-    contractHandlers.register(CoinflipFinalContractHandler)
+  if (!registry.has(COINFLIP_FINAL_TYPE)) {
+    registry.register(CoinflipFinalContractHandler)
   }
 }

@@ -14,6 +14,7 @@ const { EventSource: NodeEventSource } = require('eventsource')
 
 import express from 'express'
 import cors from 'cors'
+import { contractHandlers } from '@arkade-os/sdk'
 import { registerCoinflipContracts } from 'arkade-coinflip'
 import { getSqlExecutor, initDb } from './db.js'
 import { makeRepos } from './repositories/index.js'
@@ -24,33 +25,55 @@ import { createPublicRoutes } from './public-routes.js'
 import { createAdminRoutes } from './admin/routes.js'
 import type { AppDeps } from './deps.js'
 
+// Re-exports for in-process consumers (tests / embedded use). Keeping these
+// in the main entry rather than a separate `bootstrap.ts` so a test can do
+//   `const { bootstrapDeps, createPublicRoutes } = require('arkade-coinflip-server')`
+// and drive everything from one import without auto-starting the listener.
+export { getSqlExecutor, initDb } from './db.js'
+export { makeRepos } from './repositories/index.js'
+export { initHouseWallet } from './house-wallet.js'
+export { attachContractEventHandler, initContractManager } from './contract-manager.js'
+export { startExpiryTimer } from './game-engine.js'
+export { createPublicRoutes } from './public-routes.js'
+export { createAdminRoutes } from './admin/routes.js'
+export type { AppDeps } from './deps.js'
+
 const PUBLIC_PORT = parseInt(process.env.PUBLIC_PORT || '3001', 10)
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '3002', 10)
 
-async function main() {
-  // 1. Register coinflip-setup and coinflip-final with the SDK contract registry
-  //    so they can be resolved via contractHandlers / ContractManager / arkcontract=.
-  registerCoinflipContracts()
+/**
+ * Build the full AppDeps cycle without starting any HTTP listeners.
+ * Equivalent to what `main()` does up to (but not including) the express
+ * `.listen()` calls. Useful for tests that hit routes via supertest.
+ */
+export interface BootstrapOptions {
+  /** Forwarded to `initHouseWallet` — see `InitHouseWalletOptions`. */
+  walletSettlementConfig?: false | object
+}
 
-  // 2. Bootstrap SQLite and the typed repositories that wrap it.
-  console.log('Initializing database...')
+export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<AppDeps> {
+  // Register against the server's own SDK registry. The lib has its own
+  // @arkade-os/sdk copy with a separate `contractHandlers` singleton — if we
+  // omitted this argument the lib would register into its own copy and the
+  // server's ContractManager.createContract would later fail with
+  // "No handler registered for contract type 'coinflip-setup'".
+  registerCoinflipContracts(contractHandlers)
   await initDb()
   const repos = makeRepos(getSqlExecutor())
-
-  // 3. House wallet — depends on the houseWallet + config repos.
-  console.log('Initializing house wallet...')
-  const { wallet, identity, arkInfo } = await initHouseWallet(repos)
-
-  // 4. ContractManager — depends on the live Wallet + repos for reconciliation.
-  console.log('Initializing contract manager...')
+  const { wallet, identity, arkInfo } = await initHouseWallet(repos, {
+    settlementConfig: options.walletSettlementConfig,
+  })
   const contractManager = await initContractManager(wallet, { repos })
-
-  // 5. Assemble the AppDeps bundle and attach the event subscriber now that
-  //    every field is populated.
   const deps: AppDeps = { repos, wallet, identity, arkInfo, contractManager }
   attachContractEventHandler(deps)
+  return deps
+}
 
-  // 6. Start game expiry timer
+async function main() {
+  console.log('Bootstrapping server dependencies...')
+  const deps = await bootstrapDeps()
+
+  // Start game expiry timer
   startExpiryTimer(deps)
 
   // Public API server
@@ -80,7 +103,11 @@ async function main() {
   })
 }
 
-main().catch((err) => {
-  console.error('Failed to start server:', err)
-  process.exit(1)
-})
+// Only auto-start when this file is the process entrypoint. Importing the
+// module (e.g. from tests) gets the re-exports without spinning up Express.
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('Failed to start server:', err)
+    process.exit(1)
+  })
+}

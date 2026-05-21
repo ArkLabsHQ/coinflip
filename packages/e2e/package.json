@@ -8,6 +8,7 @@
     "test:ci": "jest --runInBand --forceExit --testTimeout=120000 --ci"
   },
   "dependencies": {
+    "@arkade-os/boltz-swap": "^0.3.32",
     "@arkade-os/sdk": "^0.4.27",
     "@scure/base": "^1.2.1",
     "arkade-coinflip": "file:../lib",

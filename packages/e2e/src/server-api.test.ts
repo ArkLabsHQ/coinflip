@@ -193,6 +193,9 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
         playerChangeAddress,
       })
 
+    if (playRes.status !== 200) {
+      console.error('POST /api/play unexpected response:', playRes.status, playRes.body)
+    }
     expect(playRes.status).toBe(200)
     expect(playRes.body.gameId).toBeTruthy()
     expect(playRes.body.setupTxHex).toBeTruthy()

@@ -225,15 +225,40 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
   // leaves us short of the tier amount, try renewing via batch settle()
   // once before giving up — the wallet's auto-renewal might be disabled
   // or stuck on a fee-config issue.
+  //
+  // If the renewal itself fails (e.g. arkd 'no coin selection possible'
+  // because of a phantom intent or lingering settle state), fall back to
+  // using the expiring VTXOs anyway. The trustless fallback window
+  // (setupExpiration + finalExpiration = 20 min) accepts the residual risk
+  // that the VTXO might expire mid-game; the alternative — blocking play
+  // entirely — is worse for liveness.
   let allHouseVtxos = await deps.wallet.getVtxos()
   let { selectable: usableHouseVtxos, dropped } =
     selectableHouseVtxos(allHouseVtxos)
   let usableSum = usableHouseVtxos.reduce((acc, v) => acc + v.value, 0)
   if (usableSum < req.tier && dropped.length > 0) {
-    await renewExpiringHouseVtxos(deps)
-    allHouseVtxos = await deps.wallet.getVtxos()
-    ;({ selectable: usableHouseVtxos } = selectableHouseVtxos(allHouseVtxos))
-    usableSum = usableHouseVtxos.reduce((acc, v) => acc + v.value, 0)
+    try {
+      await renewExpiringHouseVtxos(deps)
+      allHouseVtxos = await deps.wallet.getVtxos()
+      ;({ selectable: usableHouseVtxos, dropped } = selectableHouseVtxos(allHouseVtxos))
+      usableSum = usableHouseVtxos.reduce((acc, v) => acc + v.value, 0)
+    } catch (renewErr) {
+      console.warn(
+        '[house wallet] settle() to renew expiring VTXOs failed; falling back to using them:',
+        renewErr instanceof Error ? renewErr.message : renewErr,
+      )
+    }
+
+    // Renewal either failed or wasn't enough — use the expiring VTXOs as a
+    // last resort so the user can still play.
+    if (usableSum < req.tier && dropped.length > 0) {
+      usableHouseVtxos = [...usableHouseVtxos, ...dropped]
+      usableSum = usableHouseVtxos.reduce((acc, v) => acc + v.value, 0)
+      console.warn(
+        `[house wallet] using ${dropped.length} expiring VTXO(s) as fallback; trustless-fallback ` +
+        'window may be tight if the player needs to exercise it',
+      )
+    }
   }
   if (usableSum < req.tier) {
     throw new Error(

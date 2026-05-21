@@ -1,7 +1,37 @@
 import { Module } from 'vuex'
+import { hex } from '@scure/base'
 import type { State as RootState } from '@/store'
-import { Wallet, SingleKey, type WalletBalance, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { Wallet, SingleKey, VtxoScript, type WalletBalance, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { initSwaps, destroySwaps } from '@/services/boltz'
+
+/** VtxoInput shape expected by the server's /api/play endpoint. */
+export interface VtxoInput {
+  vtxo: {
+    outpoint: { txid: string; vout: number }
+    amount: string
+    tapscripts: string[]
+  }
+  leaf: string
+}
+
+/**
+ * Convert an SDK VTXO into the lib's VtxoInput shape. Mirrors
+ * `vtxoToInput` in packages/server/src/game-engine.ts — see that file for
+ * the gory tap-tree / leaf-version notes.
+ */
+function vtxoToPlayerInput(v: ExtendedVirtualCoin): VtxoInput {
+  const fullScript = VtxoScript.decode(v.tapTree)
+  const tapscripts = fullScript.scripts.map((s) => hex.encode(s))
+  const forfeitScript = v.forfeitTapLeafScript[1].slice(0, -1)
+  return {
+    vtxo: {
+      outpoint: { txid: v.txid, vout: v.vout },
+      amount: v.value.toString(),
+      tapscripts,
+    },
+    leaf: hex.encode(forfeitScript),
+  }
+}
 
 export interface ArkServerInfo {
   pubkey: string
@@ -29,6 +59,20 @@ export interface BoardingUtxo {
   confirmations?: number
 }
 
+export interface TxHistoryEntry {
+  /** Best txid we have — arkTxid first, then commitment, then boarding. */
+  txid: string
+  /** 'SENT' | 'RECEIVED' */
+  type: string
+  /** Net sats moved by this tx (positive for received, positive for sent — direction in `type`). */
+  amount: number
+  settled: boolean
+  /** Unix ms */
+  createdAt: number
+  /** True if this entry corresponds to a boarding deposit. */
+  isBoarding: boolean
+}
+
 interface ArkState {
   server: string
   esplora: string
@@ -40,6 +84,7 @@ interface ArkState {
   walletBalance: WalletBalance | null
   arkAddress: string | null
   boardingAddress: string | null
+  txHistory: TxHistoryEntry[]
 }
 
 // SDK wallet instance (kept outside Vuex state to avoid reactivity issues with complex objects)
@@ -67,7 +112,8 @@ const ark: Module<ArkState, RootState> = {
     boardingUtxos: [],
     walletBalance: null,
     arkAddress: null,
-    boardingAddress: null
+    boardingAddress: null,
+    txHistory: []
   },
 
   mutations: {
@@ -103,6 +149,9 @@ const ark: Module<ArkState, RootState> = {
     },
     SET_BOARDING_ADDRESS(state, address: string | null) {
       state.boardingAddress = address
+    },
+    SET_TX_HISTORY(state, history: TxHistoryEntry[]) {
+      state.txHistory = history
     }
   },
 
@@ -208,6 +257,20 @@ const ark: Module<ArkState, RootState> = {
           amount: String(u.value),
           confirmations: u.status.confirmed && u.status.block_height ? u.status.block_height : 0,
         })))
+
+        // Fetch wallet transaction history (Ark + boarding combined).
+        // SDK returns ArkTransaction[] with TxKey carrying arkTxid /
+        // commitmentTxid / boardingTxid — flatten to a single best-effort
+        // txid and a `isBoarding` flag for the UI.
+        const history = await sdkWallet.getTransactionHistory()
+        commit('SET_TX_HISTORY', history.map((tx) => ({
+          txid: tx.key.arkTxid || tx.key.commitmentTxid || tx.key.boardingTxid,
+          type: tx.type,
+          amount: tx.amount,
+          settled: tx.settled,
+          createdAt: tx.createdAt,
+          isBoarding: !!tx.key.boardingTxid && !tx.key.arkTxid,
+        })))
       } catch (error) {
         console.error('Failed to refresh balance:', error)
       }
@@ -232,7 +295,31 @@ const ark: Module<ArkState, RootState> = {
       await _ctx.dispatch('refreshBalance')
 
       return txid
-    }
+    },
+
+    /**
+     * Greedy-select spendable VTXOs to cover `amount` sats, returning them in
+     * the VtxoInput shape the server's /api/play endpoint expects. Throws
+     * if the wallet does not have enough spendable balance.
+     */
+    async selectPlayerVtxoInputs(_ctx, amount: number): Promise<VtxoInput[]> {
+      if (!sdkWallet) throw new Error('Wallet not connected')
+      const all = await sdkWallet.getVtxos()
+      const spendable = all
+        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
+        .sort((a, b) => Number(b.value - a.value))
+      const picked: ExtendedVirtualCoin[] = []
+      let sum = 0n
+      for (const v of spendable) {
+        picked.push(v)
+        sum += BigInt(v.value)
+        if (sum >= BigInt(amount)) break
+      }
+      if (sum < BigInt(amount)) {
+        throw new Error(`Insufficient balance: have ${sum}, need ${amount}`)
+      }
+      return picked.map(vtxoToPlayerInput)
+    },
   },
 
   getters: {
@@ -261,6 +348,7 @@ const ark: Module<ArkState, RootState> = {
       return state.boardingUtxos.reduce((sum, u) => sum + BigInt(u.amount), BigInt(0))
     },
     walletBalance: (state) => state.walletBalance,
+    txHistory: (state) => state.txHistory,
   }
 }
 

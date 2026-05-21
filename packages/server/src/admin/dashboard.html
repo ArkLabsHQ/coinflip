@@ -192,6 +192,14 @@
   .badge-win { background: rgba(0,255,136,0.15); color: var(--green); }
   .badge-loss { background: rgba(255,68,68,0.15); color: var(--red); }
   .badge-pending { background: rgba(0,212,255,0.15); color: var(--blue); }
+  .badge-received { background: rgba(0,255,136,0.15); color: var(--green); }
+  .badge-sent { background: rgba(255,215,0,0.15); color: var(--gold); }
+  .badge-settled { background: rgba(0,255,136,0.12); color: var(--green); }
+  .badge-unsettled { background: rgba(0,212,255,0.12); color: var(--blue); }
+  .amount-pos { color: var(--green); }
+  .amount-neg { color: var(--gold); }
+  .txid-cell { cursor: pointer; }
+  .txid-cell:hover { color: var(--blue); }
 
   .balance-input {
     display: flex;
@@ -296,6 +304,18 @@
         <tr><th>ID</th><th>Tier</th><th>Winner</th><th>Rake</th><th>Status</th><th>Time</th></tr>
       </thead>
       <tbody id="gamesTable">
+        <tr><td colspan="6" class="empty">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Wallet Activity</h2>
+    <table>
+      <thead>
+        <tr><th>Direction</th><th>Amount</th><th>Type</th><th>Status</th><th>Time</th><th>Txid</th></tr>
+      </thead>
+      <tbody id="activityTable">
         <tr><td colspan="6" class="empty">Loading...</td></tr>
       </tbody>
     </table>
@@ -429,12 +449,59 @@
     }).join('');
   }
 
+  function timeAgoMs(ms) {
+    const s = Math.floor((Date.now() - ms) / 1000);
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
+
+  async function copyTxid(txid) {
+    await navigator.clipboard.writeText(txid);
+    showToast('Txid copied!');
+  }
+
+  async function loadActivity() {
+    const res = await fetch('/api/wallet/history');
+    const history = await res.json();
+    const tbody = document.getElementById('activityTable');
+    if (!Array.isArray(history) || history.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No transactions yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = history.map(tx => {
+      const isRecv = tx.type === 'RECEIVED';
+      const dirBadge = isRecv
+        ? '<span class="badge badge-received">&#9660; Received</span>'
+        : '<span class="badge badge-sent">&#9650; Sent</span>';
+      const amtClass = isRecv ? 'amount-pos' : 'amount-neg';
+      const amtSign = isRecv ? '+' : '−';
+      const typeBadge = tx.isBoarding
+        ? '<span class="badge badge-pending">Boarding</span>'
+        : '<span class="badge badge-pending">Ark</span>';
+      const statusBadge = tx.settled
+        ? '<span class="badge badge-settled">Settled</span>'
+        : '<span class="badge badge-unsettled">Pending</span>';
+      const short = tx.txid ? tx.txid.substring(0, 10) + '…' : '—';
+      const onclick = tx.txid ? `onclick="copyTxid('${tx.txid}')"` : '';
+      return `<tr>
+        <td>${dirBadge}</td>
+        <td class="${amtClass}">${amtSign}${fmt(Math.abs(tx.amount))} sats</td>
+        <td>${typeBadge}</td>
+        <td>${statusBadge}</td>
+        <td>${timeAgoMs(tx.createdAt)}</td>
+        <td class="txid-cell" ${onclick}>${short}</td>
+      </tr>`;
+    }).join('');
+  }
+
   async function init() {
-    await Promise.all([loadStatus(), loadConfig(), loadWallet(), loadGames()]);
+    await Promise.all([loadStatus(), loadConfig(), loadWallet(), loadGames(), loadActivity()]);
   }
 
   init();
-  setInterval(() => { loadStatus(); loadGames(); }, 10000);
+  setInterval(() => { loadStatus(); loadGames(); loadActivity(); }, 10000);
 </script>
 </body>
 </html>

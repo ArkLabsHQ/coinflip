@@ -128,5 +128,22 @@ export function createAdminRoutes(deps: AppDeps): Router {
     }
   })
 
+  // GET /api/wallet/history — house wallet transaction history (Ark + boarding combined)
+  router.get('/api/wallet/history', async (_req: Request, res: Response) => {
+    try {
+      const history = await deps.wallet.getTransactionHistory()
+      res.json(history.map((tx) => ({
+        txid: tx.key.arkTxid || tx.key.commitmentTxid || tx.key.boardingTxid,
+        type: tx.type,
+        amount: tx.amount,
+        settled: tx.settled,
+        createdAt: tx.createdAt,
+        isBoarding: !!tx.key.boardingTxid && !tx.key.arkTxid,
+      })))
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
   return router
 }

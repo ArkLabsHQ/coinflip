@@ -36,6 +36,7 @@
       <div class="drawer-tabs">
         <button :class="['tab', { active: tab === 'receive' }]" @click="tab = 'receive'">Receive</button>
         <button :class="['tab', { active: tab === 'send' }]" @click="tab = 'send'">Send</button>
+        <button :class="['tab', { active: tab === 'activity' }]" @click="tab = 'activity'">Activity</button>
         <button :class="['tab', { active: tab === 'settings' }]" @click="tab = 'settings'">Settings</button>
       </div>
 
@@ -165,6 +166,44 @@
           </div>
         </section>
 
+        <!-- ── Activity ───────────────────────────────────────────── -->
+        <section v-if="tab === 'activity'" class="activity-section">
+          <div v-if="txHistory.length === 0" class="empty-state">
+            <div class="empty-icon">&#9728;</div>
+            <div class="empty-text">No transactions yet</div>
+            <div class="hint">Your wallet activity will appear here</div>
+          </div>
+          <div v-else class="tx-list">
+            <div v-for="tx in txHistory" :key="tx.txid + ':' + tx.createdAt" class="tx-row">
+              <div class="tx-dir" :class="tx.type.toLowerCase()">
+                <span v-if="tx.type === 'RECEIVED'">&#9660;</span>
+                <span v-else>&#9650;</span>
+              </div>
+              <div class="tx-body">
+                <div class="tx-top">
+                  <span class="tx-label">
+                    {{ tx.type === 'RECEIVED' ? 'Received' : 'Sent' }}
+                    <span v-if="tx.isBoarding" class="tx-badge boarding">Boarding</span>
+                  </span>
+                  <span class="tx-amount" :class="tx.type.toLowerCase()">
+                    {{ tx.type === 'RECEIVED' ? '+' : '−' }}{{ Math.abs(tx.amount).toLocaleString() }}
+                    <span class="tx-unit">sats</span>
+                  </span>
+                </div>
+                <div class="tx-bottom">
+                  <span class="tx-time text-muted">{{ formatRelative(tx.createdAt) }}</span>
+                  <span class="tx-status" :class="tx.settled ? 'settled' : 'pending'">
+                    {{ tx.settled ? 'Settled' : 'Pending' }}
+                  </span>
+                </div>
+                <div v-if="tx.txid" class="tx-id mono" @click="copyText(tx.txid)">
+                  {{ tx.txid.slice(0, 12) }}…{{ tx.txid.slice(-8) }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- ── Settings ───────────────────────────────────────────── -->
         <section v-if="tab === 'settings'" class="settings-section">
           <button class="btn-outline" @click="showKey = true">Back Up Private Key</button>
@@ -290,9 +329,19 @@ export default defineComponent({
       return (wb.preconfirmed > 0) || ((wb.boarding?.confirmed ?? 0) > 0)
     })
     const isMutinyTestnet = computed(() => arkServer.value === 'https://mutinynet.arkade.sh')
+    const txHistory = computed(() => store.getters['ark/txHistory'] || [])
+
+    function formatRelative(ts: number): string {
+      const diff = Date.now() - ts
+      if (diff < 60_000) return 'just now'
+      if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
+      if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
+      if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`
+      return new Date(ts).toLocaleDateString()
+    }
 
     // Tabs + method selectors
-    const tab = ref<'receive' | 'send' | 'settings'>('receive')
+    const tab = ref<'receive' | 'send' | 'activity' | 'settings'>('receive')
     const depositMethod = ref<'lightning' | 'ark' | 'onchain'>('lightning')
     const withdrawMethod = ref<'lightning' | 'ark' | 'onchain'>('lightning')
 
@@ -505,7 +554,7 @@ export default defineComponent({
       store, close, reconnect,
       arkStatus, ready, connText, arkServer, info,
       usdBalance, arkAddress, privateKey, boardingAddress, boardingBalance, boardingUtxos,
-      hasUnsettledFunds, isMutinyTestnet,
+      hasUnsettledFunds, isMutinyTestnet, txHistory, formatRelative,
       tab, depositMethod, withdrawMethod,
       depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
       withdrawAddress, withdrawAmount, onchainWithdrawAddress, onchainWithdrawAmount,
@@ -665,6 +714,63 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .boarding-conf { font-size: 0.72rem; margin-left: auto; }
 
 .settings-section { display: flex; flex-direction: column; gap: 12px; }
+
+.activity-section { display: flex; flex-direction: column; gap: 4px; }
+.empty-state {
+  text-align: center; padding: 40px 20px;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  .empty-icon { font-size: 2rem; opacity: 0.4; }
+  .empty-text { font-weight: 600; color: var(--text-muted); }
+}
+.tx-list { display: flex; flex-direction: column; gap: 6px; }
+.tx-row {
+  display: flex; gap: 12px; padding: 12px;
+  background: var(--bg-elevated); border: 1px solid var(--border-light);
+  border-radius: 10px;
+  transition: border-color 0.18s;
+  &:hover { border-color: var(--blue); }
+}
+.tx-dir {
+  width: 32px; height: 32px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; font-size: 0.85rem; font-weight: 700;
+  &.received { background: rgba(34, 197, 94, 0.12); color: var(--green, #22c55e); }
+  &.sent { background: rgba(247, 201, 72, 0.12); color: var(--gold); }
+}
+.tx-body { flex: 1; min-width: 0; }
+.tx-top {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 0.85rem; font-weight: 600;
+}
+.tx-label { color: var(--text); display: flex; align-items: center; gap: 8px; }
+.tx-amount {
+  font-family: ui-monospace, monospace;
+  &.received { color: var(--green, #22c55e); }
+  &.sent { color: var(--gold); }
+  .tx-unit { font-size: 0.7rem; color: var(--text-muted); margin-left: 3px; }
+}
+.tx-bottom {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 4px; font-size: 0.72rem;
+}
+.tx-time { letter-spacing: 0.3px; }
+.tx-status {
+  padding: 2px 8px; border-radius: 6px;
+  font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  &.settled { background: rgba(34, 197, 94, 0.1); color: var(--green, #22c55e); }
+  &.pending { background: rgba(56, 189, 248, 0.1); color: var(--blue); }
+}
+.tx-badge {
+  font-size: 0.62rem; padding: 1px 6px; border-radius: 4px;
+  font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  &.boarding { background: rgba(247, 201, 72, 0.12); color: var(--gold); }
+}
+.tx-id {
+  margin-top: 6px; font-size: 0.68rem; color: var(--text-muted);
+  cursor: pointer;
+  &:hover { color: var(--blue); }
+}
+
 .server-info {
   margin-top: 16px; padding: 12px; border-radius: 10px;
   background: var(--bg-elevated); font-size: 0.72rem; line-height: 1.6;

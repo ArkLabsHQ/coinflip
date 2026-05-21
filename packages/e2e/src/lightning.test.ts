@@ -25,6 +25,7 @@ import {
   SingleKey,
   InMemoryWalletRepository,
   InMemoryContractRepository,
+  RestIndexerProvider,
 } from '@arkade-os/sdk'
 import {
   ArkadeSwaps,
@@ -258,17 +259,7 @@ describe('Lightning rails: Boltz reverse + submarine swaps against arkade-regtes
     expect(debited).toBeGreaterThanOrEqual(SUBMARINE_INVOICE_SATS)
   }, 180_000)
 
-  // Reverse swap currently hangs in arkade-regtest's CI image due to a
-  // Boltz↔fulmine RPC version mismatch: `boltz-fulmine` calls
-  // `fulmine.v1.Service/GetVHTLCSpendingTx` which the pinned fulmine
-  // binary doesn't yet implement, so Boltz can't confirm our claim and
-  // the swap WS never advances past "transaction.confirmed". The lib
-  // code path is correct — the test passes locally against a stack
-  // where the two versions are in sync — so we run it manually until
-  // arkade-regtest's pin lines up. Set COINFLIP_RUN_REVERSE_SWAP_TEST=1
-  // to enable.
-  const reverseSkip = process.env.COINFLIP_RUN_REVERSE_SWAP_TEST !== '1'
-  ;(reverseSkip ? it.skip : it)('reverse swap: pays LN invoice → VHTLC lockup → claim → wallet balance up', async () => {
+  it('reverse swap: pays LN invoice → VHTLC lockup → claim → wallet balance up', async () => {
     if (!arkAvailable || !boltzAvailable || !lnReady) return
 
     const beforeBalance = (await wallet.getBalance()).total
@@ -282,20 +273,40 @@ describe('Lightning rails: Boltz reverse + submarine swaps against arkade-regtes
       description: 'arkade-coinflip e2e reverse swap',
     })
     const invoice = swap.response.invoice
+    const lockupAddress = swap.response.lockupAddress
     expect(invoice).toMatch(/^lnbcrt/) // regtest BOLT11 prefix
     expect(typeof swap.id).toBe('string')
+    expect(typeof lockupAddress).toBe('string')
 
     // Pay the invoice from the user-side `lnd` (NOT boltz-lnd). Fire-and-
     // forget — payinvoice blocks until the HTLC settles on LN, which is
-    // *after* Boltz locks the VHTLC on our side, so the lib's
-    // `waitAndClaim` would otherwise deadlock against payinvoice.
+    // *after* Boltz locks the VHTLC on our side.
     lndPayInvoiceAsync('lnd', invoice)
 
-    // The lib monitors the swap WebSocket, waits for the VHTLC lockup
-    // confirmation, then claims using the preimage. waitAndClaim
-    // resolves once the claim tx is broadcast and accepted.
-    const claimed = await swaps.waitAndClaim(swap)
-    expect(claimed.txid).toBeTruthy()
+    // The SDK's `waitAndClaim` is WS-driven and currently deadlocks in
+    // arkade-regtest's CI image: `boltz-fulmine` calls
+    // `fulmine.v1.Service/GetVHTLCSpendingTx` (unimplemented in the
+    // pinned fulmine binary) to confirm our claim, so the swap never
+    // transitions to `invoice.settled` and the WS promise never resolves.
+    // Bypass it by polling the lockup address directly via the indexer,
+    // then calling `claimVHTLC` ourselves once the VHTLC has landed.
+    // This is the same effective flow — Boltz locks, we claim — without
+    // the upstream RPC dependency.
+    const lockupHex = hex.encode(
+      // ArkAddress.decode handles tark…/rark… encoded strings.
+      (await import('@arkade-os/sdk')).ArkAddress.decode(lockupAddress!).pkScript,
+    )
+    const indexer = new RestIndexerProvider(ARK_SERVER_URL)
+    const lockupStart = Date.now()
+    let vhtlcFound = false
+    while (Date.now() - lockupStart < 90_000) {
+      const res = await indexer.getVtxos({ scripts: [lockupHex] })
+      if (res.vtxos.length > 0) { vhtlcFound = true; break }
+      await sleep(2000)
+    }
+    expect(vhtlcFound).toBe(true)
+
+    await swaps.claimVHTLC(swap)
 
     // Poll the wallet — the claim creates a new VTXO that the wallet's
     // own ContractManager will sync in shortly.

@@ -211,10 +211,16 @@ describe('Lightning rails: Boltz reverse + submarine swaps against arkade-regtes
       apiUrl: BOLTZ_API_URL,
       network: 'regtest' as BoltzNetwork,
     })
+    // Use SwapManager (default): it auto-claims reverse swaps on
+    // `transaction.mempool`/`confirmed` and auto-refunds submarines that
+    // fail. We still bypass `waitAndClaim` / `waitForSwapCompletion`
+    // because Boltz can't reach `invoice.settled` in arkade-regtest's
+    // pinned image (fulmine RPC gap) — but we let SwapManager do the
+    // actual claim broadcast so the test exercises the production path.
     swaps = await ArkadeSwaps.create({
       wallet,
       swapProvider,
-      swapManager: false,
+      swapManager: true,
       swapRepository: new InMemorySwapRepository(),
     })
   }, 240_000)
@@ -278,35 +284,43 @@ describe('Lightning rails: Boltz reverse + submarine swaps against arkade-regtes
     expect(typeof swap.id).toBe('string')
     expect(typeof lockupAddress).toBe('string')
 
+    // Register the swap with the SwapManager so it auto-claims when the
+    // VHTLC lockup confirms. `createReverseSwap` already added it via the
+    // ArkadeSwaps path, but be defensive: addSwap is idempotent on swap id.
+    if (swaps.swapManager) await swaps.swapManager.addSwap(swap)
+
+    // Observe SwapManager's auto-claim — `onActionExecuted` fires the
+    // moment SwapManager calls our claim callback (which under the hood
+    // is `swaps.claimVHTLC`). That's the production-grade signal: claim
+    // broadcast. We don't wait for `invoice.settled` (the SDK's
+    // `waitForSwapCompletion` does) because Boltz can't reach that
+    // status in arkade-regtest's pinned image — it queries
+    // `fulmine.v1.Service/GetVHTLCSpendingTx`, which the pinned fulmine
+    // binary doesn't implement. Once the SwapManager has fired the
+    // claim, the on-chain effect is independent of further Boltz state.
+    let claimedSwapId: string | undefined
+    if (swaps.swapManager) {
+      await swaps.swapManager.onActionExecuted((s, action) => {
+        if (action === 'claim' && s.id === swap.id) claimedSwapId = s.id
+      })
+    }
+
     // Pay the invoice from the user-side `lnd` (NOT boltz-lnd). Fire-and-
-    // forget — payinvoice blocks until the HTLC settles on LN, which is
-    // *after* Boltz locks the VHTLC on our side.
+    // forget — payinvoice blocks until the HTLC settles on LN.
     lndPayInvoiceAsync('lnd', invoice)
 
-    // The SDK's `waitAndClaim` is WS-driven and currently deadlocks in
-    // arkade-regtest's CI image: `boltz-fulmine` calls
-    // `fulmine.v1.Service/GetVHTLCSpendingTx` (unimplemented in the
-    // pinned fulmine binary) to confirm our claim, so the swap never
-    // transitions to `invoice.settled` and the WS promise never resolves.
-    // Bypass it by polling the lockup address directly via the indexer,
-    // then calling `claimVHTLC` ourselves once the VHTLC has landed.
-    // This is the same effective flow — Boltz locks, we claim — without
-    // the upstream RPC dependency.
-    const lockupHex = hex.encode(
-      // ArkAddress.decode handles tark…/rark… encoded strings.
-      (await import('@arkade-os/sdk')).ArkAddress.decode(lockupAddress!).pkScript,
-    )
-    const indexer = new RestIndexerProvider(ARK_SERVER_URL)
-    const lockupStart = Date.now()
-    let vhtlcFound = false
-    while (Date.now() - lockupStart < 90_000) {
-      const res = await indexer.getVtxos({ scripts: [lockupHex] })
-      if (res.vtxos.length > 0) { vhtlcFound = true; break }
-      await sleep(2000)
+    // Wait for SwapManager's auto-claim to fire (it polls/listens for the
+    // VHTLC lockup itself, so we don't have to). If WS is flaky in CI,
+    // SwapManager's polling fallback (~30s cadence) still gets there.
+    const claimWaitStart = Date.now()
+    while (Date.now() - claimWaitStart < 90_000) {
+      if (claimedSwapId === swap.id) break
+      await sleep(1000)
     }
-    expect(vhtlcFound).toBe(true)
+    expect(claimedSwapId).toBe(swap.id)
 
-    await swaps.claimVHTLC(swap)
+    const indexer = new RestIndexerProvider(ARK_SERVER_URL)
+    void lockupAddress // keep for potential diagnostics; SwapManager already handled the lockup-side wait
 
     // The claim creates a VTXO at the wallet's primary Ark address. The
     // wallet's internal ContractWatcher should pick it up eventually, but

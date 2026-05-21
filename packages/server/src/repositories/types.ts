@@ -32,6 +32,10 @@ export interface GameRow {
   final_tx_hex: string | null
   setup_script_hex: string | null
   final_script_hex: string | null
+  /** JSON-encoded `string[]` of checkpoint PSBTs for the setup tx. */
+  setup_checkpoints_json: string | null
+  /** JSON-encoded `string[]` of checkpoint PSBTs for the final tx. */
+  final_checkpoints_json: string | null
   created_at: string
   resolved_at: string | null
 }
@@ -48,6 +52,8 @@ export interface NewGame {
   finalTxHex?: string
   setupScriptHex?: string
   finalScriptHex?: string
+  setupCheckpointsJson?: string
+  finalCheckpointsJson?: string
 }
 
 export interface GameUpdate {

@@ -40,7 +40,13 @@ export interface CoinflipFinalOptions {
 /**
  * Build the SHA256 hash-check condition script used in the setup reveal leaf.
  * Stack expects: <creatorSecret>
- * Script: SHA256 <creatorHash> EQUALVERIFY
+ * Script: SHA256 <creatorHash> EQUAL
+ *
+ * Important: leave the EQUAL result on the stack — do NOT append OP_VERIFY.
+ * `ConditionMultisigTapscript.encode(...)` appends its own VERIFY after the
+ * condition script. Adding a second VERIFY here produces `... EQUAL VERIFY
+ * VERIFY`, where the second VERIFY pops from an empty stack and arkd
+ * rejects the spend with `INVALID_PSBT_INPUT: invalid vtxo scripts`.
  */
 function buildHashCheckScript(hash: Uint8Array): Uint8Array {
   return new Uint8Array([
@@ -48,7 +54,6 @@ function buildHashCheckScript(hash: Uint8Array): Uint8Array {
     0x20, // push 32 bytes
     ...hash,
     OP.EQUAL,
-    OP.VERIFY,
   ])
 }
 

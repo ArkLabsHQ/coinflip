@@ -213,22 +213,55 @@ describe('Lightning rails: Boltz reverse + submarine swaps against arkade-regtes
     })
   }, 240_000)
 
-  // Reverse swap relies on the user-side `lnd` having outbound liquidity to
-  // `boltz-lnd`. In a freshly-bootstrapped arkade-regtest stack the channel
-  // is opened from boltz-lnd → lnd so the initial outbound is on the wrong
-  // side; the channel needs a pre-warming submarine swap (or a balanced
-  // open) for the reverse direction to route. Skipping in CI until that
-  // setup lands in arkade-regtest. Locally, an existing balanced channel
-  // makes this pass; flip the env var to re-enable.
-  const reverseSkip = process.env.COINFLIP_RUN_REVERSE_SWAP_TEST !== '1'
-  ;(reverseSkip ? it.skip : it)('reverse swap: pays LN invoice → VHTLC lockup → claim → wallet balance up', async () => {
+  // Submarine swap runs FIRST. It does two jobs at once: validates the
+  // Ark→LN half of the rails, and pre-warms the boltz-lnd ↔ lnd channel
+  // by shifting outbound liquidity from boltz-lnd to lnd. A freshly-
+  // bootstrapped arkade-regtest opens the channel boltz-lnd → lnd, so
+  // initially lnd has no outbound; the submarine swap fixes that.
+  it('submarine swap: lib pays LN invoice → user lnd receives → wallet balance down', async () => {
+    if (!arkAvailable || !boltzAvailable || !lnReady) return
+
+    // Ensure we still have enough spendable to cover the swap + fees.
+    const beforeBalance = (await wallet.getBalance()).total
+    if (beforeBalance < SUBMARINE_INVOICE_SATS * 1.5) {
+      throw new Error(`Wallet too thin for submarine swap: ${beforeBalance} sats`)
+    }
+
+    // The user-side `lnd` mints a fresh invoice. boltz-lnd will pay it
+    // via its existing channel.
+    const invoice = lndAddInvoice('lnd', SUBMARINE_INVOICE_SATS, 'arkade-coinflip e2e submarine')
+    expect(invoice).toMatch(/^lnbcrt/)
+
+    // sendLightningPayment does the full flow: createSubmarineSwap →
+    // lock VTXO at Boltz's VHTLC → wait for settlement → resolve with
+    // the preimage.
+    const result = await swaps.sendLightningPayment({ invoice })
+    expect(result.preimage).toMatch(/^[0-9a-f]{64}$/i)
+
+    // The user lnd should now show the invoice as paid. Some lncli builds
+    // don't have `--reversed`/`--max_invoices`; do a basic `listinvoices`
+    // and pick the most recent matching `payment_request`.
+    const listed = JSON.parse(lncli('lnd', ['listinvoices']))
+    const matched = (listed.invoices ?? []).find((inv: { payment_request: string; settled: boolean }) =>
+      inv.payment_request === invoice,
+    )
+    expect(matched?.settled).toBe(true)
+
+    // Wallet balance went down by ~ invoice amount + swap fees.
+    const afterBalance = (await wallet.getBalance()).total
+    const debited = beforeBalance - afterBalance
+    expect(debited).toBeGreaterThanOrEqual(SUBMARINE_INVOICE_SATS)
+  }, 180_000)
+
+  it('reverse swap: pays LN invoice → VHTLC lockup → claim → wallet balance up', async () => {
     if (!arkAvailable || !boltzAvailable || !lnReady) return
 
     const beforeBalance = (await wallet.getBalance()).total
 
     // Lib creates a reverse swap. The returned object carries the BOLT11
     // invoice on `swap.response.invoice` that Boltz expects to receive
-    // on its `boltz-lnd` node.
+    // on its `boltz-lnd` node. Pre-warmed by the submarine swap above —
+    // `lnd` now has outbound liquidity to route this payment.
     const swap = await swaps.createReverseSwap({
       amount: REVERSE_INVOICE_SATS,
       description: 'arkade-coinflip e2e reverse swap',
@@ -266,40 +299,5 @@ describe('Lightning rails: Boltz reverse + submarine swaps against arkade-regtes
     const delta = afterBalance - beforeBalance
     expect(delta).toBeGreaterThan(REVERSE_INVOICE_SATS * 0.8)
     expect(delta).toBeLessThanOrEqual(REVERSE_INVOICE_SATS)
-  }, 180_000)
-
-  it('submarine swap: lib pays LN invoice → user lnd receives → wallet balance down', async () => {
-    if (!arkAvailable || !boltzAvailable || !lnReady) return
-
-    // Ensure we still have enough spendable to cover the swap + fees.
-    const beforeBalance = (await wallet.getBalance()).total
-    if (beforeBalance < SUBMARINE_INVOICE_SATS * 1.5) {
-      throw new Error(`Wallet too thin for submarine swap: ${beforeBalance} sats`)
-    }
-
-    // The user-side `lnd` mints a fresh invoice. boltz-lnd will pay it
-    // via its existing channel.
-    const invoice = lndAddInvoice('lnd', SUBMARINE_INVOICE_SATS, 'arkade-coinflip e2e submarine')
-    expect(invoice).toMatch(/^lnbcrt/)
-
-    // sendLightningPayment does the full flow: createSubmarineSwap →
-    // lock VTXO at Boltz's VHTLC → wait for settlement → resolve with
-    // the preimage.
-    const result = await swaps.sendLightningPayment({ invoice })
-    expect(result.preimage).toMatch(/^[0-9a-f]{64}$/i)
-
-    // The user lnd should now show the invoice as paid. Some lncli builds
-    // don't have `--reversed`/`--max_invoices`; do a basic `listinvoices`
-    // and pick the most recent matching `payment_request`.
-    const listed = JSON.parse(lncli('lnd', ['listinvoices']))
-    const matched = (listed.invoices ?? []).find((inv: { payment_request: string; settled: boolean }) =>
-      inv.payment_request === invoice,
-    )
-    expect(matched?.settled).toBe(true)
-
-    // Wallet balance went down by ~ invoice amount + swap fees.
-    const afterBalance = (await wallet.getBalance()).total
-    const debited = beforeBalance - afterBalance
-    expect(debited).toBeGreaterThanOrEqual(SUBMARINE_INVOICE_SATS)
   }, 180_000)
 })

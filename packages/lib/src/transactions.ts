@@ -126,15 +126,30 @@ function vtxoInputToArkTxInput(input: VtxoInput): ArkTxInput {
 }
 
 /**
+ * A built Ark off-chain transaction with its checkpoint chain. Both halves
+ * are needed to submit through `arkProvider.submitTx(arkTx, checkpoints)`;
+ * the older API returned only the `arkTx`, which made the trustless
+ * fallback actually unsubmittable to arkd.
+ */
+export interface BuiltOffchainTx {
+  arkTx: Transaction
+  checkpoints: Transaction[]
+}
+
+/**
  * Build the setup and final transactions for a coinflip game.
  *
- * This replaces the old buildRedeemTx approach with SDK's buildOffchainTx.
+ * Each half carries its own checkpoint set — the setup tx consumes the
+ * creator + player wallet VTXOs (one checkpoint per input), and the
+ * final tx consumes the setup output via the reveal leaf (one checkpoint
+ * for that single input). Callers that actually want to broadcast (the
+ * trustless fallback path) need both PSBTs *and* the checkpoint PSBTs.
  */
 export function buildGameTransactions(
   game: Game,
   arkInfo: ArkInfo,
   networkHrp: string,
-): { setup: Transaction; final: Transaction } {
+): { setup: BuiltOffchainTx; final: BuiltOffchainTx } {
   assertDefined(game.creator, 'creator')
   assertDefined(game.player, 'player')
   assertDefined(game.creator.vtxos, 'creator.vtxos')
@@ -184,15 +199,19 @@ export function buildGameTransactions(
     setupOutputs.push({ script: changeAddr.pkScript, amount: playerChange })
   }
 
-  const { arkTx: setup } = buildOffchainTx(setupInputs, setupOutputs, serverUnrollScript)
+  const { arkTx: setupArkTx, checkpoints: setupCheckpoints } = buildOffchainTx(
+    setupInputs,
+    setupOutputs,
+    serverUnrollScript,
+  )
 
   // Apply existing signatures to setup tx if present
-  applySetupSignatures(setup, game)
+  applySetupSignatures(setupArkTx, game)
 
   // Build final transaction
   const setupScript = getSetupScript(game)
   const finalInput: ArkTxInput = {
-    txid: setup.id!,
+    txid: setupArkTx.id!,
     vout: 0,
     value: Number(potAmount),
     tapLeafScript: setupScript.reveal(),
@@ -201,12 +220,19 @@ export function buildGameTransactions(
 
   const finalAddress = getFinalAddress(game, networkHrp)
   const finalOutputs = [{ script: finalAddress.pkScript, amount: potAmount }]
-  const { arkTx: finalTx } = buildOffchainTx([finalInput], finalOutputs, serverUnrollScript)
+  const { arkTx: finalArkTx, checkpoints: finalCheckpoints } = buildOffchainTx(
+    [finalInput],
+    finalOutputs,
+    serverUnrollScript,
+  )
 
   // Apply existing final signatures
-  applyFinalSignatures(finalTx, game, setupScript)
+  applyFinalSignatures(finalArkTx, game, setupScript)
 
-  return { setup, final: finalTx }
+  return {
+    setup: { arkTx: setupArkTx, checkpoints: setupCheckpoints },
+    final: { arkTx: finalArkTx, checkpoints: finalCheckpoints },
+  }
 }
 
 function getLeafHash(leaf: TapLeafScript): Uint8Array {

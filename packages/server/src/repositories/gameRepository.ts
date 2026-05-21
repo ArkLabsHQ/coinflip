@@ -16,8 +16,9 @@ export class SQLiteGameRepository implements GameRepository {
       `INSERT INTO games (
          id, tier, player_pubkey, player_choice, player_hash,
          player_change_address, house_secret_hex,
-         setup_tx_hex, final_tx_hex, setup_script_hex, final_script_hex
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         setup_tx_hex, final_tx_hex, setup_script_hex, final_script_hex,
+         setup_checkpoints_json, final_checkpoints_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         game.id,
         game.tier,
@@ -30,6 +31,8 @@ export class SQLiteGameRepository implements GameRepository {
         game.finalTxHex || null,
         game.setupScriptHex || null,
         game.finalScriptHex || null,
+        game.setupCheckpointsJson || null,
+        game.finalCheckpointsJson || null,
       ],
     )
   }

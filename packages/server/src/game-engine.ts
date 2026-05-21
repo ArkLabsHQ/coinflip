@@ -13,7 +13,7 @@ import {
   type Game,
   type VtxoInput,
 } from 'arkade-coinflip'
-import { isVtxoExpiringSoon, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { isVtxoExpiringSoon, VtxoScript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
 import { createGameContracts, markGameContractsInactive } from './contract-manager.js'
 import type { AppDeps } from './deps.js'
@@ -33,6 +33,10 @@ export interface PlayResult {
   houseHash: string
   setupTxHex: string
   finalTxHex: string
+  /** Checkpoint PSBTs for the setup tx — one per input. Required to submit. */
+  setupCheckpointsHex: string[]
+  /** Checkpoint PSBTs for the final tx — one for the single setup-spend input. */
+  finalCheckpointsHex: string[]
   houseSetupSignatures: string[]
   houseFinalSignature: string
 }
@@ -88,20 +92,37 @@ async function calculateRake(potAmount: number, deps: AppDeps): Promise<number> 
 /**
  * Convert SDK ExtendedVirtualCoin to lib VtxoInput.
  *
- * `intentTapLeafScript[1]` is the raw script with the Taproot leaf-version
- * byte (0xc0) appended. `VtxoScript`'s constructor in the lib re-appends the
- * version byte when it builds the tap tree, so we must strip the trailing
- * byte here — otherwise the version ends up doubled and the script parser
- * trips on `Unknown opcode=c0` when the tree is rebuilt downstream.
+ * Two non-obvious bits at play:
+ *   (1) `intentTapLeafScript[1]` is the raw script with the Taproot
+ *       leaf-version byte (0xc0) appended. `VtxoScript`'s constructor
+ *       re-appends the version byte when it builds the tap tree, so we
+ *       must strip the trailing byte here — otherwise we end up with
+ *       `<script><0xc0><0xc0>` and `Unknown opcode=c0` downstream.
+ *   (2) The wallet VTXO's pkScript depends on *every* leaf in its tap
+ *       tree, not just the one we plan to spend through. If we only put
+ *       the intent leaf into `tapscripts`, `vtxoInputToArkTxInput` in
+ *       the lib reconstructs a smaller tree → a different pkScript →
+ *       arkd's submitTx rejects with `VTXO_NOT_FOUND` because the
+ *       (txid, vout) doesn't point at an indexed output with that
+ *       script. Decode the full `tapTree` from the VTXO and ship every
+ *       leaf along; `leaf` still identifies the one we want to spend.
  */
 function vtxoToInput(vtxo: ExtendedVirtualCoin): VtxoInput {
-  const rawScript = vtxo.intentTapLeafScript[1].slice(0, -1)
-  const leafHex = hex.encode(rawScript)
+  const fullScript = VtxoScript.decode(vtxo.tapTree)
+  const tapscripts = fullScript.scripts.map((s) => hex.encode(s))
+  // Use the forfeit leaf, not the intent leaf. The wallet exposes both:
+  // `intentTapLeafScript` is used when joining a settlement batch round
+  // (where arkd renews the VTXO into the tree), and `forfeitTapLeafScript`
+  // is used when spending through the regular offchain-tx path that
+  // `arkProvider.submitTx` handles. The trustless coinflip fallback path
+  // goes through submitTx, so we want the forfeit leaf here.
+  const forfeitScript = vtxo.forfeitTapLeafScript[1].slice(0, -1)
+  const leafHex = hex.encode(forfeitScript)
   return {
     vtxo: {
       outpoint: { txid: vtxo.txid, vout: vtxo.vout },
       amount: vtxo.value.toString(),
-      tapscripts: [leafHex],
+      tapscripts,
     },
     leaf: leafHex,
   }
@@ -256,15 +277,18 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
     },
   }
 
-  // Build setup and final transactions using the lib
-  const { setup, final: finalTx } = buildGameTransactions(game, deps.arkInfo, networkHrp)
+  // Build setup and final transactions using the lib. Each `BuiltOffchainTx`
+  // carries its own checkpoint chain alongside the ark tx — both halves are
+  // needed to actually submit through `arkProvider.submitTx(...)` if the
+  // player ever exercises the trustless fallback.
+  const built = buildGameTransactions(game, deps.arkInfo, networkHrp)
 
   // Sign setup transaction (house's VTXO inputs) with house identity
   const houseInputIndices = selectedHouseVtxos.map((_, i) => i)
-  const signedSetup = await deps.identity.sign(setup, houseInputIndices)
+  const signedSetup = await deps.identity.sign(built.setup.arkTx, houseInputIndices)
 
   // Sign final transaction (house as creator signs the reveal leaf on input 0)
-  const signedFinal = await deps.identity.sign(finalTx, [0])
+  const signedFinal = await deps.identity.sign(built.final.arkTx, [0])
 
   // Extract house signatures for the player
   const houseSetupSignatures: string[] = []
@@ -282,9 +306,12 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
     ? hex.encode(finalSigs[finalSigs.length - 1][1])
     : ''
 
-  // Serialize transactions as PSBT
+  // Serialize transactions as PSBT (hex). Checkpoint PSBTs go alongside so
+  // the fallback chain is fully submittable.
   const setupTxHex = hex.encode(signedSetup.toPSBT())
   const finalTxHex = hex.encode(signedFinal.toPSBT())
+  const setupCheckpointsHex = built.setup.checkpoints.map((c) => hex.encode(c.toPSBT()))
+  const finalCheckpointsHex = built.final.checkpoints.map((c) => hex.encode(c.toPSBT()))
 
   // Derive contract scripts/addresses so we can register them with the SDK
   // ContractManager (and persist them on the game row for later lookup).
@@ -295,7 +322,8 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
   const setupScriptHex = hex.encode(setupVtxoScript.pkScript)
   const finalScriptHex = hex.encode(finalVtxoScript.pkScript)
 
-  // Store game in DB
+  // Store game in DB. Checkpoint PSBT hex is JSON-encoded so the player can
+  // reconstruct the full submit-tx chain from the row alone if needed.
   await deps.repos.games.save({
     id: gameId,
     tier: req.tier,
@@ -308,6 +336,8 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
     finalTxHex,
     setupScriptHex,
     finalScriptHex,
+    setupCheckpointsJson: JSON.stringify(setupCheckpointsHex),
+    finalCheckpointsJson: JSON.stringify(finalCheckpointsHex),
   })
 
   // Register both contracts as `active` so the watcher fires if a player ever
@@ -351,6 +381,8 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
     houseHash,
     setupTxHex,
     finalTxHex,
+    setupCheckpointsHex,
+    finalCheckpointsHex,
     houseSetupSignatures,
     houseFinalSignature: houseFinalSig,
   }

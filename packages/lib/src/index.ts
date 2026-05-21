@@ -54,6 +54,7 @@ export {
   generateSecret,
   addConditionWitness,
   getConditionWitness,
+  type BuiltOffchainTx,
 } from './transactions'
 
 // Coin selection

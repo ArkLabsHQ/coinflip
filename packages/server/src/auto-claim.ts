@@ -175,6 +175,16 @@ export async function attemptAutoClaim(
       const tx = Transaction.fromPSBT(base64.decode(c))
       const indices: number[] = []
       for (let i = 0; i < tx.inputsLength; i++) indices.push(i)
+      // The checkpoint spends the same VTXO through the same leaf as the
+      // ark tx — if that leaf carries a condition (creator-win does, abort
+      // doesn't), the checkpoint needs the same witness data or arkd
+      // rejects with INVALID_SIGNATURE during finalizeTx.
+      if (path === 'creator-win') {
+        setArkPsbtField(tx, 0, ConditionWitness, [
+          hex.decode(game.house_secret_hex),
+          hex.decode(game.player_secret_hex!),
+        ])
+      }
       const sc = await deps.identity.sign(tx, indices)
       return base64.encode(sc.toPSBT())
     }),

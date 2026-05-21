@@ -71,14 +71,20 @@ export async function initDb(): Promise<void> {
       final_tx_hex TEXT,
       setup_script_hex TEXT,
       final_script_hex TEXT,
+      setup_checkpoints_json TEXT,
+      final_checkpoints_json TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       resolved_at TEXT
     )
   `)
-  // Backfill columns for pre-existing DBs that predate the contract-subsystem
-  // wiring. sql.js raises a parse error for ALTER TABLE on a missing column;
-  // swallow if it already exists.
-  for (const col of ['setup_script_hex', 'final_script_hex']) {
+  // Backfill columns for pre-existing DBs. sql.js raises a parse error for
+  // ALTER TABLE on a missing column; swallow if it already exists.
+  for (const col of [
+    'setup_script_hex',
+    'final_script_hex',
+    'setup_checkpoints_json',
+    'final_checkpoints_json',
+  ]) {
     try { db.run(`ALTER TABLE games ADD COLUMN ${col} TEXT`) } catch { /* already there */ }
   }
 

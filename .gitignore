@@ -25,6 +25,7 @@ node_modules/
 
 # Superpowers docs
 docs/superpowers
+docs/superpowers/**
 
 # Working notes / plans — not part of the project history
 docs/plans

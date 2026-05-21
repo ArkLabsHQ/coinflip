@@ -2,7 +2,7 @@
  * Transaction building for coinflip games using SDK primitives.
  */
 
-import { createHash, randomBytes } from 'crypto'
+import { randomBytes } from 'crypto'
 import { hex } from '@scure/base'
 import {
   ArkAddress,
@@ -18,27 +18,10 @@ import {
   getArkPsbtFields,
   TapLeafScript,
 } from '@arkade-os/sdk'
-
-const TAP_LEAF_VERSION = 0xc0
-
-/** Compute TapLeaf hash: SHA256(SHA256("TapLeaf") || SHA256("TapLeaf") || version || compactSize(script) || script) */
-function tapLeafHash(script: Uint8Array, version: number): Uint8Array {
-  const tag = createHash('sha256').update('TapLeaf').digest()
-  const h = createHash('sha256')
-  h.update(tag)
-  h.update(tag)
-  h.update(Buffer.from([version]))
-  // compactSize encoding for script length
-  if (script.length < 253) {
-    h.update(Buffer.from([script.length]))
-  } else if (script.length < 0x10000) {
-    h.update(Buffer.from([253, script.length & 0xff, (script.length >> 8) & 0xff]))
-  } else {
-    h.update(Buffer.from([254, script.length & 0xff, (script.length >> 8) & 0xff, (script.length >> 16) & 0xff, (script.length >> 24) & 0xff]))
-  }
-  h.update(script)
-  return new Uint8Array(h.digest())
-}
+// `@scure/btc-signer` exposes this via the `./payment.js` subpath (its
+// package.json `exports` map requires the `.js` suffix); without the
+// suffix Node's runtime resolver returns ERR_PACKAGE_PATH_NOT_EXPORTED.
+import { TAP_LEAF_VERSION, tapLeafHash } from '@scure/btc-signer/payment.js'
 import { CoinflipSetupScript, CoinflipFinalScript } from './script'
 import { Game, VtxoInput } from './types'
 

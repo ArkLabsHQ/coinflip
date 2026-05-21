@@ -57,7 +57,8 @@ export {
   type BuiltOffchainTx,
 } from './transactions'
 
-// Coin selection
+// Coin selection — see `coinselect.ts` for the note on the SDK's
+// internal `selectVirtualCoins` and why we keep our own greedy variant.
 export { coinSelect } from './coinselect'
 
 // SDK Contract handlers

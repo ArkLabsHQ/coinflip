@@ -13,7 +13,10 @@ import { getSqlExecutor } from './db.js'
 import type { ConfigRepository, HouseWalletRepository } from './repositories/types.js'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'https://mutinynet.com/api'
+// Optional. Leave unset to let the SDK auto-default esplora from the network
+// it detects at the Ark server (mutinynet → https://mempool.mutinynet.arkade.sh/api).
+// Set it explicitly for regtest/docker where the esplora host isn't the SDK default.
+const ESPLORA_URL = process.env.ESPLORA_URL
 
 export interface HouseWalletBundle {
   wallet: Wallet
@@ -66,7 +69,7 @@ export async function initHouseWallet(
   const wallet = await Wallet.create({
     identity,
     arkServerUrl: ARK_SERVER_URL,
-    esploraUrl: ESPLORA_URL,
+    ...(ESPLORA_URL ? { esploraUrl: ESPLORA_URL } : {}),
     storage: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),

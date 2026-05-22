@@ -1,9 +1,14 @@
 import { Module } from 'vuex'
-import { hex } from '@scure/base'
+import { hex, base64 } from '@scure/base'
 import type { State as RootState } from '@/store'
-import { Wallet, SingleKey, VtxoScript, type WalletBalance, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import {
+  Wallet, SingleKey, VtxoScript,
+  buildOffchainTx, decodeTapscript, CSVMultisigTapscript, ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
+  type WalletBalance, type ExtendedVirtualCoin, type ArkTxInput, type ArkProvider, type Identity,
+} from '@arkade-os/sdk'
 import { initSwaps, destroySwaps } from '@/services/boltz'
-import { getNetwork } from '@/services/api'
+import { getNetwork, play as apiPlay, commit as apiCommit, type Outpoint } from '@/services/api'
+import { createHash } from '@/utils/crypto'
 
 /** VtxoInput shape expected by the server's /api/play endpoint. */
 export interface VtxoInput {
@@ -118,6 +123,39 @@ export const NETWORK_PRESETS: Record<string, NetworkPreset> = {
     esplora: '',
     boltz: '',
   },
+}
+
+/**
+ * Single-party offchain submit: sign `signInputs` on the ark tx + every
+ * checkpoint with `identity`, optionally attaching a condition witness (revealed
+ * secrets) to the signed inputs. arkd co-signs the server leg. Mirrors the
+ * server's submitOffchain (both proven by the regtest e2e). SDK-only, so it
+ * bundles for the browser (the lib's tx-builders are Node-crypto bound).
+ */
+async function submitOffchain(
+  arkProvider: ArkProvider,
+  identity: Identity,
+  arkTx: Transaction,
+  checkpoints: Transaction[],
+  signInputs: number[],
+  witness?: Uint8Array[],
+): Promise<string> {
+  if (witness) for (const i of signInputs) setArkPsbtField(arkTx, i, ConditionWitness, witness)
+  const signed = await identity.sign(arkTx, signInputs)
+  const { arkTxid, signedCheckpointTxs } = await arkProvider.submitTx(
+    base64.encode(signed.toPSBT()),
+    checkpoints.map((c) => base64.encode(c.toPSBT())),
+  )
+  const finals: string[] = []
+  for (const c of signedCheckpointTxs) {
+    const tx = Transaction.fromPSBT(base64.decode(c))
+    const idx: number[] = []
+    for (let i = 0; i < tx.inputsLength; i++) idx.push(i)
+    if (witness) for (const i of idx) setArkPsbtField(tx, i, ConditionWitness, witness)
+    finals.push(base64.encode((await identity.sign(tx, idx)).toPSBT()))
+  }
+  await arkProvider.finalizeTx(arkTxid, finals)
+  return arkTxid
 }
 
 // SDK wallet instance (kept outside Vuex state to avoid reactivity issues with complex objects)
@@ -413,6 +451,69 @@ const ark: Module<ArkState, RootState> = {
         throw new Error(`Insufficient balance: have ${sum}, need ${amount}`)
       }
       return picked.map(vtxoToPlayerInput)
+    },
+
+    /**
+     * Play one trustless coin game end-to-end:
+     *   1. POST /api/play — the house escrows its stake; returns the escrow address.
+     *   2. Escrow the player's stake into that address (single-party send).
+     *   3. POST /api/game/:id/commit — reveal + resolve. House win → the server
+     *      already swept; player win → sign + submit the returned sweep PSBT.
+     * Returns the commit result { winner, payout, houseSecret, playerSecret, proof }.
+     */
+    async playTrustlessGame({ state, rootState, dispatch }, { tier, side }: { tier: number; side: 'heads' | 'tails' }) {
+      if (!sdkWallet) throw new Error('Wallet not connected')
+      const privateKey = rootState.wallet.privateKey
+      if (!privateKey) throw new Error('No wallet key available')
+      const playerPubkey = rootState.wallet.publicKey
+      if (!playerPubkey) throw new Error('No wallet public key available')
+      const playerChangeAddress = state.arkAddress
+      if (!playerChangeAddress) throw new Error('No Ark address available — wallet still connecting?')
+
+      const identity = SingleKey.fromHex(privateKey)
+      const arkProvider = sdkWallet.arkProvider
+      const arkInfo = await arkProvider.getInfo()
+      const serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+
+      // 1. Commit a secret (15B heads / 16B tails) and start the game.
+      const secretLen = side === 'heads' ? 15 : 16
+      const secretBytes = new Uint8Array(secretLen)
+      crypto.getRandomValues(secretBytes)
+      const playerSecretHex = Array.from(secretBytes).map((b) => b.toString(16).padStart(2, '0')).join('')
+      const playerHash = await createHash(secretBytes)
+
+      const playRes = await apiPlay(tier, playerPubkey, playerHash, playerChangeAddress)
+
+      // 2. Escrow the player's stake into the shared escrow address (single-party).
+      const escrowPk = ArkAddress.decode(playRes.escrowAddress).pkScript
+      const pv = (await sdkWallet.getVtxos())
+        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
+        .sort((a, b) => Number(b.value - a.value))
+        .find((v) => v.value >= tier)
+      if (!pv) throw new Error(`No spendable VTXO covering ${tier} sats`)
+      const change = pv.value - tier
+      const outputs: { script: Uint8Array; amount: bigint }[] = [{ script: escrowPk, amount: BigInt(tier) }]
+      if (change > 0) outputs.push({ script: ArkAddress.decode(playerChangeAddress).pkScript, amount: BigInt(change) })
+      const escrowInput: ArkTxInput = { txid: pv.txid, vout: pv.vout, value: pv.value, tapLeafScript: pv.forfeitTapLeafScript, tapTree: pv.tapTree }
+      const escrowTx = buildOffchainTx([escrowInput], outputs, serverUnroll)
+      const playerEscrowTxid = await submitOffchain(arkProvider, identity, escrowTx.arkTx, escrowTx.checkpoints, [0])
+      const playerEscrow: Outpoint = { txid: playerEscrowTxid, vout: 0, value: tier }
+
+      // 3. Reveal + resolve.
+      const result = await apiCommit(playRes.gameId, playerSecretHex, playerEscrow)
+
+      // Player win → the server built the playerWin sweep; we sign + submit it.
+      if (result.winner === 'player' && result.sweep) {
+        const s = result.sweep
+        const sweepArk = Transaction.fromPSBT(hex.decode(s.sweepPsbt))
+        const sweepCps = s.sweepCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+        const witness = s.witnessHex.map((w) => hex.decode(w))
+        const inputs = Array.from({ length: s.inputCount }, (_, i) => i)
+        await submitOffchain(arkProvider, identity, sweepArk, sweepCps, inputs, witness)
+      }
+
+      await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
+      return result
     },
   },
 

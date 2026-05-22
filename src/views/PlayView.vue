@@ -155,8 +155,7 @@ import { defineComponent, ref, computed, onMounted, onUnmounted, watch } from 'v
 import { useStore } from 'vuex'
 import TierSelector from '@/components/TierSelector.vue'
 import GameHistoryList, { type GameHistoryItem } from '@/components/GameHistoryList.vue'
-import { getTiers, play, sign } from '@/services/api'
-import { createHash } from '@/utils/crypto'
+import { getTiers } from '@/services/api'
 import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState } from '@/skins'
 
 const AUTO_OPTIONS = [
@@ -356,39 +355,28 @@ export default defineComponent({
           throw new Error('Wallet not connected — open the wallet drawer to reconnect.')
         }
 
-        const pubkey = store.state.wallet.publicKey
-        const secretLen = side === 'heads' ? 15 : 16
-        const secretBytes = new Uint8Array(secretLen)
-        crypto.getRandomValues(secretBytes)
-        const secretHex = Array.from(secretBytes).map((b) => b.toString(16).padStart(2, '0')).join('')
-        const playerHash = await createHash(secretBytes)
-
-        const playerVtxos = await store.dispatch('ark/selectPlayerVtxoInputs', selectedTier.value)
         const playerChangeAddress = store.getters['ark/address']
         if (!playerChangeAddress) throw new Error('No Ark address available — wallet still connecting?')
 
-        // Place the bet. Once this resolves the game exists server-side, so
-        // it's safe to start the flip animation.
-        const playResult = await play(selectedTier.value, side, pubkey, playerHash, playerVtxos, playerChangeAddress)
-
         phase.value = 'flipping'
 
-        // Keep animating until the result is in — and for at least
-        // MIN_FLIP_MS so a fast resolution still reads as a real flip.
-        const [signResult] = await Promise.all([
-          sign(playResult.gameId, [], '', secretHex),
+        // Trustless settlement: the store action escrows the player's stake,
+        // reveals, and (on a win) sweeps the pot — all on-Ark. Keep animating
+        // for at least MIN_FLIP_MS so a fast resolution still reads as a flip.
+        const [result] = await Promise.all([
+          store.dispatch('ark/playTrustlessGame', { tier: selectedTier.value, side }),
           new Promise((r) => setTimeout(r, MIN_FLIP_MS)),
         ])
 
-        recordResult(side, signResult.winner === 'player', signResult.payout)
+        recordResult(side, result.winner === 'player', result.payout)
 
         const historyEntry = {
-          id: playResult.gameId,
+          id: `${Date.now()}`,
           tier: selectedTier.value,
           playerChoice: side,
-          winner: signResult.winner,
-          rakeAmount: signResult.rake,
-          payoutAmount: signResult.payout,
+          winner: result.winner,
+          rakeAmount: result.rake,
+          payoutAmount: result.payout,
           status: 'resolved',
           createdAt: new Date().toISOString(),
           resolvedAt: new Date().toISOString(),
@@ -397,7 +385,6 @@ export default defineComponent({
         history.unshift(historyEntry)
         localStorage.setItem('gameHistory', JSON.stringify(history.slice(0, 100)))
 
-        await store.dispatch('ark/refreshBalance').catch(() => { /* non-fatal */ })
         setTimeout(() => {
           store.dispatch('ark/refreshBalance').catch(() => { /* deferred for indexer lag */ })
         }, 2000)

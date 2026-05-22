@@ -6,27 +6,44 @@ export interface TiersResponse {
   tiers: number[]
   maxAvailable: number
   houseReady: boolean
+  rakeType?: string
+  rakeValue?: number
 }
 
+export interface Outpoint {
+  txid: string
+  vout: number
+  value: number
+}
+
+/** /api/play — the house has escrowed its stake; the player funds `escrowAddress`. */
 export interface PlayResponse {
   gameId: string
-  housePubkey: string
+  escrowAddress: string
   houseHash: string
-  setupTx: string
-  finalTx: string
-  houseSetupSignatures: string[]
-  houseFinalSignature: string
+  housePubkey: string
+  serverPubkey: string
+  betAmount: number
+  finalExpiration: number
+  houseEscrow: Outpoint
 }
 
-export interface SignResponse {
-  winner: 'player' | 'house'
+/** /api/game/:id/commit — resolved. House win → server swept (txid). Player win
+ *  → the client signs + submits the returned sweep PSBT. */
+export interface CommitResponse {
+  winner: 'house' | 'player'
   houseSecret: string
   playerSecret: string
-  houseSecretSize: number
-  playerSecretSize: number
   payout: number
   rake: number
   proof: string
+  txid?: string
+  sweep?: {
+    sweepPsbt: string
+    sweepCheckpoints: string[]
+    inputCount: number
+    witnessHex: [string, string]
+  }
 }
 
 export interface GameResponse {
@@ -69,27 +86,24 @@ export function getNetwork(): Promise<{ network: string }> {
 
 export function play(
   tier: number,
-  choice: 'heads' | 'tails',
   playerPubkey: string,
   playerHash: string,
-  playerVtxos: unknown[] = [],
-  playerChangeAddress = ''
+  playerChangeAddress: string,
 ): Promise<PlayResponse> {
   return request('/api/play', {
     method: 'POST',
-    body: JSON.stringify({ tier, choice, playerPubkey, playerHash, playerVtxos, playerChangeAddress }),
+    body: JSON.stringify({ tier, playerPubkey, playerHash, playerChangeAddress }),
   })
 }
 
-export function sign(
+export function commit(
   gameId: string,
-  playerSetupSignatures: string[] = [],
-  playerFinalSignature = '',
-  playerSecretHex: string
-): Promise<SignResponse> {
-  return request(`/api/game/${gameId}/sign`, {
+  playerSecretHex: string,
+  playerEscrow: Outpoint,
+): Promise<CommitResponse> {
+  return request(`/api/game/${gameId}/commit`, {
     method: 'POST',
-    body: JSON.stringify({ playerSetupSignatures, playerFinalSignature, playerSecretHex }),
+    body: JSON.stringify({ playerSecretHex, playerEscrow }),
   })
 }
 

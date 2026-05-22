@@ -171,6 +171,9 @@ const AUTO_OPTIONS = [
 const AUTO_FLIP_PAUSE_MS = 900
 const SLAB_MS_MANUAL = 1800
 const SLAB_MS_AUTO = 700
+// Minimum time the flip animation runs once the bet is placed, so a fast
+// server resolution still reads as a real flip rather than an instant snap.
+const MIN_FLIP_MS = 900
 const WIN_FLASH_MS = 120
 const SPARKLINE_MAX = 50
 const PNL_KEY = 'coinflip.pnl_alltime'
@@ -340,8 +343,11 @@ export default defineComponent({
     async function flipOnce(side: 'heads' | 'tails'): Promise<boolean> {
       if (!selectedTier.value) return false
 
+      // Mark busy but DON'T animate yet — we only spin once the bet is
+      // actually placed on the server, so a rejected bet (insufficient
+      // balance, house busy, validation) never shows a phantom flip.
       isFlipping.value = true
-      phase.value = 'flipping'
+      phase.value = 'idle'
       outcome.value = null
       error.value = null
 
@@ -361,8 +367,18 @@ export default defineComponent({
         const playerChangeAddress = store.getters['ark/address']
         if (!playerChangeAddress) throw new Error('No Ark address available — wallet still connecting?')
 
+        // Place the bet. Once this resolves the game exists server-side, so
+        // it's safe to start the flip animation.
         const playResult = await play(selectedTier.value, side, pubkey, playerHash, playerVtxos, playerChangeAddress)
-        const signResult = await sign(playResult.gameId, [], '', secretHex)
+
+        phase.value = 'flipping'
+
+        // Keep animating until the result is in — and for at least
+        // MIN_FLIP_MS so a fast resolution still reads as a real flip.
+        const [signResult] = await Promise.all([
+          sign(playResult.gameId, [], '', secretHex),
+          new Promise((r) => setTimeout(r, MIN_FLIP_MS)),
+        ])
 
         recordResult(side, signResult.winner === 'player', signResult.payout)
 

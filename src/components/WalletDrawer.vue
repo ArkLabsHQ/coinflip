@@ -11,7 +11,6 @@
             {{ store.getters['ark/formattedBalance'] || '0' }}
             <span class="balance-unit">sats</span>
           </div>
-          <div class="balance-fiat text-muted mono">&#8776; ${{ usdBalance }}</div>
         </div>
         <button class="close-btn" @click="close" aria-label="Close">&times;</button>
       </header>
@@ -41,31 +40,26 @@
       </div>
 
       <div class="drawer-body">
-        <!-- ── Receive ────────────────────────────────────────────── -->
-        <section v-if="tab === 'receive'">
-          <div class="method-tabs">
-            <button :class="['tab', { active: depositMethod === 'lightning' }]" @click="depositMethod = 'lightning'">&#9889; Lightning</button>
-            <button :class="['tab', { active: depositMethod === 'ark' }]" @click="depositMethod = 'ark'">Ark</button>
-            <button :class="['tab', { active: depositMethod === 'onchain' }]" @click="depositMethod = 'onchain'">On-chain</button>
-          </div>
-
-          <!-- Lightning -->
-          <div v-if="depositMethod === 'lightning'" class="section-body">
+        <!-- ── Receive (unified) ──────────────────────────────────── -->
+        <section v-if="tab === 'receive'" class="section-body">
+          <!-- Lightning: amount in → invoice out -->
+          <div class="recv-block">
+            <div class="block-label">&#9889; Lightning</div>
             <div v-if="!depositInvoice">
-              <div class="hint" v-if="fees && limits">
-                {{ limits.min.toLocaleString() }} &ndash; {{ limits.max.toLocaleString() }} sats
-                &middot; {{ fees.reverse.percentage }}% + {{ (fees.reverse.minerFees.lockup + fees.reverse.minerFees.claim).toLocaleString() }} fee
-              </div>
               <div class="input-row">
                 <input class="input" type="number" v-model.number="depositAmount" placeholder="Amount in sats"
                        :min="limits?.min" :max="limits?.max" :disabled="!ready" />
-                <button class="btn-primary" :disabled="!depositAmount || depositLoading || !ready"
+                <button class="btn-primary btn-sm" :disabled="!depositAmount || depositLoading || !ready"
                         :title="!ready ? 'Connecting to Ark…' : ''" @click="createLnDeposit">
-                  {{ depositLoading ? 'Creating…' : 'Generate Invoice' }}
+                  {{ depositLoading ? 'Creating…' : 'Invoice' }}
                 </button>
               </div>
               <div class="hint" v-if="depositAmount && fees">
                 You receive &asymp; <strong>{{ calcReceive(depositAmount).toLocaleString() }}</strong> sats after fees
+              </div>
+              <div class="hint" v-else-if="fees && limits">
+                {{ limits.min.toLocaleString() }} &ndash; {{ limits.max.toLocaleString() }} sats
+                &middot; {{ fees.reverse.percentage }}% + {{ (fees.reverse.minerFees.lockup + fees.reverse.minerFees.claim).toLocaleString() }} fee
               </div>
             </div>
             <div v-else class="swap-result">
@@ -74,27 +68,25 @@
                 <code class="mono">{{ depositInvoice }}</code>
                 <span class="address-action">Click to copy</span>
               </div>
-              <button class="btn-outline btn-sm" @click="resetDeposit">New Deposit</button>
+              <button class="btn-outline btn-sm" @click="resetDeposit">New Invoice</button>
             </div>
           </div>
 
-          <!-- Ark -->
-          <div v-if="depositMethod === 'ark'" class="section-body">
-            <div class="hint">Share this Ark address to receive directly from another wallet.</div>
+          <!-- Ark address -->
+          <div class="recv-block">
+            <div class="block-label">Ark address</div>
             <div class="address-box" @click="copyText(arkAddress)">
               <code class="mono">{{ arkAddress || (ready ? '—' : 'Connecting…') }}</code>
               <span class="address-action" v-if="arkAddress">Click to copy</span>
             </div>
-            <button v-if="isMutinyTestnet && ready" class="btn-primary" @click="requestFaucet">
+            <button v-if="isMutinyTestnet && ready" class="btn-outline btn-sm" @click="requestFaucet">
               Request Testnet Faucet
             </button>
           </div>
 
-          <!-- On-chain -->
-          <div v-if="depositMethod === 'onchain'" class="section-body">
-            <div class="hint">
-              Send BTC on-chain to your boarding address. After 1 confirmation the funds settle into Ark.
-            </div>
+          <!-- On-chain boarding -->
+          <div class="recv-block">
+            <div class="block-label">On-chain</div>
             <div class="address-box" @click="copyText(boardingAddress)">
               <code class="mono">{{ boardingAddress || (ready ? '—' : 'Connecting…') }}</code>
               <span class="address-action" v-if="boardingAddress">Click to copy</span>
@@ -108,61 +100,50 @@
                 </span>
               </div>
             </div>
-            <button v-if="hasUnsettledFunds && ready" class="btn-primary" :disabled="settleLoading" @click="settleFunds">
+            <button v-if="hasUnsettledFunds && ready" class="btn-primary btn-sm" :disabled="settleLoading" @click="settleFunds">
               {{ settleLoading ? 'Settling…' : 'Settle Into Ark' }}
             </button>
           </div>
         </section>
 
-        <!-- ── Send ───────────────────────────────────────────────── -->
-        <section v-if="tab === 'send'">
-          <div class="method-tabs">
-            <button :class="['tab', { active: withdrawMethod === 'lightning' }]" @click="withdrawMethod = 'lightning'">&#9889; Lightning</button>
-            <button :class="['tab', { active: withdrawMethod === 'ark' }]" @click="withdrawMethod = 'ark'">Ark</button>
-            <button :class="['tab', { active: withdrawMethod === 'onchain' }]" @click="withdrawMethod = 'onchain'">On-chain</button>
-          </div>
+        <!-- ── Send (unified single input) ────────────────────────── -->
+        <section v-if="tab === 'send'" class="section-body">
+          <div v-if="sendStatus !== 'success'">
+            <textarea class="input send-input" v-model="sendInput" rows="2" :disabled="!ready"
+                      placeholder="Paste a Lightning invoice, Ark address, or Bitcoin address"></textarea>
 
-          <!-- Lightning -->
-          <div v-if="withdrawMethod === 'lightning'" class="section-body">
-            <div v-if="withdrawStatus === 'idle'">
-              <div class="hint" v-if="fees && limits">
-                {{ limits.min.toLocaleString() }} &ndash; {{ limits.max.toLocaleString() }} sats
-                &middot; {{ fees.submarine.percentage }}% + {{ fees.submarine.minerFees.toLocaleString() }} fee
-              </div>
-              <input class="input" type="text" v-model="withdrawInvoice"
-                     placeholder="Paste Lightning invoice (lnbc…)" :disabled="!ready" />
-              <button class="btn-primary" :disabled="!withdrawInvoice || withdrawLoading || !ready"
-                      :title="!ready ? 'Connecting to Ark…' : ''" @click="createLnWithdraw">
-                {{ withdrawLoading ? 'Paying…' : 'Pay via Lightning' }}
-              </button>
+            <!-- Detected rail -->
+            <div v-if="sendInput.trim()" class="detect-row">
+              <span class="detect-chip" :class="sendDetected.kind">{{ sendKindLabel }}</span>
+              <span v-if="sendDetected.kind === 'lightning' && sendDetected.amountSats > 0" class="hint">
+                {{ sendDetected.amountSats.toLocaleString() }} sats
+              </span>
             </div>
-            <div v-else class="swap-result">
-              <div class="status-badge" :class="withdrawStatus">{{ withdrawStatusText }}</div>
-              <button class="btn-outline btn-sm" @click="resetWithdraw">New Payment</button>
-            </div>
-          </div>
 
-          <!-- Ark -->
-          <div v-if="withdrawMethod === 'ark'" class="section-body">
-            <input class="input" type="text" v-model="withdrawAddress" placeholder="Destination Ark address" :disabled="!ready" />
-            <div class="input-row">
-              <input class="input" type="number" v-model.number="withdrawAmount" placeholder="Amount (sats)" min="0" :disabled="!ready" />
-              <button class="btn-outline btn-sm" @click="setMaxAmount">MAX</button>
+            <!-- Amount only when the destination needs it (Ark / on-chain) -->
+            <div v-if="sendNeedsAmount" class="input-row">
+              <input class="input" type="number" v-model.number="sendAmount" placeholder="Amount (sats)" min="0" :disabled="!ready" />
+              <button class="btn-outline btn-sm" @click="sendSetMax">MAX</button>
             </div>
-            <button class="btn-primary" :disabled="!withdrawAddress || !withdrawAmount || !ready" @click="withdrawFunds">Send</button>
-          </div>
 
-          <!-- On-chain -->
-          <div v-if="withdrawMethod === 'onchain'" class="section-body">
-            <div class="hint">Withdraw via collaborative redeem through the Ark server.</div>
-            <input class="input" type="text" v-model="onchainWithdrawAddress" placeholder="Bitcoin address (bc1…)" :disabled="!ready" />
-            <div class="input-row">
-              <input class="input" type="number" v-model.number="onchainWithdrawAmount" placeholder="Amount (sats)" min="0" :disabled="!ready" />
-              <button class="btn-outline btn-sm" @click="onchainSetMax">MAX</button>
-            </div>
-            <button class="btn-primary" :disabled="!onchainWithdrawAddress || !onchainWithdrawAmount || !ready" @click="withdrawOnchain">
-              Withdraw On-chain
+            <div v-if="sendStatus === 'pending'" class="status-badge pending">{{ sendStatusText }}</div>
+            <div v-else-if="sendStatus === 'error'" class="status-badge error">{{ sendStatusText }}</div>
+
+            <button class="btn-primary" :disabled="!canSend"
+                    :title="!ready ? 'Connecting to Ark…' : ''" @click="doSend">
+              {{ sendLoading ? 'Sending…' : sendButtonLabel }}
             </button>
+
+            <div v-if="sendInput.trim() && sendDetected.kind === 'unknown'" class="hint error-hint">
+              Unrecognized destination — paste a Lightning invoice, Ark, or Bitcoin address.
+            </div>
+            <div v-else-if="sendDetected.kind === 'lightning' && sendDetected.amountSats === 0" class="hint error-hint">
+              Amountless invoices aren't supported — use one with a fixed amount.
+            </div>
+          </div>
+          <div v-else class="swap-result">
+            <div class="status-badge success">{{ sendStatusText }}</div>
+            <button class="btn-outline btn-sm" @click="resetSend">New Payment</button>
           </div>
         </section>
 
@@ -257,15 +238,54 @@
 import { defineComponent, computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
+import { isValidArkAddress } from '@arkade-os/sdk'
 import {
   getSwaps,
   createLnDeposit as doLnDeposit,
   createLnWithdraw as doLnWithdraw,
+  invoiceSats,
   getFees,
   getLimits,
   type FeesResponse,
   type LimitsResponse,
 } from '@/services/boltz'
+
+type SendKind = 'empty' | 'lightning' | 'ark' | 'onchain' | 'unknown'
+interface SendTarget { kind: SendKind; amountSats: number; address: string }
+
+/**
+ * Classify a pasted send destination into a rail, mirroring the Arkade
+ * wallet's single-input flow. BIP21 first, then BOLT11, Ark, on-chain.
+ */
+function detectSend(raw: string): SendTarget {
+  const s = (raw || '').trim()
+  if (!s) return { kind: 'empty', amountSats: 0, address: '' }
+
+  if (/^bitcoin:/i.test(s)) {
+    const body = s.replace(/^bitcoin:/i, '')
+    const qIdx = body.indexOf('?')
+    const addr = qIdx >= 0 ? body.slice(0, qIdx) : body
+    const params = new URLSearchParams(qIdx >= 0 ? body.slice(qIdx + 1) : '')
+    const ark = params.get('ark')
+    const ln = params.get('lightning')
+    const amtBtc = params.get('amount')
+    const amountSats = amtBtc ? Math.round(parseFloat(amtBtc) * 1e8) : 0
+    if (ark && isValidArkAddress(ark)) return { kind: 'ark', amountSats, address: ark }
+    if (ln) return { kind: 'lightning', amountSats: invoiceSats(ln), address: ln }
+    if (addr) return { kind: 'onchain', amountSats, address: addr }
+    return { kind: 'unknown', amountSats: 0, address: '' }
+  }
+  if (/^ln(bc|tb|bcrt|bs)/i.test(s)) {
+    return { kind: 'lightning', amountSats: invoiceSats(s), address: s }
+  }
+  if (isValidArkAddress(s)) {
+    return { kind: 'ark', amountSats: 0, address: s }
+  }
+  if (/^(bc1|tb1|bcrt1|[123mn])/.test(s)) {
+    return { kind: 'onchain', amountSats: 0, address: s }
+  }
+  return { kind: 'unknown', amountSats: 0, address: s }
+}
 
 export default defineComponent({
   name: 'WalletDrawer',
@@ -315,7 +335,6 @@ export default defineComponent({
     watch(ready, (isReady) => { if (isReady && !fees.value) loadFeesLimits() })
 
     // Computed bindings to store
-    const usdBalance = computed(() => store.getters.usdBalance)
     const arkAddress = computed(() => store.getters['ark/address'])
     const arkServer = computed(() => store.state.ark.server)
     const info = computed(() => store.state.ark.info)
@@ -340,10 +359,7 @@ export default defineComponent({
       return new Date(ts).toLocaleDateString()
     }
 
-    // Tabs + method selectors
     const tab = ref<'receive' | 'send' | 'activity' | 'settings'>('receive')
-    const depositMethod = ref<'lightning' | 'ark' | 'onchain'>('lightning')
-    const withdrawMethod = ref<'lightning' | 'ark' | 'onchain'>('lightning')
 
     // ── Deposit state ─────────────────────────────────────────────
     const depositAmount = ref<number | null>(null)
@@ -410,76 +426,75 @@ export default defineComponent({
       if (depositCleanup) { depositCleanup(); depositCleanup = null }
     }
 
-    // ── Withdraw state ────────────────────────────────────────────
-    const withdrawAddress = ref('')
-    const withdrawAmount = ref<number | null>(null)
-    const onchainWithdrawAddress = ref('')
-    const onchainWithdrawAmount = ref<number | null>(null)
-    const withdrawInvoice = ref('')
-    const withdrawLoading = ref(false)
-    const withdrawStatus = ref<'idle' | 'pending' | 'success' | 'error'>('idle')
-    const withdrawStatusText = ref('')
+    // ── Send state (single auto-detecting input) ──────────────────
+    const sendInput = ref('')
+    const sendAmount = ref<number | null>(null)
+    const sendLoading = ref(false)
+    const sendStatus = ref<'idle' | 'pending' | 'success' | 'error'>('idle')
+    const sendStatusText = ref('')
 
-    async function createLnWithdraw() {
-      if (!withdrawInvoice.value) return
-      withdrawLoading.value = true
-      withdrawStatus.value = 'pending'
-      withdrawStatusText.value = 'Creating swap and sending…'
+    const sendDetected = computed<SendTarget>(() => detectSend(sendInput.value))
+    const sendNeedsAmount = computed(() =>
+      sendDetected.value.kind === 'ark' || sendDetected.value.kind === 'onchain',
+    )
+    const sendKindLabel = computed(() => {
+      switch (sendDetected.value.kind) {
+        case 'lightning': return '⚡ Lightning'
+        case 'ark': return 'Ark'
+        case 'onchain': return 'On-chain'
+        case 'unknown': return 'Unrecognized'
+        default: return ''
+      }
+    })
+    const sendButtonLabel = computed(() =>
+      sendDetected.value.kind === 'lightning' ? 'Pay Invoice' : 'Send',
+    )
+    const canSend = computed(() => {
+      if (!ready.value || sendLoading.value) return false
+      const d = sendDetected.value
+      if (d.kind === 'lightning') return d.amountSats > 0
+      if (d.kind === 'ark' || d.kind === 'onchain') return !!sendAmount.value && sendAmount.value > 0
+      return false
+    })
+
+    function sendSetMax() {
+      const balance = store.getters['ark/balance'] || BigInt(0)
+      sendAmount.value = Math.max(0, Number(balance) - 300)
+    }
+
+    async function doSend() {
+      const d = sendDetected.value
+      if (!canSend.value) return
+      sendLoading.value = true
+      sendStatus.value = 'pending'
+      sendStatusText.value = d.kind === 'lightning' ? 'Paying via Lightning…' : 'Sending…'
       try {
-        const result = await doLnWithdraw(withdrawInvoice.value)
-        withdrawStatus.value = 'success'
-        withdrawStatusText.value = `Paid! Preimage: ${result.preimage.slice(0, 16)}…`
-        showToast('Lightning withdrawal complete!')
+        if (d.kind === 'lightning') {
+          const result = await doLnWithdraw(d.address)
+          sendStatusText.value = `Paid! Preimage ${result.preimage.slice(0, 16)}…`
+        } else {
+          const txid = await store.dispatch('ark/sendBitcoin', {
+            address: d.address, amount: sendAmount.value,
+          })
+          sendStatusText.value = `Sent! TX ${txid.slice(0, 12)}…`
+        }
+        sendStatus.value = 'success'
+        showToast('Sent!')
         store.dispatch('ark/refreshBalance')
       } catch (err) {
-        withdrawStatus.value = 'error'
-        withdrawStatusText.value = err instanceof Error ? err.message : 'Swap failed'
-        showToast(err instanceof Error ? err.message : 'Failed to pay invoice', 'error')
+        sendStatus.value = 'error'
+        sendStatusText.value = err instanceof Error ? err.message : 'Send failed'
+        showToast(sendStatusText.value, 'error')
       } finally {
-        withdrawLoading.value = false
+        sendLoading.value = false
       }
     }
 
-    function resetWithdraw() {
-      withdrawInvoice.value = ''
-      withdrawStatus.value = 'idle'
-      withdrawStatusText.value = ''
-    }
-
-    function setMaxAmount() {
-      const balance = store.getters['ark/balance'] || BigInt(0)
-      withdrawAmount.value = Math.max(0, Number(balance) - 300)
-    }
-    function onchainSetMax() {
-      const balance = store.getters['ark/balance'] || BigInt(0)
-      onchainWithdrawAmount.value = Math.max(0, Number(balance) - 300)
-    }
-
-    async function withdrawFunds() {
-      if (!withdrawAddress.value || !withdrawAmount.value) return
-      try {
-        const txid = await store.dispatch('ark/sendBitcoin', {
-          address: withdrawAddress.value, amount: withdrawAmount.value,
-        })
-        showToast(`Sent! TX: ${txid.slice(0, 12)}…`)
-        withdrawAddress.value = ''
-        withdrawAmount.value = null
-      } catch (err) {
-        showToast(`Send failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
-      }
-    }
-    async function withdrawOnchain() {
-      if (!onchainWithdrawAddress.value || !onchainWithdrawAmount.value) return
-      try {
-        const txid = await store.dispatch('ark/sendBitcoin', {
-          address: onchainWithdrawAddress.value, amount: onchainWithdrawAmount.value,
-        })
-        showToast(`Sent on-chain! TX: ${txid.slice(0, 12)}…`)
-        onchainWithdrawAddress.value = ''
-        onchainWithdrawAmount.value = null
-      } catch (err) {
-        showToast(`On-chain send failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
-      }
+    function resetSend() {
+      sendInput.value = ''
+      sendAmount.value = null
+      sendStatus.value = 'idle'
+      sendStatusText.value = ''
     }
 
     const settleLoading = ref(false)
@@ -553,16 +568,16 @@ export default defineComponent({
     return {
       store, close, reconnect,
       arkStatus, ready, connText, arkServer, info,
-      usdBalance, arkAddress, privateKey, boardingAddress, boardingBalance, boardingUtxos,
+      arkAddress, privateKey, boardingAddress, boardingBalance, boardingUtxos,
       hasUnsettledFunds, isMutinyTestnet, txHistory, formatRelative,
-      tab, depositMethod, withdrawMethod,
+      tab,
       depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
-      withdrawAddress, withdrawAmount, onchainWithdrawAddress, onchainWithdrawAmount,
-      withdrawInvoice, withdrawLoading, withdrawStatus, withdrawStatusText,
+      sendInput, sendAmount, sendLoading, sendStatus, sendStatusText,
+      sendDetected, sendNeedsAmount, sendKindLabel, sendButtonLabel, canSend,
+      sendSetMax, doSend, resetSend,
       settleLoading,
       fees, limits, calcReceive,
-      createLnDeposit, resetDeposit, createLnWithdraw, resetWithdraw,
-      setMaxAmount, onchainSetMax, withdrawFunds, withdrawOnchain, settleFunds,
+      createLnDeposit, resetDeposit, settleFunds,
       showKey, showDeleteConfirm, deleteConfirmText, deleteWallet, requestFaucet,
       copyText, toastMsg, toastType,
     }
@@ -658,15 +673,37 @@ export default defineComponent({
 
 .drawer-body { padding: 18px 16px 24px; flex: 1; }
 
-.method-tabs { display: flex; gap: 4px; margin-bottom: 14px; }
-.method-tabs .tab {
-  flex: 1;
-  background: var(--bg-elevated); border: 1px solid var(--border-light);
-  color: var(--text-muted);
-  padding: 8px 10px; font-size: 0.78rem; font-weight: 600;
-  border-radius: 8px; cursor: pointer;
-  &.active { background: rgba(247, 201, 72, 0.1); border-color: var(--gold); color: var(--gold); }
+/* Consolidated receive: one block per rail. */
+.recv-block {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
 }
+.block-label {
+  font-size: 0.72rem; font-weight: 700; letter-spacing: 1px;
+  text-transform: uppercase; color: var(--text-muted);
+}
+
+/* Unified send input + detected-rail chip. */
+.send-input {
+  resize: none;
+  word-break: break-all;
+  line-height: 1.4;
+}
+.detect-row { display: flex; align-items: center; gap: 10px; }
+.detect-chip {
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 3px 10px; border-radius: 6px;
+  background: var(--bg-elevated); border: 1px solid var(--border-light); color: var(--text-muted);
+  &.lightning { color: var(--gold); border-color: var(--gold); background: rgba(247, 201, 72, 0.08); }
+  &.ark { color: var(--blue); border-color: var(--blue); background: rgba(56, 189, 248, 0.08); }
+  &.onchain { color: var(--text); border-color: var(--text-muted); }
+  &.unknown { color: var(--red); border-color: var(--red); background: rgba(239, 68, 68, 0.06); }
+}
+.error-hint { color: var(--red); }
 
 .section-body { display: flex; flex-direction: column; gap: 12px; }
 .hint { font-size: 0.75rem; color: var(--text-muted); }

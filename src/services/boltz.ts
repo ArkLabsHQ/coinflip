@@ -4,6 +4,7 @@
 import {
   ArkadeSwaps,
   BoltzSwapProvider,
+  getInvoiceSatoshis,
   type FeesResponse,
   type LimitsResponse,
   type PendingReverseSwap,
@@ -81,6 +82,15 @@ export async function createLnWithdraw(
 ): Promise<SendLightningPaymentResponse> {
   if (!swaps) throw new Error('Swap service not initialized')
   return swaps.sendLightningPayment({ invoice })
+}
+
+/** Amount encoded in a BOLT11 invoice (0 for amountless invoices / parse error). */
+export function invoiceSats(invoice: string): number {
+  try {
+    return Number(getInvoiceSatoshis(invoice)) || 0
+  } catch {
+    return 0
+  }
 }
 
 // ─── Fee & Limit Info ─────────────────────────────────────────────

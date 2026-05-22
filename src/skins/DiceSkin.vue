@@ -13,7 +13,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, computed, ref, watch, type PropType } from 'vue'
+import { defineComponent, computed, ref, watch, onUnmounted, type PropType } from 'vue'
 import type { SkinState } from './types'
 
 // Steep look-down view so the TOP face dominates — you read a die from the
@@ -64,21 +64,41 @@ export default defineComponent({
       return ''
     }
 
+    // Continuous tumble driven by rAF so the cube keeps spinning for the
+    // entire time the bet is resolving — it never stops early and "waits".
+    let rafId = 0
+    function spinLoop() {
+      rotX.value += 7
+      rotY.value += 11
+      rafId = requestAnimationFrame(spinLoop)
+    }
+    function stopSpin() {
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0 }
+    }
+
     watch(() => props.state.phase, (phase, old) => {
       if (phase === 'flipping') {
+        // Spin freely with no CSS transition — rAF sets each frame directly.
         settled.value = false
-        diceTransition.value = 'transform 1.8s cubic-bezier(0.25, 0.55, 0.35, 1)'
-        rotX.value += 900 + 90 * Math.floor(Math.random() * 4)
-        rotY.value += 1260 + 90 * Math.floor(Math.random() * 4)
+        diceTransition.value = 'none'
+        stopSpin()
+        spinLoop()
       } else if (phase === 'resolved' && old === 'flipping' && props.state.outcome) {
+        stopSpin()
         landedFace.value = props.state.outcome.won
           ? 4 + Math.floor(Math.random() * 3) // 4,5,6 → win
           : 1 + Math.floor(Math.random() * 3) // 1,2,3 → loss
-        // Settle onto the result face (on top) with a slight bounce.
+        // Settle from the current spin onto the result face (on top).
         diceTransition.value = 'transform 0.9s cubic-bezier(0.18, 1.25, 0.35, 1)'
+        settled.value = true
+      } else {
+        // idle / error
+        stopSpin()
         settled.value = true
       }
     })
+
+    onUnmounted(stopSpin)
 
     return { diceTransform, diceTransition, faceTint }
   },

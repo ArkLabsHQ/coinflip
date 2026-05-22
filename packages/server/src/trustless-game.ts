@@ -75,15 +75,21 @@ export interface TrustlessCommitResult {
   /** Set when the house won and the server swept. */
   txid?: string
   /**
-   * Set when the PLAYER won: everything the client needs to build + submit the
-   * playerWin sweep itself (single-party). The pot is the two escrow VTXOs.
+   * Set when the PLAYER won. The server builds the playerWin sweep (it can't
+   * sign it — that needs the player's key), so the client parses these PSBTs,
+   * attaches both secrets as the condition witness, signs inputs + checkpoints
+   * with its key, and submits. Browser-safe: only the SDK is needed, no lib
+   * tx-building (which is Node-crypto bound). The client should verify the
+   * sweep pays its own address before signing.
    */
   sweep?: {
-    escrowVtxos: Outpoint[]
-    payoutAddress: string
-    houseAddress: string
-    rake: number
-    finalExpiration: number
+    sweepPsbt: string
+    sweepCheckpoints: string[]
+    /** Input indices the client signs and attaches the witness to. */
+    inputCount: number
+    /** Both revealed secrets, in [houseSecret, playerSecret] order, as the
+     * condition witness for each sweep input. */
+    witnessHex: [string, string]
   }
 }
 
@@ -293,14 +299,21 @@ export async function handleTrustlessCommit(
     })
     result = { winner, houseSecret: game.house_secret_hex, playerSecret: req.playerSecretHex, payout: pot, rake: 0, proof, txid }
   } else {
-    // Player won — the playerWin leaf needs the player's key, so the client
-    // sweeps. Hand back everything it needs (it can re-derive the escrow script
-    // from the same params and verify the payout).
+    // Player won — the playerWin leaf needs the player's key, so the server
+    // builds the sweep but the CLIENT signs + submits it. Return the PSBTs.
     const rake = await calcRake(pot, deps)
+    const sweep = buildSweepTransaction(game2, deps.arkInfo, networkHrp, {
+      winner: 'player', escrowVtxos, payoutAddress: game.player_change_address!, houseAddress, rake,
+    })
     result = {
       winner, houseSecret: game.house_secret_hex, playerSecret: req.playerSecretHex,
       payout: pot - rake, rake, proof,
-      sweep: { escrowVtxos, payoutAddress: game.player_change_address!, houseAddress, rake, finalExpiration: state.finalExpiration },
+      sweep: {
+        sweepPsbt: hex.encode(sweep.arkTx.toPSBT()),
+        sweepCheckpoints: sweep.checkpoints.map((c) => hex.encode(c.toPSBT())),
+        inputCount: escrowVtxos.length,
+        witnessHex: [game.house_secret_hex, req.playerSecretHex],
+      },
     }
   }
 

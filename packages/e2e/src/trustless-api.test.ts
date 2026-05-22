@@ -31,7 +31,6 @@ import {
   type Identity,
   type ArkProvider,
 } from '@arkade-os/sdk'
-import { buildSweepTransaction, type Game } from 'arkade-coinflip'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
@@ -72,6 +71,17 @@ async function waitFor(w: Wallet, kind: 'boarding' | 'settled', min: number, t =
 
 const vtxoTotal = async (w: Wallet) => (await w.getVtxos()).reduce((a, v) => a + v.value, 0)
 
+// Boarding UTXOs can lag the balance check on regtest; retry settle so a
+// transient "No inputs found" doesn't flake the run.
+async function settleWithRetry(w: Wallet, tries = 3): Promise<void> {
+  for (let i = 0; i < tries; i++) {
+    try { await w.settle(); return } catch (e) {
+      if (i === tries - 1) throw e
+      await sleep(5000)
+    }
+  }
+}
+
 let arkAvailable = false
 beforeAll(async () => {
   try {
@@ -99,7 +109,7 @@ describe('trustless coin flow (server handlers)', () => {
 
     await faucet(await deps.wallet.getBoardingAddress(), HOUSE_FUND_BTC)
     await waitFor(deps.wallet, 'boarding', HOUSE_FUND_BTC * 1e8 * 0.9)
-    await deps.wallet.settle()
+    await settleWithRetry(deps.wallet)
     await waitFor(deps.wallet, 'settled', BET * 5)
   }, 180_000)
 
@@ -129,7 +139,7 @@ describe('trustless coin flow (server handlers)', () => {
     const playerW = await makePlayerWallet(playerId)
     await faucet(await playerW.getBoardingAddress(), PLAYER_FUND_BTC)
     await waitFor(playerW, 'boarding', PLAYER_FUND_BTC * 1e8 * 0.9)
-    await playerW.settle()
+    await settleWithRetry(playerW)
     await waitFor(playerW, 'settled', BET)
 
     const playerSecret = Buffer.from(new Uint8Array(16)); crypto.getRandomValues(playerSecret) // 16 bytes
@@ -165,22 +175,15 @@ describe('trustless coin flow (server handlers)', () => {
     if (commit.winner === 'house') {
       expect(commit.txid).toBeTruthy() // server swept
     } else {
-      // Player won — the client sweeps both escrow VTXOs via playerWin.
-      const game: Game = {
-        gameId: 'sweep', betAmount: BigInt(BET),
-        serverPubkey: toXOnly(hex.decode(play.serverPubkey)),
-        setupExpiration: 0, finalExpiration: commit.sweep.finalExpiration,
-        creator: { pubkey: toXOnly(hex.decode(play.housePubkey)), hash: hex.decode(play.houseHash) },
-        player: { pubkey: toXOnly(await playerId.compressedPublicKey()), hash: hex.decode(playerHash) },
-      }
-      const sweep = buildSweepTransaction(game, deps.arkInfo, HRP, {
-        winner: 'player', escrowVtxos: commit.sweep.escrowVtxos,
-        payoutAddress: commit.sweep.payoutAddress, houseAddress: commit.sweep.houseAddress, rake: commit.sweep.rake,
-      })
+      // Player won — the server built the playerWin sweep; the CLIENT signs +
+      // submits it (exactly what the Vue client does — SDK only, no lib).
+      const s = commit.sweep
+      const sweepArk = Transaction.fromPSBT(hex.decode(s.sweepPsbt))
+      const sweepCps = s.sweepCheckpoints.map((c: string) => Transaction.fromPSBT(hex.decode(c)))
+      const witness = s.witnessHex.map((w: string) => Buffer.from(w, 'hex'))
+      const inputs = Array.from({ length: s.inputCount }, (_, i) => i)
       const before = await vtxoTotal(playerW)
-      await submit(sweep.arkTx, sweep.checkpoints, playerId, [0, 1], [
-        Buffer.from(commit.houseSecret, 'hex'), playerSecret,
-      ])
+      await submit(sweepArk, sweepCps, playerId, inputs, witness)
       await sleep(6000)
       const after = await vtxoTotal(playerW)
       console.log(`[trustless-api] player swept: ${before} -> ${after}`)

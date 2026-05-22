@@ -160,6 +160,9 @@ async function submitOffchain(
 
 // SDK wallet instance (kept outside Vuex state to avoid reactivity issues with complex objects)
 let sdkWallet: Wallet | null = null
+// Guards the manual boarding settle so concurrent refreshBalance calls don't
+// fire overlapping settlement rounds (settlementConfig is false — see Wallet.create).
+let settling = false
 
 export function getSDKWallet(): Wallet | null {
   return sdkWallet
@@ -296,6 +299,13 @@ const ark: Module<ArkState, RootState> = {
           identity,
           arkServerUrl: state.server,
           ...(state.esplora ? { esploraUrl: state.esplora } : {}),
+          // Disable the SDK's settlement poll loop. It finalizes the game's
+          // preconfirmed VTXOs (escrow change, sweep payout) into batch rounds
+          // every poll, paying the per-intent fee each time — a ~5k-sats/flip
+          // leak measured on regtest. We settle boarding ourselves (see
+          // refreshBalance) so funding still works; preconfirmed game VTXOs
+          // stay spendable off-chain without being re-settled.
+          settlementConfig: false,
         })
 
         sdkWallet = wallet
@@ -363,12 +373,24 @@ const ark: Module<ArkState, RootState> = {
       }
     },
 
-    async refreshBalance({ commit, state }) {
+    async refreshBalance({ commit, state, dispatch }) {
       if (!sdkWallet || state.status !== 'connected') return
 
       try {
         const balance = await sdkWallet.getBalance()
         commit('SET_WALLET_BALANCE', balance)
+
+        // settlementConfig is false, so the SDK won't auto-settle boarding.
+        // Settle it ourselves once funds land (guarded against concurrency).
+        // Fire-and-forget: the round is slow; the next refresh shows the result.
+        if (balance.boarding.total > 0 && !settling) {
+          settling = true
+          const w = sdkWallet
+          w.settle()
+            .then(() => dispatch('refreshBalance'))
+            .catch((e) => console.warn('boarding settle failed:', e))
+            .finally(() => { settling = false })
+        }
 
         // Also fetch VTXOs for detailed display
         const vtxos = await sdkWallet.getVtxos()

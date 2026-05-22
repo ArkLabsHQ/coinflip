@@ -76,6 +76,17 @@ per-party model to the mod-N `roll < target` condition once the coin is solid.
 Sub-dust rake is currently waived. Define production rake (which output, dust
 handling, reporting) once fees (#6) are real.
 
+### ✅ FIXED — SDK settlement poll-loop drained ~5k sats/flip
+The client `Wallet.create` left the SDK's settlement poll loop on. It finalized
+the game's *preconfirmed* VTXOs (escrow change, sweep payout) into batch rounds
+every poll, paying the per-intent fee (~4,950) each cycle — a measured ~5–9k
+sats/flip leak on top of the bet (the on-chain balance fell far faster than the
+game P&L). Fixed: `settlementConfig: false` + a guarded manual boarding-settle
+in `refreshBalance`. Browser-verified: losses now debit **exactly −1,000**, no
+churn, zero console noise. (Open follow-up 🟡: a mainnet renewal strategy that
+avoids both this leak and VTXO-expiry — settle boarding on fund + renew only
+near expiry, not per-poll.)
+
 ## Reveal-ordering (audited — OK)
 The house commits `houseHash` at `/play` (before the player escrows) and reveals
 `creatorSecret` only at `/commit`. The house knows the player's *hash*, never the

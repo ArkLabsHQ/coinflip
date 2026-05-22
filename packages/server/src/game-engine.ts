@@ -16,6 +16,14 @@ import {
 import { isVtxoExpiringSoon, VtxoScript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
 import { createGameContracts, markGameContractsInactive } from './contract-manager.js'
+import {
+  reservations,
+  selectionMutex,
+  freeHouseVtxos,
+  outpointKey,
+  maxLiabilityForTier,
+  HouseBusyError,
+} from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 
 export interface PlayRequest {
@@ -197,13 +205,6 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
     throw new Error('Player must provide a change address')
   }
 
-  // Check house balance from real wallet
-  const balance = await deps.wallet.getBalance()
-  const available = balance.available
-  if (available < req.tier) {
-    throw new Error(`House balance insufficient. Available: ${available}, needed: ${req.tier}`)
-  }
-
   // Rate limit: max 3 pending per player
   const pendingCount = await deps.repos.games.countPendingForPlayer(req.playerPubkey)
   if (pendingCount >= 3) {
@@ -220,56 +221,114 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
   const housePubkey = Buffer.from(await deps.identity.compressedPublicKey()).toString('hex')
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
 
-  // Select house VTXOs for the bet, filtering out anything that would
-  // expire before the trustless-fallback window closes. If filtering
-  // leaves us short of the tier amount, try renewing via batch settle()
-  // once before giving up — the wallet's auto-renewal might be disabled
-  // or stuck on a fee-config issue.
+  // ── Concurrency-safe VTXO selection + reservation ──────────────────────
   //
-  // If the renewal itself fails (e.g. arkd 'no coin selection possible'
-  // because of a phantom intent or lingering settle state), fall back to
-  // using the expiring VTXOs anyway. The trustless fallback window
-  // (setupExpiration + finalExpiration = 20 min) accepts the residual risk
-  // that the VTXO might expire mid-game; the alternative — blocking play
-  // entirely — is worse for liveness.
-  let allHouseVtxos = await deps.wallet.getVtxos()
-  let { selectable: usableHouseVtxos, dropped } =
-    selectableHouseVtxos(allHouseVtxos)
-  let usableSum = usableHouseVtxos.reduce((acc, v) => acc + v.value, 0)
-  if (usableSum < req.tier && dropped.length > 0) {
-    try {
-      await renewExpiringHouseVtxos(deps)
-      allHouseVtxos = await deps.wallet.getVtxos()
-      ;({ selectable: usableHouseVtxos, dropped } = selectableHouseVtxos(allHouseVtxos))
-      usableSum = usableHouseVtxos.reduce((acc, v) => acc + v.value, 0)
-    } catch (renewErr) {
-      console.warn(
-        '[house wallet] settle() to renew expiring VTXOs failed; falling back to using them:',
-        renewErr instanceof Error ? renewErr.message : renewErr,
+  // Serialized so concurrent plays can't (a) over-commit the house balance
+  // beyond what in-flight games already obligate, or (b) bake the same VTXO
+  // into two games' fallback transactions. The selected outpoints are
+  // reserved under `gameId` and released on resolve / expiry.
+  let selectedHouseVtxos!: VtxoInput[]
+  let reservedOutpoints: string[] = []
+  await selectionMutex.runExclusive(async () => {
+    // Liability: worst-case payout of all in-flight games plus this one
+    // must not exceed the house's available balance.
+    const balance = await deps.wallet.getBalance()
+    const available = balance.available
+    const liability = maxLiabilityForTier(req.tier)
+    if (reservations.totalLiability() + liability > available) {
+      throw new HouseBusyError(
+        `House is busy serving other players (in-flight liability ` +
+        `${reservations.totalLiability()} + ${liability} > available ${available}). Try again shortly.`,
       )
     }
 
-    // Renewal either failed or wasn't enough — use the expiring VTXOs as a
-    // last resort so the user can still play.
-    if (usableSum < req.tier && dropped.length > 0) {
-      usableHouseVtxos = [...usableHouseVtxos, ...dropped]
-      usableSum = usableHouseVtxos.reduce((acc, v) => acc + v.value, 0)
-      console.warn(
-        `[house wallet] using ${dropped.length} expiring VTXO(s) as fallback; trustless-fallback ` +
-        'window may be tight if the player needs to exercise it',
+    const all = await deps.wallet.getVtxos()
+    const sum = (vs: ExtendedVirtualCoin[]) => vs.reduce((acc, v) => acc + v.value, 0)
+
+    // Preference ladder for the trustless-fallback inputs:
+    //   1. free  = unreserved + not expiring (ideal — full isolation)
+    //   2. unreserved incl. expiring (after a renew attempt)
+    //   3. last resort: reuse a reserved VTXO. Solvency is already guaranteed
+    //      by the liability check above; the only residual risk is a rare
+    //      trustless-fallback collision if two abandoned games share a VTXO.
+    //      This keeps a single-VTXO house (e.g. before the pool has split)
+    //      playable instead of bricking on "0 free".
+    let usableHouseVtxos = freeHouseVtxos(all)
+    if (sum(usableHouseVtxos) < req.tier) {
+      const reserved = reservations.reservedOutpoints()
+      const unreserved = all.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
+      const { selectable, dropped } = selectableHouseVtxos(unreserved)
+      if (dropped.length > 0) {
+        try {
+          await renewExpiringHouseVtxos(deps)
+        } catch (renewErr) {
+          console.warn(
+            '[house wallet] settle() to renew expiring VTXOs failed; falling back to using them:',
+            renewErr instanceof Error ? renewErr.message : renewErr,
+          )
+        }
+      }
+      usableHouseVtxos = [...selectable, ...dropped]
+    }
+    if (sum(usableHouseVtxos) < req.tier) {
+      // Last resort — pool exhausted, reuse reserved VTXOs.
+      const { selectable, dropped } = selectableHouseVtxos(all)
+      usableHouseVtxos = [...selectable, ...dropped]
+      if (sum(usableHouseVtxos) >= req.tier) {
+        console.warn(
+          '[house pool] reusing reserved VTXO(s) — free pool exhausted. Split the ' +
+          'house balance into more VTXOs to restore per-game isolation.',
+        )
+      }
+    }
+    if (sum(usableHouseVtxos) < req.tier) {
+      throw new Error(
+        `House balance insufficient. Usable: ${sum(usableHouseVtxos)}, needed: ${req.tier}`,
       )
     }
-  }
-  if (usableSum < req.tier) {
-    throw new Error(
-      `House balance insufficient after expiry filter. Usable: ${usableSum}, needed: ${req.tier}`,
+
+    const houseVtxoInputs = usableHouseVtxos.map(vtxoToInput)
+    const selected = coinSelect(houseVtxoInputs, BigInt(req.tier))
+    if (!selected.inputs) {
+      throw new Error('Could not select enough house VTXOs for the bet')
+    }
+    selectedHouseVtxos = selected.inputs
+    reservedOutpoints = selectedHouseVtxos.map(
+      (s) => `${s.vtxo.outpoint.txid}:${s.vtxo.outpoint.vout}`,
     )
+    reservations.reserve(gameId, reservedOutpoints, liability)
+  })
+
+  // From here on, any failure must release the reservation so the VTXOs
+  // don't stay locked forever.
+  try {
+    return await finalizeGame(req, deps, {
+      gameId, houseChoice, houseSecret, houseHash, houseXOnly, housePubkey,
+      networkHrp, selectedHouseVtxos, reservedOutpoints,
+    })
+  } catch (err) {
+    reservations.release(gameId)
+    throw err
   }
-  const houseVtxoInputs = usableHouseVtxos.map(vtxoToInput)
-  const { inputs: selectedHouseVtxos } = coinSelect(houseVtxoInputs, BigInt(req.tier))
-  if (!selectedHouseVtxos) {
-    throw new Error('Could not select enough house VTXOs for the bet')
-  }
+}
+
+interface FinalizeContext {
+  gameId: string
+  houseChoice: 'heads' | 'tails'
+  houseSecret: Uint8Array
+  houseHash: string
+  houseXOnly: Uint8Array
+  housePubkey: string
+  networkHrp: string
+  selectedHouseVtxos: VtxoInput[]
+  reservedOutpoints: string[]
+}
+
+async function finalizeGame(req: PlayRequest, deps: AppDeps, ctx: FinalizeContext): Promise<PlayResult> {
+  const {
+    gameId, houseSecret, houseHash, houseXOnly, housePubkey,
+    networkHrp, selectedHouseVtxos, reservedOutpoints,
+  } = ctx
 
   // Get house change address
   const houseChangeAddress = await deps.wallet.getAddress()
@@ -363,6 +422,7 @@ export async function handlePlay(req: PlayRequest, deps: AppDeps): Promise<PlayR
     finalScriptHex,
     setupCheckpointsJson: JSON.stringify(setupCheckpointsHex),
     finalCheckpointsJson: JSON.stringify(finalCheckpointsHex),
+    houseVtxosJson: JSON.stringify(reservedOutpoints),
   })
 
   // Register both contracts as `active` so the watcher fires if a player ever
@@ -484,6 +544,9 @@ export async function handleSign(gameId: string, req: SignRequest, deps: AppDeps
     status: 'resolved',
   })
 
+  // Release the house VTXO reservation — this game is resolved.
+  reservations.release(gameId)
+
   // Stop the watcher polling the (now-defunct) coinflip-setup / coinflip-final
   // addresses for this game.
   await markGameContractsInactive(deps, game.setup_script_hex, game.final_script_hex)
@@ -509,6 +572,8 @@ export function startExpiryTimer(deps: AppDeps): NodeJS.Timeout {
       if (expired > 0) {
         console.log(`Expired ${expired} pending games`)
         for (const g of rows) {
+          // Free the reserved house VTXOs so new games can use them.
+          reservations.release(g.id)
           markGameContractsInactive(deps, g.setup_script_hex, g.final_script_hex)
             .catch((err) => console.warn(`[expiry ${g.id}] inactivate failed: ${err}`))
         }

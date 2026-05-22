@@ -366,3 +366,66 @@ describe('selectableHouseVtxos: VTXO expiry filter', () => {
     expect(MS).toBe(1)
   })
 })
+
+describe('VtxoReservations: concurrency ledger', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+  const pool = require('arkade-coinflip-server/dist/vtxo-pool.js')
+  const { VtxoReservations, maxLiabilityForTier, outpointKey } = pool
+
+  it('reserves and releases outpoints by gameId', () => {
+    const r = new VtxoReservations()
+    r.reserve('game-1', ['txa:0', 'txa:1'], 660)
+    expect(r.isReserved('txa:0')).toBe(true)
+    expect(r.isReserved('txa:1')).toBe(true)
+    expect(r.isReserved('txb:0')).toBe(false)
+    r.release('game-1')
+    expect(r.isReserved('txa:0')).toBe(false)
+  })
+
+  it('prevents two games from reserving the same VTXO (caller checks isReserved)', () => {
+    const r = new VtxoReservations()
+    r.reserve('game-1', ['shared:0'], 660)
+    // A second game's selection would exclude already-reserved outpoints.
+    const candidate = ['shared:0', 'free:0']
+    const free = candidate.filter((op) => !r.isReserved(op))
+    expect(free).toEqual(['free:0'])
+  })
+
+  it('sums worst-case liability across in-flight games', () => {
+    const r = new VtxoReservations()
+    r.reserve('g1', ['a:0'], maxLiabilityForTier(1000)) // 2000
+    r.reserve('g2', ['b:0'], maxLiabilityForTier(5000)) // 10000
+    expect(r.totalLiability()).toBe(12000)
+    expect(r.activeGames()).toBe(2)
+    r.release('g1')
+    expect(r.totalLiability()).toBe(10000)
+  })
+
+  it('maxLiabilityForTier is double the tier (full-pot payout)', () => {
+    expect(maxLiabilityForTier(330)).toBe(660)
+    expect(maxLiabilityForTier(50000)).toBe(100000)
+  })
+
+  it('outpointKey formats txid:vout', () => {
+    expect(outpointKey('deadbeef', 3)).toBe('deadbeef:3')
+  })
+})
+
+describe('Mutex: serializes the select+reserve critical section', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+  const { Mutex } = require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+  it('runs exclusive sections one at a time, in order', async () => {
+    const mutex = new Mutex()
+    const log: string[] = []
+    const slow = (tag: string, ms: number) =>
+      mutex.runExclusive(async () => {
+        log.push(`${tag}-start`)
+        await new Promise((r) => setTimeout(r, ms))
+        log.push(`${tag}-end`)
+      })
+    // Launch concurrently; the mutex must prevent interleaving.
+    await Promise.all([slow('A', 30), slow('B', 5), slow('C', 5)])
+    expect(log).toEqual(['A-start', 'A-end', 'B-start', 'B-end', 'C-start', 'C-end'])
+  })
+})

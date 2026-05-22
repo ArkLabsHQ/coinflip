@@ -14,11 +14,8 @@
       </transition>
     </router-view>
 
-    <!-- Tiny corner-anchored history link, bottom-left. Replaces the
-         entire bottom nav. Stake/Bustabit-style minimal chrome. -->
-    <router-link v-if="isInitialized && $route.path !== '/history'" to="/history" class="corner-link history-corner">
-      history
-    </router-link>
+    <!-- Back link only on the history page; the play page reaches history
+         via the in-HUD button next to the P/L pill. -->
     <router-link v-if="isInitialized && $route.path === '/history'" to="/" class="corner-link history-corner">
       &laquo; play
     </router-link>

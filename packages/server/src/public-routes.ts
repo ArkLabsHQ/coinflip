@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { handlePlay, handleSign, PlayRequest, SignRequest } from './game-engine.js'
+import { HouseBusyError } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 
 export function createPublicRoutes(deps: AppDeps): Router {
@@ -44,7 +45,10 @@ export function createPublicRoutes(deps: AppDeps): Router {
       res.json(result)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
-      if (message.includes('Too many pending')) {
+      if (err instanceof HouseBusyError) {
+        // Retry-able: the house is at capacity for concurrent games.
+        res.status(503).set('Retry-After', '3').json({ error: message })
+      } else if (message.includes('Too many pending')) {
         res.status(429).json({ error: message })
       } else if (message.includes('insufficient') || message.includes('Invalid tier')) {
         res.status(400).json({ error: message })

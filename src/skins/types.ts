@@ -25,6 +25,12 @@ export interface SkinMeta {
   /** Unicode glyph or short label for the selector chip. */
   icon: string
   component: Component
+  /**
+   * Whether picking heads/tails is meaningful for this skin. Coin → yes;
+   * slot/dice → no (the visual has no "side", so the outcome is always
+   * randomised). When false, the side selector is hidden.
+   */
+  supportsSide: boolean
 }
 
 /** Props all skin components must accept. */

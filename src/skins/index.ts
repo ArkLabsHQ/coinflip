@@ -13,9 +13,9 @@ import SlotSkin from './SlotSkin.vue'
 import DiceSkin from './DiceSkin.vue'
 
 export const SKINS: SkinMeta[] = [
-  { id: 'coin', name: 'Coin', icon: '₿', component: CoinSkin },
-  { id: 'slot', name: 'Slot', icon: '♦', component: SlotSkin },
-  { id: 'dice', name: 'Dice', icon: '⚅', component: DiceSkin },
+  { id: 'coin', name: 'Coin', icon: '₿', component: CoinSkin, supportsSide: true },
+  { id: 'slot', name: 'Slot', icon: '♦', component: SlotSkin, supportsSide: false },
+  { id: 'dice', name: 'Dice', icon: '⚅', component: DiceSkin, supportsSide: false },
 ]
 
 const STORAGE_KEY = 'coinflip.selected_skin'

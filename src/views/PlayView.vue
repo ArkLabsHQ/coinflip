@@ -19,9 +19,12 @@
           <span class="skin-icon">{{ skin.icon }}</span>
         </button>
       </div>
-      <div class="pnl-pill" :class="pnlClass" @click="togglePnlScope" :title="`Click to switch — currently ${pnlScope}`">
-        <span class="pnl-scope">{{ pnlScope }}</span>
-        <span class="pnl-amount mono">{{ formattedPnl }}</span>
+      <div class="hud-right">
+        <div class="pnl-pill" :class="pnlClass" @click="togglePnlScope" :title="`Click to switch — currently ${pnlScope}`">
+          <span class="pnl-scope">{{ pnlScope }}</span>
+          <span class="pnl-amount mono">{{ formattedPnl }}</span>
+        </div>
+        <button class="history-btn" title="Game history" @click="openHistory">&#9827;</button>
       </div>
     </div>
 
@@ -60,7 +63,18 @@
         />
       </div>
 
-      <div v-if="!isAutoMode" class="side-selector">
+      <!-- Side selection only for skins where it's meaningful (coin). Default
+           is RANDOM so getting started is one click. Auto mode always
+           randomises, so the selector hides during auto. -->
+      <div v-if="currentSkin.supportsSide && !isAutoMode" class="side-selector">
+        <button
+          class="side-btn random"
+          :class="{ selected: selectedSide === 'random' }"
+          @click="selectedSide = 'random'"
+        >
+          <span class="side-icon">&#9858;</span>
+          RANDOM
+        </button>
         <button
           class="side-btn"
           :class="{ selected: selectedSide === 'heads' }"
@@ -77,9 +91,6 @@
           <span class="side-icon flipped">&#x20BF;</span>
           TAILS
         </button>
-      </div>
-      <div v-else class="auto-call-badge">
-        <span class="dice-icon">&#9858;</span> RANDOM
       </div>
 
       <div class="auto-selector">
@@ -121,6 +132,21 @@
         </div>
       </div>
     </transition>
+
+    <!-- Game history modal — scrollable list within a fixed card, not the page. -->
+    <transition name="hist-fade">
+      <div v-if="historyOpen" class="hist-backdrop" @click.self="historyOpen = false">
+        <div class="hist-modal" role="dialog" aria-label="Game history">
+          <header class="hist-header">
+            <h3 class="hist-title">Game History</h3>
+            <button class="hist-close" @click="historyOpen = false" aria-label="Close">&times;</button>
+          </header>
+          <div class="hist-body">
+            <GameHistoryList :games="historyGames" />
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -128,6 +154,7 @@
 import { defineComponent, ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useStore } from 'vuex'
 import TierSelector from '@/components/TierSelector.vue'
+import GameHistoryList, { type GameHistoryItem } from '@/components/GameHistoryList.vue'
 import { getTiers, play, sign } from '@/services/api'
 import { createHash } from '@/utils/crypto'
 import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState } from '@/skins'
@@ -153,7 +180,7 @@ interface SlabResult { won: boolean; amount: number }
 
 export default defineComponent({
   name: 'PlayView',
-  components: { TierSelector },
+  components: { TierSelector, GameHistoryList },
   emits: ['open-wallet'],
   setup(_props, { emit }) {
     const store = useStore()
@@ -163,7 +190,9 @@ export default defineComponent({
     const maxAvailable = ref(50000)
     const houseReady = ref(false)
     const selectedTier = ref<number | null>(null)
-    const selectedSide = ref<'heads' | 'tails' | null>(null)
+    // 'random' (default) flips a random side each play — getting started is
+    // one click. 'heads'/'tails' are explicit player calls (coin skin only).
+    const selectedSide = ref<'heads' | 'tails' | 'random'>('random')
 
     // ── Flip lifecycle state ──────────────────────────────────────────
     const phase = ref<'idle' | 'flipping' | 'resolved'>('idle')
@@ -191,6 +220,18 @@ export default defineComponent({
     function selectSkin(id: string) {
       currentSkinId.value = id
       saveSkinId(id)
+    }
+
+    // ── History modal ─────────────────────────────────────────────────
+    const historyOpen = ref(false)
+    const historyGames = ref<GameHistoryItem[]>([])
+    function openHistory() {
+      try {
+        historyGames.value = JSON.parse(localStorage.getItem('gameHistory') || '[]')
+      } catch {
+        historyGames.value = []
+      }
+      historyOpen.value = true
     }
 
     // ── P&L (session + all-time) ──────────────────────────────────────
@@ -225,12 +266,9 @@ export default defineComponent({
 
     // ── Other computed ────────────────────────────────────────────────
     const playerBalance = computed(() => store.state.walletBalance || Infinity)
-    const canFlip = computed(() => {
-      if (isFlipping.value) return false
-      if (selectedTier.value === null) return false
-      if (isAutoMode.value) return true
-      return selectedSide.value !== null
-    })
+    // Only a tier is required now — the side defaults to 'random', so a fresh
+    // player can flip immediately after load.
+    const canFlip = computed(() => !isFlipping.value && selectedTier.value !== null)
 
     // ── Data load ─────────────────────────────────────────────────────
     async function loadTiers() {
@@ -239,9 +277,20 @@ export default defineComponent({
         tiers.value = data.tiers
         maxAvailable.value = data.maxAvailable
         houseReady.value = data.houseReady
+        // Pre-select the cheapest affordable tier so getting started is one
+        // click. Only set on first load (don't override a manual pick).
+        if (selectedTier.value === null && tiers.value.length > 0) {
+          selectedTier.value = Math.min(...tiers.value)
+        }
       } catch (e) {
         console.warn('Failed to load tiers:', e)
       }
+    }
+
+    /** Resolve the side to actually play: explicit pick, or a coin toss. */
+    function resolveSide(): 'heads' | 'tails' {
+      if (selectedSide.value === 'random') return Math.random() < 0.5 ? 'heads' : 'tails'
+      return selectedSide.value
     }
 
     // ── Stats recording ───────────────────────────────────────────────
@@ -385,8 +434,7 @@ export default defineComponent({
         await runAuto()
         return
       }
-      if (!selectedSide.value) return
-      await flipOnce(selectedSide.value)
+      await flipOnce(resolveSide())
     }
 
     // ── Keyboard hotkey: Enter to re-flip ─────────────────────────────
@@ -436,6 +484,8 @@ export default defineComponent({
       autoCountLabel, autoRemainingLabel,
       // Skin
       skins: SKINS, currentSkinId, currentSkin, selectSkin,
+      // History modal
+      historyOpen, historyGames, openHistory,
       // Stats
       sessionPnl, allTimePnl, pnlScope, togglePnlScope, formattedPnl, pnlClass,
       streak, sparkline, slab, winFlash,
@@ -495,6 +545,32 @@ export default defineComponent({
   box-shadow: 0 0 8px var(--gold-glow);
 }
 .skin-icon { display: inline-block; }
+
+.hud-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.history-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-light);
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 1.05rem;
+  line-height: 1;
+  transition: all 0.18s;
+}
+.history-btn:hover {
+  color: var(--gold);
+  border-color: var(--gold);
+  box-shadow: 0 0 10px var(--gold-glow);
+}
 
 .pnl-pill {
   display: flex;
@@ -657,6 +733,13 @@ export default defineComponent({
   box-shadow: 0 0 16px var(--blue-glow);
 }
 .side-btn.selected .side-icon { opacity: 1; color: var(--blue); }
+.side-btn.random.selected {
+  border-color: var(--gold);
+  background: rgba(247, 201, 72, 0.08);
+  color: var(--gold);
+  box-shadow: 0 0 16px var(--gold-glow);
+}
+.side-btn.random.selected .side-icon { opacity: 1; color: var(--gold); }
 
 .auto-call-badge {
   display: inline-flex;
@@ -823,6 +906,64 @@ export default defineComponent({
 .slab-enter-active, .slab-leave-active { transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s; }
 .slab-enter-from { transform: translateY(100%); opacity: 0; }
 .slab-leave-to { transform: translateY(100%); opacity: 0; }
+
+/* ── History modal ──────────────────────────────────────────────── */
+.hist-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.hist-modal {
+  width: min(520px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.hist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.hist-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text);
+}
+.hist-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.6rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  transition: color 0.15s;
+}
+.hist-close:hover { color: var(--text); }
+/* Only the list scrolls — the header stays pinned. */
+.hist-body {
+  overflow-y: auto;
+  flex: 1;
+  -webkit-overflow-scrolling: touch;
+}
+.hist-fade-enter-active, .hist-fade-leave-active { transition: opacity 0.2s; }
+.hist-fade-enter-from, .hist-fade-leave-to { opacity: 0; }
 
 @media (max-width: 640px) {
   .side-btn { padding: 12px 10px; font-size: 0.8rem; }

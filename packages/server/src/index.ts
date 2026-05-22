@@ -21,6 +21,7 @@ import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
 import { attachContractEventHandler, initContractManager } from './contract-manager.js'
 import { startExpiryTimer } from './game-engine.js'
+import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
 import { createAdminRoutes } from './admin/routes.js'
 import type { AppDeps } from './deps.js'
@@ -34,6 +35,7 @@ export { makeRepos } from './repositories/index.js'
 export { initHouseWallet } from './house-wallet.js'
 export { attachContractEventHandler, initContractManager } from './contract-manager.js'
 export { startExpiryTimer } from './game-engine.js'
+export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'
 export { createAdminRoutes } from './admin/routes.js'
 export type { AppDeps } from './deps.js'
@@ -72,6 +74,11 @@ export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<App
 async function main() {
   console.log('Bootstrapping server dependencies...')
   const deps = await bootstrapDeps()
+
+  // Rebuild VTXO reservations from any pending games that survived a restart,
+  // then keep a healthy pool of distinct house VTXOs for concurrent play.
+  await rebuildReservations(deps)
+  startPoolMaintenance(deps)
 
   // Start game expiry timer
   startExpiryTimer(deps)

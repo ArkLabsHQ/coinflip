@@ -73,6 +73,7 @@ export async function initDb(): Promise<void> {
       final_script_hex TEXT,
       setup_checkpoints_json TEXT,
       final_checkpoints_json TEXT,
+      house_vtxos_json TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       resolved_at TEXT
     )
@@ -84,6 +85,7 @@ export async function initDb(): Promise<void> {
     'final_script_hex',
     'setup_checkpoints_json',
     'final_checkpoints_json',
+    'house_vtxos_json',
   ]) {
     try { db.run(`ALTER TABLE games ADD COLUMN ${col} TEXT`) } catch { /* already there */ }
   }

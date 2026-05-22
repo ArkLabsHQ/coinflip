@@ -36,6 +36,8 @@ export interface GameRow {
   setup_checkpoints_json: string | null
   /** JSON-encoded `string[]` of checkpoint PSBTs for the final tx. */
   final_checkpoints_json: string | null
+  /** JSON-encoded `string[]` of "txid:vout" house VTXO outpoints reserved for this game. */
+  house_vtxos_json: string | null
   created_at: string
   resolved_at: string | null
 }
@@ -54,6 +56,7 @@ export interface NewGame {
   finalScriptHex?: string
   setupCheckpointsJson?: string
   finalCheckpointsJson?: string
+  houseVtxosJson?: string
 }
 
 export interface GameUpdate {

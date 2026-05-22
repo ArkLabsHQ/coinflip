@@ -24,10 +24,17 @@ export function createPublicRoutes(deps: AppDeps): Router {
 
       const maxAvailable = tiers.reduce((max, t) => (t <= available ? Math.max(max, t) : max), 0)
 
+      // Publish the rake policy so the trustless client can verify the rake
+      // output on the winner-claim it co-signs.
+      const rakeType = (await deps.repos.config.get('rake_type')) || 'percentage'
+      const rakeValue = parseInt((await deps.repos.config.get('rake_value')) || '2', 10)
+
       res.json({
         tiers,
         maxAvailable,
         houseReady: available >= minBalance,
+        rakeType,
+        rakeValue,
       })
     } catch (err) {
       console.error('Tiers error:', err)

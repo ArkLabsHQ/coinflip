@@ -262,6 +262,17 @@ const ark: Module<ArkState, RootState> = {
 
         sdkWallet = wallet
 
+        // Force a full VTXO re-scan when the wallet key or Ark server changes.
+        // The SDK's sync cursor is GLOBAL, so a stale cursor left by a previous
+        // wallet (or a different network) makes this connection skip the indexer
+        // scan — a freshly restored key would then show a 0 balance. Clearing it
+        // only on a context change keeps routine reconnects fast.
+        const syncCtx = `${rootState.wallet.publicKey || ''}@${state.server}`
+        if (syncCtx !== localStorage.getItem('ark_last_sync_ctx')) {
+          await wallet.clearSyncCursor().catch((e) => console.warn('clearSyncCursor failed:', e))
+          localStorage.setItem('ark_last_sync_ctx', syncCtx)
+        }
+
         // Get server info via REST for display
         const response = await fetch(`${state.server}/v1/info`, {
           signal: AbortSignal.timeout(5000)

@@ -128,6 +128,23 @@ export function createAdminRoutes(deps: AppDeps): Router {
     }
   })
 
+  // GET /api/wallet/key — reveal the house private key for backup/restore.
+  // The house key is stored plaintext in SQLite (see the boot warning); this
+  // endpoint lives on the admin port, which production must protect (e.g.
+  // Traefik basic auth). Without it the operator has no way to back the key up.
+  router.get('/api/wallet/key', async (_req: Request, res: Response) => {
+    try {
+      const row = await deps.repos.houseWallet.get()
+      if (!row) {
+        res.status(404).json({ error: 'House wallet not initialized' })
+        return
+      }
+      res.json({ privateKeyHex: row.private_key_hex, publicKeyHex: row.public_key_hex })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
   // GET /api/wallet/history — house wallet transaction history (Ark + boarding combined)
   router.get('/api/wallet/history', async (_req: Request, res: Response) => {
     try {

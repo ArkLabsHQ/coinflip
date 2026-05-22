@@ -269,6 +269,19 @@
       <button class="copy-btn">Copy</button>
     </div>
     <p style="color:var(--muted);font-size:0.75rem;margin-top:8px">Send BTC to the boarding address. After confirmation, the wallet will settle it into Ark VTXOs automatically.</p>
+
+    <h2 style="margin-top:16px">House Private Key</h2>
+    <div id="keyHidden">
+      <button class="btn" style="background:var(--red)" onclick="revealKey()">Reveal Private Key</button>
+      <p style="color:var(--muted);font-size:0.75rem;margin-top:8px">Back this up to recover the house wallet. Anyone with this key controls all house funds — keep it secret.</p>
+    </div>
+    <div id="keyShown" style="display:none">
+      <div class="address-box" onclick="copyText('housePrivKey')">
+        <span id="housePrivKey" style="word-break:break-all"></span>
+        <button class="copy-btn">Copy</button>
+      </div>
+      <button class="btn btn-small" style="margin-top:8px" onclick="hideKey()">Hide</button>
+    </div>
   </div>
 
   <div class="section">
@@ -423,6 +436,21 @@
     document.getElementById('houseAddress').textContent = data.address;
     document.getElementById('boardingAddress').textContent = data.boardingAddress;
     document.getElementById('vtxoCount').textContent = data.vtxoCount;
+  }
+
+  async function revealKey() {
+    const res = await fetch('/api/wallet/key');
+    if (!res.ok) { showToast('Failed to fetch key'); return; }
+    const data = await res.json();
+    document.getElementById('housePrivKey').textContent = data.privateKeyHex;
+    document.getElementById('keyHidden').style.display = 'none';
+    document.getElementById('keyShown').style.display = 'block';
+  }
+
+  function hideKey() {
+    document.getElementById('housePrivKey').textContent = '';
+    document.getElementById('keyShown').style.display = 'none';
+    document.getElementById('keyHidden').style.display = 'block';
   }
 
   async function loadGames() {

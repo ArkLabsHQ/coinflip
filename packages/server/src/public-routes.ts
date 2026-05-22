@@ -1,5 +1,10 @@
 import { Router, Request, Response } from 'express'
-import { handlePlay, handleSign, PlayRequest, SignRequest } from './game-engine.js'
+import {
+  handleTrustlessPlay,
+  handleTrustlessCommit,
+  type TrustlessPlayRequest,
+  type TrustlessCommitRequest,
+} from './trustless-game.js'
 import { HouseBusyError } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 
@@ -42,29 +47,24 @@ export function createPublicRoutes(deps: AppDeps): Router {
     }
   })
 
-  // POST /api/play — create a new game against the house
+  // POST /api/play — start a trustless game: the house escrows its stake and
+  // returns the shared escrow address for the player to fund.
   router.post('/api/play', async (req: Request, res: Response) => {
     try {
-      const body = req.body as PlayRequest
-      if (!body.tier || !body.choice || !body.playerPubkey || !body.playerHash) {
-        res.status(400).json({ error: 'Missing required fields: tier, choice, playerPubkey, playerHash' })
+      const body = req.body as TrustlessPlayRequest
+      if (!body.tier || !body.playerPubkey || !body.playerHash || !body.playerChangeAddress) {
+        res.status(400).json({ error: 'Missing required fields: tier, playerPubkey, playerHash, playerChangeAddress' })
         return
       }
-      if (body.choice !== 'heads' && body.choice !== 'tails') {
-        res.status(400).json({ error: 'choice must be "heads" or "tails"' })
-        return
-      }
-
-      const result = await handlePlay(body, deps)
+      const result = await handleTrustlessPlay(body, deps)
       res.json(result)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
       if (err instanceof HouseBusyError) {
-        // Retry-able: the house is at capacity for concurrent games.
         res.status(503).set('Retry-After', '3').json({ error: message })
       } else if (message.includes('Too many pending')) {
         res.status(429).json({ error: message })
-      } else if (message.includes('insufficient') || message.includes('Invalid tier')) {
+      } else if (message.includes('insufficient') || message.includes('Invalid tier') || message.includes('covering')) {
         res.status(400).json({ error: message })
       } else {
         console.error('Play error:', err)
@@ -73,17 +73,17 @@ export function createPublicRoutes(deps: AppDeps): Router {
     }
   })
 
-  // POST /api/game/:id/sign — player signs and resolves the game
-  router.post('/api/game/:id/sign', async (req: Request, res: Response) => {
+  // POST /api/game/:id/commit — player reveals its secret + escrow outpoint;
+  // the server resolves and (house win) sweeps, or returns the playerWin sweep
+  // PSBT for the client to sign + submit.
+  router.post('/api/game/:id/commit', async (req: Request, res: Response) => {
     try {
-      const gameId = String(req.params.id)
-      const body = req.body as SignRequest
-      if (!body.playerSecretHex) {
-        res.status(400).json({ error: 'Missing required field: playerSecretHex' })
+      const body = req.body as TrustlessCommitRequest
+      if (!body.playerSecretHex || !body.playerEscrow?.txid) {
+        res.status(400).json({ error: 'Missing required fields: playerSecretHex, playerEscrow' })
         return
       }
-
-      const result = await handleSign(gameId, body, deps)
+      const result = await handleTrustlessCommit(String(req.params.id), body, deps)
       res.json(result)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
@@ -92,7 +92,7 @@ export function createPublicRoutes(deps: AppDeps): Router {
       } else if (message.includes('not pending') || message.includes('does not match')) {
         res.status(400).json({ error: message })
       } else {
-        console.error('Sign error:', err)
+        console.error('Commit error:', err)
         res.status(500).json({ error: message })
       }
     }

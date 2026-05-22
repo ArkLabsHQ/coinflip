@@ -5,6 +5,8 @@ import {
   generateSecret,
   determineWinner,
   buildGameTransactions,
+  buildClaimTransaction,
+  getFinalOutpoint,
   coinSelect,
   getSetupScript,
   getFinalScript,
@@ -47,6 +49,12 @@ export interface PlayResult {
   finalCheckpointsHex: string[]
   houseSetupSignatures: string[]
   houseFinalSignature: string
+  /**
+   * PSBT of the player-win claim template (coinflip-final[0] → player, pot−rake)
+   * for the client to verify and pre-sign. The server rebuilds the same tx
+   * deterministically at /commit, so only the signature is round-tripped.
+   */
+  playerWinClaimPsbt: string
 }
 
 export interface SignRequest {
@@ -460,6 +468,19 @@ async function finalizeGame(req: PlayRequest, deps: AppDeps, ctx: FinalizeContex
     console.warn(`[game ${gameId}] createGameContracts failed: ${err instanceof Error ? err.message : err}`)
   }
 
+  // Build the player-win claim template (final[0] → player, pot−rake) for the
+  // client to verify + pre-sign. Witness-independent txids make the final
+  // outpoint addressable now (proven by the deterministic-txid gate test).
+  const rake = await calculateRake(req.tier * 2, deps)
+  const playerClaim = buildClaimTransaction(game, deps.arkInfo, networkHrp, {
+    winner: 'player',
+    finalOutpoint: getFinalOutpoint(built.final.arkTx),
+    payoutAddress: req.playerChangeAddress,
+    houseAddress: houseChangeAddress,
+    rake,
+  })
+  const playerWinClaimPsbt = hex.encode(playerClaim.arkTx.toPSBT())
+
   return {
     gameId,
     housePubkey,
@@ -470,6 +491,7 @@ async function finalizeGame(req: PlayRequest, deps: AppDeps, ctx: FinalizeContex
     finalCheckpointsHex,
     houseSetupSignatures,
     houseFinalSignature: houseFinalSig,
+    playerWinClaimPsbt,
   }
 }
 

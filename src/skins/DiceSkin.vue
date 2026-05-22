@@ -16,19 +16,23 @@
 import { defineComponent, computed, ref, watch, type PropType } from 'vue'
 import type { SkinState } from './types'
 
-// Resting rotation that brings each face toward the viewer (+Z). Derived
-// from the face layout below: face-1 front, 2 right, 3 left, 4 top, 5
-// bottom, 6 back.
-const FACE_ROTATION: Record<number, { x: number; y: number }> = {
-  1: { x: 0, y: 0 },
-  2: { x: 0, y: -90 },
-  3: { x: 0, y: 90 },
-  4: { x: -90, y: 0 },
-  5: { x: 90, y: 0 },
-  6: { x: 0, y: 180 },
-}
+// Steep look-down view so the TOP face dominates — you read a die from the
+// top, like one resting on a table. Front + one side stay visible for depth.
+const VIEW = 'translateZ(-60px) rotateX(-38deg) rotateY(-26deg)'
 
-const roundUpToTurn = (deg: number) => Math.ceil(deg / 360) * 360
+// Rotation that brings each face onto the visual TOP of the cube. In CSS the
+// +Y axis points DOWN the screen, so the screen-top is the -Y direction:
+// these rotations send each face's outward normal to -Y. Face layout:
+// 1 front (+Z), 2 right (+X), 3 left (-X), 4 bottom (-Y → already top),
+// 5 top-in-model (+Y), 6 back (-Z).
+const FACE_TO_TOP: Record<number, string> = {
+  1: 'rotateX(90deg)',
+  2: 'rotateZ(-90deg)',
+  3: 'rotateZ(90deg)',
+  4: '',
+  5: 'rotateX(180deg)',
+  6: 'rotateX(-90deg)',
+}
 
 export default defineComponent({
   name: 'DiceSkin',
@@ -36,25 +40,23 @@ export default defineComponent({
     state: { type: Object as PropType<SkinState>, required: true },
   },
   setup(props) {
-    // Absolute, ever-increasing rotation. We only ever add turns so the cube
-    // always spins forward — never snaps backward to land on a face.
+    // Spin accumulators (only used while tumbling). The resting orientation is
+    // driven by FACE_TO_TOP once settled.
     const rotX = ref(0)
     const rotY = ref(0)
-    const diceTransition = ref('transform 0.7s cubic-bezier(0.18, 1.15, 0.4, 1)')
+    const settled = ref(true)
+    const landedFace = ref(4) // idle rests showing face-4 on top (-Y)
+    const diceTransition = ref('transform 0.85s cubic-bezier(0.18, 1.2, 0.35, 1)')
 
-    // A constant isometric viewing tilt is applied AFTER the face rotation so
-    // the cube always reads as 3D (you see two side faces) and never lands
-    // perfectly edge-on to the camera (which would render as a zero-height
-    // sliver). rotX/rotY select which face points "forward"; the tilt then
-    // angles the whole cube toward the viewer.
-    const diceTransform = computed(
-      () => `translateZ(-60px) rotateX(-24deg) rotateY(24deg) rotateX(${rotX.value}deg) rotateY(${rotY.value}deg)`,
-    )
+    // While tumbling: VIEW + accumulating spin. Once settled: VIEW + the
+    // result face rotated onto the top. The view tilt is the constant prefix
+    // so the camera angle never changes.
+    const diceTransform = computed(() => {
+      if (settled.value) return `${VIEW} ${FACE_TO_TOP[landedFace.value]}`.trim()
+      return `${VIEW} rotateX(${rotX.value}deg) rotateY(${rotY.value}deg)`
+    })
 
-    // Which face value the cube landed on (1-6). Only this face gets tinted.
-    const landedFace = ref(1)
-
-    // Tint only the landed (front) face — green on win, red on loss.
+    // Tint only the landed (top) face — green on win, red on loss.
     function faceTint(n: number): string {
       if (props.state.phase === 'resolved' && props.state.outcome && landedFace.value === n) {
         return props.state.outcome.won ? 'face-win' : 'face-loss'
@@ -64,22 +66,17 @@ export default defineComponent({
 
     watch(() => props.state.phase, (phase, old) => {
       if (phase === 'flipping') {
-        // Long, near-linear spin. If the result arrives before this finishes,
-        // the 'resolved' branch just retargets the transition mid-flight.
-        diceTransition.value = 'transform 2.6s cubic-bezier(0.25, 0.6, 0.4, 1)'
-        rotX.value += 1080 + 90 * Math.floor(Math.random() * 4)
-        rotY.value += 1440 + 90 * Math.floor(Math.random() * 4)
+        settled.value = false
+        diceTransition.value = 'transform 1.8s cubic-bezier(0.25, 0.55, 0.35, 1)'
+        rotX.value += 900 + 90 * Math.floor(Math.random() * 4)
+        rotY.value += 1260 + 90 * Math.floor(Math.random() * 4)
       } else if (phase === 'resolved' && old === 'flipping' && props.state.outcome) {
-        const face = props.state.outcome.won
+        landedFace.value = props.state.outcome.won
           ? 4 + Math.floor(Math.random() * 3) // 4,5,6 → win
           : 1 + Math.floor(Math.random() * 3) // 1,2,3 → loss
-        landedFace.value = face
-        const fr = FACE_ROTATION[face]
-        // Round each axis up to a whole turn, add one more turn for momentum,
-        // then the face's resting offset → always lands flat, facing forward.
-        diceTransition.value = 'transform 0.85s cubic-bezier(0.18, 1.2, 0.35, 1)'
-        rotX.value = roundUpToTurn(rotX.value) + 360 + fr.x
-        rotY.value = roundUpToTurn(rotY.value) + 360 + fr.y
+        // Settle onto the result face (on top) with a slight bounce.
+        diceTransition.value = 'transform 0.9s cubic-bezier(0.18, 1.25, 0.35, 1)'
+        settled.value = true
       }
     })
 

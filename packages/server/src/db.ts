@@ -1,13 +1,14 @@
 /**
- * SQLite (sql.js / WASM) bootstrap and a driver-agnostic SQLExecutor
- * adapter for repositories.
+ * SQLite bootstrap (better-sqlite3, real on-disk) and a driver-agnostic
+ * SQLExecutor adapter for repositories.
  *
  * Schema lives here; data access lives in `./repositories/*`. Callers
  * receive a `Repos` bundle via `makeRepos(getSqlExecutor())` after
- * `initDb()` has run.
+ * `initDb()` has run. WAL mode gives durable, atomic writes without the
+ * whole-file rewrite the old sql.js (WASM, in-memory) path needed.
  */
 
-import initSqlJs, { Database } from 'sql.js'
+import Database from 'better-sqlite3'
 import fs from 'fs'
 import path from 'path'
 import type { SQLExecutor } from './repositories/types.js'
@@ -15,29 +16,18 @@ import type { SQLExecutor } from './repositories/types.js'
 const DATA_DIR = process.env.DATA_DIR || './data'
 const DB_PATH = path.join(DATA_DIR, 'coinflip.db')
 
-let db: Database
-
-function saveDb(): void {
-  const data = db.export()
-  const buffer = Buffer.from(data)
-  fs.writeFileSync(DB_PATH, buffer)
-}
+let db: Database.Database
 
 export async function initDb(): Promise<void> {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true })
   }
 
-  const SQL = await initSqlJs()
+  db = new Database(DB_PATH)
+  db.pragma('journal_mode = WAL')
+  db.pragma('foreign_keys = ON')
 
-  if (fs.existsSync(DB_PATH)) {
-    const fileBuffer = fs.readFileSync(DB_PATH)
-    db = new SQL.Database(fileBuffer)
-  } else {
-    db = new SQL.Database()
-  }
-
-  db.run(`
+  db.exec(`
     CREATE TABLE IF NOT EXISTS house_wallet (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       private_key_hex TEXT NOT NULL,
@@ -46,14 +36,14 @@ export async function initDb(): Promise<void> {
     )
   `)
 
-  db.run(`
+  db.exec(`
     CREATE TABLE IF NOT EXISTS config (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     )
   `)
 
-  db.run(`
+  db.exec(`
     CREATE TABLE IF NOT EXISTS games (
       id TEXT PRIMARY KEY,
       tier INTEGER NOT NULL,
@@ -78,8 +68,8 @@ export async function initDb(): Promise<void> {
       resolved_at TEXT
     )
   `)
-  // Backfill columns for pre-existing DBs. sql.js raises a parse error for
-  // ALTER TABLE on a missing column; swallow if it already exists.
+  // Backfill columns for pre-existing DBs. ALTER TABLE throws if the column
+  // already exists; swallow that.
   for (const col of [
     'setup_script_hex',
     'final_script_hex',
@@ -87,50 +77,41 @@ export async function initDb(): Promise<void> {
     'final_checkpoints_json',
     'house_vtxos_json',
   ]) {
-    try { db.run(`ALTER TABLE games ADD COLUMN ${col} TEXT`) } catch { /* already there */ }
+    try { db.exec(`ALTER TABLE games ADD COLUMN ${col} TEXT`) } catch { /* already there */ }
   }
 
   // Seed default config
-  const seedSql = 'INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)'
-  db.run(seedSql, ['rake_type', 'percentage'])
-  db.run(seedSql, ['rake_value', '2'])
-  db.run(seedSql, ['tiers', JSON.stringify([1000, 5000, 10000, 50000])])
-  db.run(seedSql, ['min_house_balance', '100000'])
-
-  saveDb()
+  const seed = db.prepare('INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)')
+  seed.run('rake_type', 'percentage')
+  seed.run('rake_value', '2')
+  seed.run('tiers', JSON.stringify([1000, 5000, 10000, 50000]))
+  seed.run('min_house_balance', '100000')
 }
 
 /**
  * SQLExecutor adapter for the Ark SDK's `SQLiteWalletRepository` /
  * `SQLiteContractRepository` and our own `repositories/*` impls.
- * Wraps sql.js (WASM) to match the SDK's driver-agnostic interface.
+ * better-sqlite3 is synchronous; we wrap each call in a resolved Promise to
+ * satisfy the SDK's async interface. Uint8Array params are converted to
+ * Buffer (better-sqlite3 binds Buffer/number/string/bigint/null only).
  */
+function bindParams(params?: unknown[]): unknown[] {
+  if (!params) return []
+  return params.map((p) =>
+    p instanceof Uint8Array && !Buffer.isBuffer(p) ? Buffer.from(p) : p,
+  )
+}
+
 export function getSqlExecutor(): SQLExecutor {
   return {
     run: async (sql: string, params?: unknown[]): Promise<void> => {
-      db.run(sql, params as (string | number | null | Uint8Array)[])
-      saveDb()
+      db.prepare(sql).run(...bindParams(params))
     },
     get: async <T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | undefined> => {
-      const stmt = db.prepare(sql)
-      if (params) stmt.bind(params as (string | number | null | Uint8Array)[])
-      if (stmt.step()) {
-        const row = stmt.getAsObject() as T
-        stmt.free()
-        return row
-      }
-      stmt.free()
-      return undefined
+      return db.prepare(sql).get(...bindParams(params)) as T | undefined
     },
     all: async <T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> => {
-      const results: T[] = []
-      const stmt = db.prepare(sql)
-      if (params) stmt.bind(params as (string | number | null | Uint8Array)[])
-      while (stmt.step()) {
-        results.push(stmt.getAsObject() as T)
-      }
-      stmt.free()
-      return results
+      return db.prepare(sql).all(...bindParams(params)) as T[]
     },
   }
 }

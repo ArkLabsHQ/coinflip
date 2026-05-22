@@ -1,4 +1,10 @@
-FROM node:22-alpine AS builder
+FROM node:22-slim AS builder
+
+# Build toolchain so better-sqlite3 can compile its native addon if no
+# prebuilt binary matches (Debian/glibc base; prebuilds usually cover it).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -17,7 +23,7 @@ COPY packages/server/ ./
 RUN npm run build
 
 # Production stage
-FROM node:22-alpine
+FROM node:22-slim
 
 WORKDIR /app
 

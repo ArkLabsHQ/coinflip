@@ -1,932 +1,910 @@
 <template>
-  <div class="wallet-view">
-    <div class="wallet-container">
-      <div class="balance-section">
-        <div class="balance-card">
-          <div class="balance-info">
-            <span class="balance-label">Available Balance</span>
-            <div class="balance-amount">
-              ₿ {{ store.getters['ark/formattedBalance'] }}
-              <div class="usd-value">
-                ≈ ${{ usdBalance }}
-              </div>
-            </div>
-          </div>
-          <div class="balance-actions">
-            <button @click="showWithdrawModal = true" class="withdraw-button">
-              <span class="material-icons">logout</span>
-              Withdraw
-            </button>
-          </div>
-        </div>
+  <div class="page wallet-page">
+    <!-- Balance Hero -->
+    <div class="balance-hero">
+      <div class="balance-eyebrow">YOUR BALANCE</div>
+      <div class="balance-amount mono">
+        {{ store.getters['ark/formattedBalance'] || '0' }}
+        <span class="balance-unit">sats</span>
       </div>
-
-      <div class="deposit-section">
-        <h2>Deposit</h2>
-        <div class="address-card">
-          <div class="qr-code" v-if="arkAddress">
-            <img :src="`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${arkAddress}`" alt="ARK Address QR Code"/>
-          </div>
-          <div class="address-details">
-            <label>Address</label>
-            <div class="address-container">
-              <code class="address">{{ arkAddress || 'Generating address...' }}</code>
-              <button @click="copyAddress" class="copy-button" :disabled="!arkAddress">
-                <span class="material-icons">content_copy</span>
-              </button>
-            </div>
-            <div v-if="isMutinyTestnet" class="faucet-container">
-              <button @click="requestFaucet" class="faucet-button">
-                <span class="material-icons">water_drop</span>
-                Faucet
-              </button>
-            </div>
-          </div>
-        </div>
+      <div class="balance-fiat text-muted mono">&#8776; ${{ usdBalance }}</div>
+      <div v-if="boardingBalance > 0" class="boarding-status">
+        <span class="boarding-dot"></span>
+        {{ boardingBalance.toLocaleString() }} sats boarding
+        <span class="text-muted">&mdash; settling into Ark</span>
       </div>
-
-      <div class="server-info-section">
-        <h2>Ark Config</h2>
-        <div class="info-card">
-          <div class="info-grid">
-            <div class="info-item network">
-              <label>Network</label>
-              <span>{{ store.getters['ark/serverNetwork'] || 'Unknown' }}</span>
-            </div>
-            <div class="info-item pubkey">
-              <label>Server Pubkey</label>
-              <code>{{ store.getters['ark/serverPubkey'] || 'Unknown' }}</code>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="danger-zone">
-        <h2>Danger Zone</h2>
-        <div class="danger-card">
-          <div class="action-buttons">
-            <button @click="showPrivateKey = true" class="danger-button">
-              <span class="material-icons">key</span>
-              Show Private Key
-            </button>
-            <button @click="showDeleteConfirm = true" class="danger-button">
-              <span class="material-icons">delete_forever</span>
-              Delete Wallet
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <base-modal
-        v-if="showWithdrawModal"
-        title="Withdraw Funds"
-        @close="closeWithdrawModal"
-      >
-        <div class="withdraw-form">
-          <div class="form-group">
-            <label>Ark Address</label>
-            <input 
-              type="text" 
-              v-model="withdrawAddress"
-              placeholder="Enter Ark address"
-            >
-          </div>
-
-          <div class="form-group">
-            <label>Amount (BTC)</label>
-            <div class="amount-input">
-              <input 
-                type="number" 
-                v-model="withdrawAmount"
-                step="0.00000001"
-                min="0"
-                :max="maxWithdrawAmount"
-                placeholder="0.00000000"
-              >
-              <button @click="setMaxAmount" class="max-button">MAX</button>
-            </div>
-            <div class="available">
-              ₿{{ store.getters['ark/formattedBalance'] }}
-            </div>
-          </div>
-
-          <div class="modal-actions">
-            <button @click="closeWithdrawModal" class="cancel-button">Cancel</button>
-            <button 
-              @click="withdrawFunds" 
-              class="confirm-button"
-            >
-              Confirm Withdraw
-            </button>
-          </div>
-        </div>
-      </base-modal>
-
-      <base-modal
-        v-if="showPrivateKey"
-        title="Your Private Key"
-        @close="showPrivateKey = false"
-      >
-        <div class="private-key-display">
-          <div class="warning">
-            Never share your private key with anyone!
-          </div>
-          
-          <div class="key-container">
-            <code>{{ privateKey }}</code>
-            <button @click="copyPrivateKey" class="copy-button">
-              <span class="material-icons">content_copy</span>
-            </button>
-          </div>
-        </div>
-      </base-modal>
-
-      <base-modal
-        v-if="showDeleteConfirm"
-        title="Delete Wallet"
-        @close="showDeleteConfirm = false"
-      >
-        <div class="delete-confirmation">
-          <div class="warning">
-            <p>Are you sure you want to delete your wallet?</p>
-            <p>This action cannot be undone. Make sure you have backed up your private key.</p>
-          </div>
-          
-          <div class="confirmation-input">
-            <label>Type "DELETE" to confirm:</label>
-            <input 
-              type="text"
-              v-model="deleteConfirmText"
-              placeholder="DELETE"
-            >
-          </div>
-          
-          <div class="modal-actions">
-            <button @click="showDeleteConfirm = false" class="cancel-button">
-              Cancel
-            </button>
-            <button 
-              @click="deleteWallet"
-              :disabled="deleteConfirmText !== 'DELETE'"
-              class="danger-button"
-            >
-              Delete Wallet
-            </button>
-          </div>
-        </div>
-      </base-modal>
     </div>
+
+    <!-- Deposit -->
+    <div class="casino-card section-card">
+      <div class="section-header">
+        <h3 class="section-title">Deposit</h3>
+        <div class="method-tabs">
+          <button :class="['tab', { active: depositMethod === 'lightning' }]" @click="depositMethod = 'lightning'">
+            &#9889; Lightning
+          </button>
+          <button :class="['tab', { active: depositMethod === 'ark' }]" @click="depositMethod = 'ark'">
+            Ark
+          </button>
+          <button :class="['tab', { active: depositMethod === 'onchain' }]" @click="depositMethod = 'onchain'">
+            On-chain
+          </button>
+        </div>
+      </div>
+
+      <!-- Lightning Deposit -->
+      <div v-if="depositMethod === 'lightning'" class="section-body">
+        <div v-if="!depositInvoice">
+          <div class="hint" v-if="fees && limits">
+            {{ limits.min.toLocaleString() }} &ndash; {{ limits.max.toLocaleString() }} sats
+            &middot; {{ fees.reverse.percentage }}% + {{ (fees.reverse.minerFees.lockup + fees.reverse.minerFees.claim).toLocaleString() }} fee
+          </div>
+          <div class="input-row">
+            <input
+              class="input"
+              type="number"
+              v-model.number="depositAmount"
+              placeholder="Amount in sats"
+              :min="limits?.min"
+              :max="limits?.max"
+            />
+            <button
+              class="btn-primary"
+              :disabled="!depositAmount || depositLoading"
+              @click="createLnDeposit"
+            >
+              {{ depositLoading ? 'Creating...' : 'Generate Invoice' }}
+            </button>
+          </div>
+          <div class="hint" v-if="depositAmount && fees">
+            You receive &asymp; <strong>{{ calcReceive(depositAmount).toLocaleString() }}</strong> sats after fees
+          </div>
+        </div>
+        <div v-else class="swap-result">
+          <div class="status-badge" :class="depositStatus">{{ depositStatusText }}</div>
+          <div class="address-box" @click="copyText(depositInvoice)">
+            <code class="mono">{{ depositInvoice }}</code>
+            <span class="address-action">Click to copy</span>
+          </div>
+          <button class="btn-outline btn-sm" @click="resetDeposit">New Deposit</button>
+        </div>
+      </div>
+
+      <!-- Ark Deposit -->
+      <div v-if="depositMethod === 'ark'" class="section-body">
+        <div class="address-box" @click="copyText(arkAddress)">
+          <code class="mono">{{ arkAddress || 'Generating...' }}</code>
+          <span class="address-action">Click to copy</span>
+        </div>
+        <button v-if="isMutinyTestnet" class="btn-primary" @click="requestFaucet">
+          Request Testnet Faucet
+        </button>
+      </div>
+
+      <!-- On-chain Deposit -->
+      <div v-if="depositMethod === 'onchain'" class="section-body">
+        <div class="hint">
+          Send BTC on-chain to your boarding address. Funds need to confirm, then settle into Ark.
+        </div>
+        <div class="address-box" @click="copyText(boardingAddress)">
+          <code class="mono">{{ boardingAddress || 'Generating...' }}</code>
+          <span class="address-action">Click to copy</span>
+        </div>
+        <div v-if="boardingUtxos.length > 0" class="boarding-list">
+          <div v-for="utxo in boardingUtxos" :key="utxo.outpoint.txid + ':' + utxo.outpoint.vout" class="boarding-item">
+            <span class="boarding-dot"></span>
+            <span class="mono">{{ Number(utxo.amount).toLocaleString() }} sats</span>
+            <span class="text-muted boarding-conf">
+              {{ utxo.confirmations ? utxo.confirmations + ' conf' : 'unconfirmed' }}
+              &mdash; {{ utxo.confirmations >= 1 ? 'settling into Ark' : 'waiting for confirmation' }}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Withdraw -->
+    <div class="casino-card section-card">
+      <div class="section-header">
+        <h3 class="section-title">Withdraw</h3>
+        <div class="method-tabs">
+          <button :class="['tab', { active: withdrawMethod === 'lightning' }]" @click="withdrawMethod = 'lightning'">
+            &#9889; Lightning
+          </button>
+          <button :class="['tab', { active: withdrawMethod === 'ark' }]" @click="withdrawMethod = 'ark'">
+            Ark
+          </button>
+          <button :class="['tab', { active: withdrawMethod === 'onchain' }]" @click="withdrawMethod = 'onchain'">
+            On-chain
+          </button>
+        </div>
+      </div>
+
+      <!-- Lightning Withdraw -->
+      <div v-if="withdrawMethod === 'lightning'" class="section-body">
+        <div v-if="withdrawStatus === 'idle'">
+          <div class="hint" v-if="fees && limits">
+            {{ limits.min.toLocaleString() }} &ndash; {{ limits.max.toLocaleString() }} sats
+            &middot; {{ fees.submarine.percentage }}% + {{ fees.submarine.minerFees.toLocaleString() }} fee
+          </div>
+          <input
+            class="input"
+            type="text"
+            v-model="withdrawInvoice"
+            placeholder="Paste Lightning invoice (lnbc...)"
+          />
+          <button
+            class="btn-primary"
+            :disabled="!withdrawInvoice || withdrawLoading"
+            @click="createLnWithdraw"
+          >
+            {{ withdrawLoading ? 'Paying...' : 'Pay via Lightning' }}
+          </button>
+        </div>
+        <div v-else class="swap-result">
+          <div class="status-badge" :class="withdrawStatus">{{ withdrawStatusText }}</div>
+          <button class="btn-outline btn-sm" @click="resetWithdraw">New Withdrawal</button>
+        </div>
+      </div>
+
+      <!-- Ark Withdraw -->
+      <div v-if="withdrawMethod === 'ark'" class="section-body">
+        <input
+          class="input"
+          type="text"
+          v-model="withdrawAddress"
+          placeholder="Destination Ark address"
+        />
+        <div class="input-row">
+          <input
+            class="input"
+            type="number"
+            v-model="withdrawAmount"
+            placeholder="Amount (sats)"
+            min="0"
+          />
+          <button class="btn-outline btn-sm" @click="setMaxAmount">MAX</button>
+        </div>
+        <button
+          class="btn-primary"
+          :disabled="!withdrawAddress || !withdrawAmount"
+          @click="withdrawFunds"
+        >
+          Send
+        </button>
+      </div>
+
+      <!-- On-chain Withdraw -->
+      <div v-if="withdrawMethod === 'onchain'" class="section-body">
+        <div class="hint">
+          Withdraw to a Bitcoin address on-chain. This triggers a collaborative redeem via the Ark server.
+        </div>
+        <input
+          class="input"
+          type="text"
+          v-model="onchainWithdrawAddress"
+          placeholder="Bitcoin address (bc1...)"
+        />
+        <div class="input-row">
+          <input
+            class="input"
+            type="number"
+            v-model.number="onchainWithdrawAmount"
+            placeholder="Amount (sats)"
+            min="0"
+          />
+          <button class="btn-outline btn-sm" @click="onchainWithdrawAmount = Math.max(0, Number(store.getters['ark/balance'] || 0) - 300)">MAX</button>
+        </div>
+        <button
+          class="btn-primary"
+          :disabled="!onchainWithdrawAddress || !onchainWithdrawAmount"
+          @click="withdrawOnchain"
+        >
+          Withdraw On-chain
+        </button>
+      </div>
+    </div>
+
+    <!-- Settle -->
+    <div class="casino-card section-card" v-if="hasUnsettledFunds">
+      <div class="section-header">
+        <h3 class="section-title">Settle Funds</h3>
+      </div>
+      <div class="section-body">
+        <div class="hint">
+          You have unsettled funds (boarding or preconfirmed). Settle them into the Ark round to make them spendable.
+        </div>
+        <button
+          class="btn-primary"
+          :disabled="settleLoading"
+          @click="settleFunds"
+        >
+          {{ settleLoading ? 'Settling...' : 'Settle Now' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="casino-card section-card settings-card">
+      <h3 class="section-title">Settings</h3>
+      <div class="settings-row">
+        <button class="btn-outline" @click="showKey = true">Back Up Key</button>
+        <button class="btn-danger" @click="showDeleteConfirm = true">Delete Wallet</button>
+      </div>
+    </div>
+
+    <!-- Private Key Modal -->
+    <transition name="fade">
+      <div v-if="showKey" class="overlay" @click.self="showKey = false">
+        <div class="modal-card casino-card-glow">
+          <h3 class="modal-title text-gold">Private Key</h3>
+          <p class="modal-desc text-muted">Never share this with anyone.</p>
+          <div class="key-display" @click="copyText(privateKey)">
+            <code class="mono">{{ privateKey }}</code>
+            <span class="address-action">Click to copy</span>
+          </div>
+          <button class="btn-outline" @click="showKey = false">Close</button>
+        </div>
+      </div>
+    </transition>
+
+    <!-- Delete Confirm Modal -->
+    <transition name="fade">
+      <div v-if="showDeleteConfirm" class="overlay" @click.self="showDeleteConfirm = false">
+        <div class="modal-card casino-card-glow">
+          <h3 class="modal-title text-red">Delete Wallet</h3>
+          <p class="modal-desc text-muted">This cannot be undone. Type DELETE to confirm.</p>
+          <input class="input" type="text" v-model="deleteConfirmText" placeholder="DELETE" />
+          <div class="modal-actions">
+            <button class="btn-outline" @click="showDeleteConfirm = false">Cancel</button>
+            <button class="btn-danger" :disabled="deleteConfirmText !== 'DELETE'" @click="deleteWallet">
+              Delete
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- Toast -->
+    <transition name="toast">
+      <div v-if="toastMsg" class="toast" :class="toastType">{{ toastMsg }}</div>
+    </transition>
   </div>
 </template>
 
 <script lang="ts">
-import { computed, ref, onMounted, watch } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
-import BaseModal from '@/components/BaseModal.vue'
-import { ArkAddress } from '@/store/modules/ark/address'
-import { toast } from '@/utils/toast'
-import { Buffer } from '@/utils/buffer'
-import { buildRedeemTx, VtxoInput } from '@/utils/psbt'
-import { ArkVTXO } from '@/store/modules/ark/ark'
-import { base64 } from '@scure/base'
+import {
+  getSwaps,
+  createLnDeposit as doLnDeposit,
+  createLnWithdraw as doLnWithdraw,
+  getFees,
+  getLimits,
+  type FeesResponse,
+  type LimitsResponse,
+} from '@/services/boltz'
 
 export default {
   name: 'WalletView',
-  components: {
-    BaseModal
-  },
   setup() {
     const store = useStore()
     const router = useRouter()
-    const balance = computed(() => store.getters.formattedBalance)
     const usdBalance = computed(() => store.getters.usdBalance)
-    const publicKey = computed(() => store.state.wallet.publicKey)
-    const serverPubkey = computed(() => store.state.ark.info?.pubkey)
     const arkAddress = computed(() => store.getters['ark/address'])
-    const arkBalance = computed(() => store.getters['ark/balance'])
+    const privateKey = computed(() => store.getters.nsecKey || store.state.wallet.privateKey)
 
-    // Generate address whenever server pubkey or wallet pubkey changes
-    watch(
-      [serverPubkey, publicKey],
-      ([newServerPubkey, newPublicKey]) => {
-        if (newServerPubkey && newPublicKey) {
-          console.log('Generating address with pubkeys:', {
-            wallet: newPublicKey,
-            server: newServerPubkey
-          })
-          
-          try {
-            const pubkeyBuffer = Buffer.from(newPublicKey, 'hex')
-            const serverPubkeyBuffer = Buffer.from(newServerPubkey.slice(2), 'hex')
-            
-            const address = ArkAddress.fromPubKey(pubkeyBuffer, serverPubkeyBuffer, 'testnet')
-            console.log('Generated address:', address.encode())
-          } catch (err) {
-            console.error('Failed to generate address:', err)
-          }
-        }
-      },
-      { immediate: true } // Run immediately when component is mounted
-    )
+    const boardingAddress = computed(() => store.getters['ark/boardingAddress'])
+    const boardingBalance = computed(() => Number(store.getters['ark/boardingBalance'] || BigInt(0)))
+    const boardingUtxos = computed(() => store.getters['ark/boardingUtxos'] || [])
 
-    const copyAddress = async () => {
-      if (!arkAddress.value) return
-      
-      try {
-        await navigator.clipboard.writeText(arkAddress.value)
-        toast.success('Address copied to clipboard!')
-      } catch (err) {
-        console.error('Failed to copy address:', err)
-        toast.error('Failed to copy address')
-      }
-    }
+    const depositMethod = ref<'lightning' | 'ark' | 'onchain'>('lightning')
+    const withdrawMethod = ref<'lightning' | 'ark' | 'onchain'>('lightning')
 
-    const showWithdrawModal = ref(false)
     const withdrawAddress = ref('')
-    const withdrawAmount = ref(0)
-    const maxWithdrawAmount = computed(() => {
-      const balanceSats = store.getters['ark/balance'] || BigInt(0)
-      // Convert BigInt sats to BTC number
-      return Number(balanceSats) / 100000000
+    const onchainWithdrawAddress = ref('')
+    const onchainWithdrawAmount = ref<number | null>(null)
+    const withdrawAmount = ref<number | null>(null)
+
+    const fees = ref<FeesResponse | null>(null)
+    const limits = ref<LimitsResponse | null>(null)
+
+    const depositAmount = ref<number | null>(null)
+    const depositInvoice = ref('')
+    const depositLoading = ref(false)
+    const depositStatus = ref('pending')
+    const depositStatusText = ref('Waiting for payment...')
+    let depositCleanup: (() => void) | null = null
+
+    const settleLoading = ref(false)
+    const hasUnsettledFunds = computed(() => {
+      const wb = store.state.ark.walletBalance
+      if (!wb) return false
+      return (wb.preconfirmed > 0) || (wb.boarding?.confirmed > 0)
     })
-    const showPrivateKey = ref(false)
-    const privateKey = computed(() => store.getters.walletPrivateKeyEncoded)
+
+    const withdrawInvoice = ref('')
+    const withdrawLoading = ref(false)
+    const withdrawStatus = ref('idle')
+    const withdrawStatusText = ref('')
+    let boardingPollInterval: ReturnType<typeof setInterval> | null = null
+
+    const showKey = ref(false)
     const showDeleteConfirm = ref(false)
     const deleteConfirmText = ref('')
+    const toastMsg = ref('')
+    const toastType = ref('success')
 
-    const setMaxAmount = () => {
-      const maxSats = store.getters['ark/balance'] || BigInt(0)
-      if (maxSats > BigInt(300)) {
-        withdrawAmount.value = Number(maxSats) / 100000000
-      } else {
-        withdrawAmount.value = 0
-      }
+    function showToast(msg: string, type = 'success') {
+      toastMsg.value = msg
+      toastType.value = type
+      setTimeout(() => { toastMsg.value = '' }, 3000)
     }
 
-    const closeWithdrawModal = () => {
-      showWithdrawModal.value = false
-      withdrawAddress.value = ''
-      withdrawAmount.value = 0
-    }
-
-    const withdrawFunds = async () => {
+    async function copyText(text: string) {
+      if (!text) return
       try {
-        // Get the private key from storage
-        const privKey = store.getters.walletPrivateKey
-        if (!privKey) {
-          toast.error('Private key not found')
-          return
-        }
+        await navigator.clipboard.writeText(text)
+        showToast('Copied!')
+      } catch { /* ignore */ }
+    }
 
-        const address = store.getters['ark/address']
-        if (!address) {
-          toast.error('Address not found')
-          return
-        }
+    function calcReceive(amount: number): number {
+      if (!fees.value) return 0
+      const { percentage, minerFees } = fees.value.reverse
+      const boltzFee = Math.ceil(amount * percentage / 100)
+      return amount - boltzFee - minerFees.lockup - minerFees.claim
+    }
 
-        // Get selected VTXO
-        const vtxos = store.getters['ark/vtxos'] as ArkVTXO[]
-        if (!vtxos.length) {
-          toast.error('No VTXO selected')
-          return
-        }
+    async function createLnDeposit() {
+      if (!depositAmount.value) return
+      depositLoading.value = true
+      try {
+        const result = await doLnDeposit(depositAmount.value)
+        depositInvoice.value = result.invoice
+        depositStatus.value = 'pending'
+        depositStatusText.value = 'Waiting for payment...'
 
-        // Convert BTC to sats - withdrawAmount is in BTC
-        const amountSats = BigInt(Math.round(withdrawAmount.value * 100000000))
-
-        if (amountSats < BigInt(300)) {
-          toast.error('Amount is too small, need at least 300 sats')
-          return
-        }
-
-        const selectedVtxos: VtxoInput[] = []
-        let selectedAmount = BigInt(0)
-        
-        // Convert and sum VTXO amounts
-        for (const vtxo of vtxos) {
-          selectedVtxos.push({
-            vtxo,
-            leaf: vtxo.tapscripts[0]
+        // Wait for claim in background (SwapManager handles the VHTLC claim)
+        const arkadeSwaps = getSwaps()
+        if (arkadeSwaps) {
+          arkadeSwaps.waitAndClaim(result.pendingSwap).then(({ txid }) => {
+            depositStatus.value = 'success'
+            depositStatusText.value = `Claimed! TX: ${txid.slice(0, 12)}...`
+            showToast('Lightning deposit complete!')
+            store.dispatch('ark/refreshBalance')
+          }).catch((err) => {
+            if (depositStatus.value !== 'success') {
+              depositStatus.value = 'error'
+              depositStatusText.value = err instanceof Error ? err.message : 'Claim failed'
+            }
           })
-          selectedAmount += BigInt(vtxo.amount)
-          if (selectedAmount >= amountSats) {
-            break
+
+          // Also subscribe to status updates for intermediate states
+          const manager = arkadeSwaps.getSwapManager()
+          if (manager) {
+            manager.subscribeToSwapUpdates(result.pendingSwap.id, (swap) => {
+              if (swap.status === 'transaction.mempool' || swap.status === 'transaction.confirmed') {
+                depositStatus.value = 'pending'
+                depositStatusText.value = 'Payment received, claiming...'
+              } else if (swap.status === 'invoice.expired' || swap.status === 'swap.expired') {
+                depositStatus.value = 'expired'
+                depositStatusText.value = 'Invoice expired'
+              }
+            }).then((unsub) => {
+              depositCleanup = unsub
+            })
           }
         }
-
-        if (selectedAmount < amountSats) {
-          toast.error(`Insufficient balance, need ${amountSats} sats`)
-          return
-        }
-
-        const change = selectedAmount - amountSats
-
-        const outputs = [{
-          address: withdrawAddress.value,
-          value: change <= BigInt(0) ? amountSats - BigInt(300) : amountSats
-        }]
-
-        if (change > BigInt(0)) {
-          outputs.push({
-            address,
-            value: change - BigInt(300)
-          })
-        }
-
-        console.log('outputs', outputs)
-        // Create transaction
-        const tx = buildRedeemTx(
-          selectedVtxos,
-          outputs
-        )
-
-        // Sign the transaction
-        tx.sign(Buffer.from(privKey, 'hex'))
-        
-        // to psbt
-        const psbt = tx.toPSBT()
-        const b64 = base64.encode(psbt)
-        const txid = await store.dispatch('ark/broadcastRedeemTx', { redeemTx: b64 })
-        
-        toast.success('Transaction created successfully')
-        closeWithdrawModal()
-        return txid
-
-      } catch (error: unknown) {
-        toast.error(`Failed to create transaction: ${error instanceof Error ? error.message : 'Unknown error'}`)
-        throw error
-      }
-    }
-
-    const copyPrivateKey = async () => {
-      try {
-        await navigator.clipboard.writeText(privateKey.value)
-        alert('Private key copied!')
       } catch (err) {
-        console.error('Failed to copy:', err)
+        showToast(err instanceof Error ? err.message : 'Failed to create swap', 'error')
+      } finally {
+        depositLoading.value = false
       }
     }
 
-    const deleteWallet = () => {
+    function resetDeposit() {
+      depositInvoice.value = ''
+      depositAmount.value = null
+      depositStatus.value = 'pending'
+      depositStatusText.value = 'Waiting for payment...'
+      if (depositCleanup) { depositCleanup(); depositCleanup = null }
+    }
+
+    async function createLnWithdraw() {
+      if (!withdrawInvoice.value) return
+      withdrawLoading.value = true
+      withdrawStatus.value = 'pending'
+      withdrawStatusText.value = 'Creating swap and sending...'
+      try {
+        // sendLightningPayment handles: create submarine swap → send VTXOs → wait for settlement
+        const result = await doLnWithdraw(withdrawInvoice.value)
+        withdrawStatus.value = 'success'
+        withdrawStatusText.value = `Paid! Preimage: ${result.preimage.slice(0, 16)}...`
+        showToast('Lightning withdrawal complete!')
+        store.dispatch('ark/refreshBalance')
+      } catch (err) {
+        withdrawStatus.value = 'error'
+        withdrawStatusText.value = err instanceof Error ? err.message : 'Swap failed'
+        showToast(err instanceof Error ? err.message : 'Failed to pay invoice', 'error')
+      } finally {
+        withdrawLoading.value = false
+      }
+    }
+
+    function resetWithdraw() {
+      withdrawInvoice.value = ''
+      withdrawStatus.value = 'idle'
+      withdrawStatusText.value = ''
+    }
+
+    function setMaxAmount() {
+      const balanceSats = store.getters['ark/balance'] || BigInt(0)
+      withdrawAmount.value = Math.max(0, Number(balanceSats) - 300)
+    }
+
+    async function withdrawFunds() {
+      if (!withdrawAddress.value || !withdrawAmount.value) return
+      try {
+        const txid = await store.dispatch('ark/sendBitcoin', {
+          address: withdrawAddress.value,
+          amount: withdrawAmount.value,
+        })
+        showToast(`Sent! TX: ${txid}`)
+        withdrawAddress.value = ''
+        withdrawAmount.value = null
+      } catch (err: unknown) {
+        showToast(`Send failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+      }
+    }
+
+    async function withdrawOnchain() {
+      if (!onchainWithdrawAddress.value || !onchainWithdrawAmount.value) return
+      try {
+        const txid = await store.dispatch('ark/sendBitcoin', {
+          address: onchainWithdrawAddress.value,
+          amount: onchainWithdrawAmount.value,
+        })
+        showToast(`Sent on-chain! TX: ${txid}`)
+        onchainWithdrawAddress.value = ''
+        onchainWithdrawAmount.value = null
+      } catch (err: unknown) {
+        showToast(`On-chain send failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+      }
+    }
+
+    async function settleFunds() {
+      settleLoading.value = true
+      try {
+        const txid = await store.dispatch('ark/settle')
+        showToast(`Settled! TX: ${txid}`)
+      } catch (err: unknown) {
+        showToast(`Settle failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+      } finally {
+        settleLoading.value = false
+      }
+    }
+
+    function deleteWallet() {
       store.dispatch('clearWallet')
       router.push('/setup')
     }
 
-    const isMutinyTestnet = computed(() => 
+    const isMutinyTestnet = computed(() =>
       store.state.ark.server === 'https://mutinynet.arkade.sh'
     )
 
-    const requestFaucet = async () => {
+    async function requestFaucet() {
       if (!arkAddress.value) return
-      
       try {
         const response = await fetch('https://faucet.mutinynet.arkade.sh/faucet', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            address: arkAddress.value,
-            amount: 1000
-          })
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address: arkAddress.value, amount: 1000 }),
         })
-        
-        if (!response.ok) {
-          throw new Error('Faucet request failed')
-        }
-        
-        toast.success('Faucet request successful! Funds should arrive shortly.')
-        
-        // Reload VTXOs to update balance
-        await store.dispatch('ark/fetchVTXOs')
-      } catch (err) {
-        console.error('Failed to request from faucet:', err)
-        toast.error('Failed to request from faucet')
+        if (!response.ok) throw new Error('Failed')
+        showToast('Faucet request sent!')
+        await store.dispatch('ark/refreshBalance')
+      } catch {
+        showToast('Faucet request failed', 'error')
       }
     }
 
     onMounted(async () => {
-      // Fetch server info if not already available
       if (!store.state.ark.info) {
-        console.log('Fetching server info...')
         await store.dispatch('ark/checkConnection')
       }
-
       await store.dispatch('fetchBTCPrice')
+
+      try {
+        const [f, l] = await Promise.all([getFees(), getLimits()])
+        fees.value = f
+        limits.value = l
+      } catch {
+        // Lightning swap service unavailable
+      }
+
+      // Poll for boarding UTXO updates every 15s
+      boardingPollInterval = setInterval(() => {
+        if (store.state.ark.status === 'connected') {
+          store.dispatch('ark/refreshBalance')
+        }
+      }, 15000)
+    })
+
+    onUnmounted(() => {
+      if (depositCleanup) depositCleanup()
+      if (boardingPollInterval) clearInterval(boardingPollInterval)
     })
 
     return {
-      balance,
-      usdBalance,
-      arkAddress,
-      copyAddress,
-      showWithdrawModal,
-      withdrawAddress,
-      withdrawAmount,
-      maxWithdrawAmount,
-      setMaxAmount,
-      closeWithdrawModal,
-      withdrawFunds,
-      showPrivateKey,
-      privateKey,
-      copyPrivateKey,
-      showDeleteConfirm,
-      deleteConfirmText,
-      deleteWallet,
-      store,
-      arkBalance,
-      isMutinyTestnet,
-      requestFaucet,
+      store, usdBalance, arkAddress, privateKey,
+      boardingAddress, boardingBalance, boardingUtxos,
+      depositMethod, withdrawMethod,
+      fees, limits,
+      depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
+      withdrawInvoice, withdrawLoading, withdrawStatus, withdrawStatusText,
+      withdrawAddress, withdrawAmount,
+      onchainWithdrawAddress, onchainWithdrawAmount,
+      showKey, showDeleteConfirm, deleteConfirmText, toastMsg, toastType,
+      copyText, calcReceive, showToast,
+      createLnDeposit, resetDeposit,
+      createLnWithdraw, resetWithdraw,
+      setMaxAmount, withdrawFunds, withdrawOnchain, deleteWallet,
+      settleFunds, settleLoading, hasUnsettledFunds,
+      isMutinyTestnet, requestFaucet,
     }
-  }
+  },
 }
 </script>
 
-<style lang="scss" scoped>
-.wallet-view {
-  max-width: 1200px;
+<style scoped>
+.wallet-page {
+  max-width: 500px;
   margin: 0 auto;
-  padding: 2rem 1rem;
-
-  @media (max-width: 768px) {
-    padding: 1rem;
-  }
+  gap: 20px;
 }
 
-.wallet-container {
+/* ── Balance Hero ── */
+.balance-hero {
+  text-align: center;
+  padding: 36px 24px 28px;
+  background:
+    radial-gradient(ellipse 70% 50% at 50% 40%, rgba(247, 201, 72, 0.06) 0%, transparent 70%);
+}
+
+.balance-eyebrow {
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.balance-amount {
+  font-size: 2.6rem;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.1;
+}
+
+.balance-unit {
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.balance-fiat {
+  font-size: 0.9rem;
+  margin-top: 6px;
+}
+
+/* ── Boarding Status ── */
+.boarding-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.boarding-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gold, #f7c948);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.boarding-list {
   display: flex;
   flex-direction: column;
-  gap: 2rem;
+  gap: 8px;
+  margin-top: 4px;
 }
 
-.balance-section {
-  .balance-card {
-    background: var(--card);
-    border-radius: 1rem;
-    padding: 2rem;
-    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 2rem;
-    
-    .balance-info {
-      .balance-label {
-        display: block;
-        color: var(--text-light);
-        font-size: 1rem;
-        margin-bottom: 0.75rem;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        font-weight: 500;
-      }
-
-      .balance-amount {
-        font-size: 2.5rem;
-        font-weight: 700;
-        color: var(--primary);
-        letter-spacing: -0.02em;
-
-        .usd-value {
-          font-size: 1rem;
-          color: var(--text-light);
-          margin-top: 0.25rem;
-          font-weight: 500;
-        }
-      }
-    }
-
-    .balance-actions {
-      margin-top: 1.5rem;
-
-      .withdraw-button {
-        background: var(--background);
-        color: var(--text);
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.75rem 1.5rem;
-        font-weight: 600;
-        transition: all 0.2s ease;
-        
-        &:hover {
-          background: var(--border);
-          transform: translateY(-1px);
-          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-        }
-
-        .material-icons {
-          font-size: 1.25rem;
-        }
-      }
-    }
-
-    @media (max-width: 768px) {
-      flex-direction: column;
-      text-align: center;
-      
-      .balance-info {
-        .balance-amount {
-          font-size: 2rem;
-        }
-      }
-      
-      .balance-actions {
-        width: 100%;
-        
-        .withdraw-button {
-          width: 100%;
-          justify-content: center;
-        }
-      }
-    }
-  }
-}
-
-.deposit-section {
-  background: var(--card);
-  border-radius: 1rem;
-  padding: 2rem;
-  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
-
-  .address-card {
-    margin-top: 1.5rem;
-    display: flex;
-    gap: 2rem;
-    padding: 1.5rem;
-    background: var(--background);
-    border-radius: 0.5rem;
-    align-items: center;
-    
-    @media (max-width: 768px) {
-      flex-direction: column;
-      align-items: center;
-      gap: 1.5rem;
-    }
-
-    .qr-code {
-      padding: 1rem;
-      background: var(--card);
-      border-radius: 0.75rem;
-      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-      img {
-        width: 150px;
-        height: 150px;
-        border-radius: 0.25rem;
-        display: block;
-      }
-    }
-
-    .address-details {
-      flex: 1;
-      width: 100%;
-
-      label {
-        display: block;
-        font-weight: 500;
-        margin-bottom: 0.5rem;
-        color: var(--text-light);
-      }
-
-      .address-container {
-        display: flex;
-        gap: 1rem;
-        align-items: center;
-        
-        @media (max-width: 480px) {
-          flex-direction: column;
-          
-          .address {
-            font-size: 0.875rem;
-          }
-          
-          .copy-button {
-            width: 100%;
-            padding: 0.75rem;
-          }
-        }
-
-        .address {
-          flex: 1;
-          padding: 1rem;
-          background: var(--card);
-          border-radius: 0.5rem;
-          font-family: monospace;
-          word-break: break-all;
-        }
-
-        .copy-button {
-          background: transparent;
-          color: var(--text);
-          padding: 0.5rem;
-          min-width: auto;
-          font-size: 1.25rem;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          transition: opacity 0.2s;
-
-          &:hover {
-            opacity: 0.7;
-          }
-        }
-      }
-    }
-  }
-}
-
-.amount-input {
+.boarding-item {
   display: flex;
-  gap: 0.5rem;
-
-  input {
-    flex: 1;
-  }
-
-  .max-button {
-    padding: 0.5rem 1rem;
-    font-size: 0.875rem;
-    background: var(--background);
-    color: var(--text);
-    font-weight: 600;
-
-    &:hover {
-      background: var(--border);
-    }
-  }
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
 }
 
-.available {
-  margin-top: 0.5rem;
-  font-size: 0.875rem;
-  color: var(--text-light);
+.boarding-conf {
+  font-size: 0.72rem;
+}
+
+/* ── Section Cards ── */
+.section-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.section-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ── Method Tabs ── */
+.method-tabs {
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.tab {
+  padding: 7px 16px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tab + .tab {
+  border-left: 1px solid var(--border);
+}
+
+.tab.active {
+  background: var(--bg-elevated);
+  color: var(--blue);
+}
+
+.tab:hover:not(.active) {
+  color: var(--text-dim);
+}
+
+/* ── Hints ── */
+.hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.hint strong {
+  color: var(--text-dim);
+}
+
+/* ── Input Row ── */
+.input-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.input-row .input {
+  flex: 1;
+}
+
+.input-row .btn-primary,
+.input-row .btn-outline {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Address Box ── */
+.address-box {
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+  word-break: break-all;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.address-box:hover {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-glow);
+}
+
+.address-action {
+  display: block;
+  margin-top: 8px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+}
+
+/* ── Swap Status ── */
+.swap-result {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: slideUp 0.3s ease;
+}
+
+.status-badge {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.status-badge.pending {
+  background: rgba(56, 189, 248, 0.08);
+  color: var(--blue);
+  border: 1px solid rgba(56, 189, 248, 0.12);
+}
+
+.status-badge.success {
+  background: rgba(52, 211, 153, 0.08);
+  color: var(--green);
+  border: 1px solid rgba(52, 211, 153, 0.12);
+}
+
+.status-badge.expired,
+.status-badge.error {
+  background: rgba(248, 113, 113, 0.08);
+  color: var(--red);
+  border: 1px solid rgba(248, 113, 113, 0.12);
+}
+
+/* ── Settings ── */
+.settings-card {
+  border-color: rgba(248, 113, 113, 0.08);
+}
+
+.settings-row {
+  display: flex;
+  gap: 10px;
+}
+
+.settings-row button {
+  flex: 1;
+  white-space: nowrap;
+}
+
+/* ── Modal ── */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.80);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+  backdrop-filter: blur(4px);
+}
+
+.modal-card {
+  max-width: 420px;
+  width: 100%;
+  animation: slideUp 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.modal-desc {
+  font-size: 0.85rem;
 }
 
 .modal-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 1rem;
-  margin-top: 2rem;
-
-  .cancel-button {
-    background: var(--background);
-    color: var(--text);
-    font-weight: 600;
-
-    &:hover {
-      background: var(--border);
-    }
-  }
-
-  .confirm-button {
-    font-weight: 600;
-  }
+  gap: 10px;
+  margin-top: 4px;
 }
 
-.withdraw-form {
-  .form-group {
-    margin-bottom: 1.5rem;
-
-    label {
-      display: block;
-      margin-bottom: 0.5rem;
-      color: var(--text);
-      font-weight: 500;
-    }
-
-    input {
-      width: 100%;
-      padding: 0.75rem;
-      border: 1px solid var(--border);
-      border-radius: 0.5rem;
-      font-size: 1rem;
-      transition: border-color 0.2s;
-
-      &:focus {
-        outline: none;
-        border-color: var(--primary);
-      }
-    }
-  }
+.modal-actions button {
+  flex: 1;
 }
 
-.danger-zone {
-  background: var(--card);
-  border-radius: 1rem;
-  padding: 2rem;
-  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
-
-  h2 {
-    color: var(--danger);
-  }
-
-  .danger-card {
-    margin-top: 1.5rem;
-    padding: 1.5rem;
-    background: var(--background);
-    border-radius: 0.5rem;
-    
-    .action-buttons {
-      display: flex;
-      gap: 1rem;
-      
-      .danger-button {
-        background: var(--danger);
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        
-        &:hover {
-          background: #dc2626;
-        }
-      }
-    }
-
-    @media (max-width: 480px) {
-      flex-direction: column;
-      
-      .action-buttons {
-        flex-direction: column;
-        
-        .danger-button {
-          width: 100%;
-          justify-content: center;
-        }
-      }
-    }
-  }
+/* ── Key Display ── */
+.key-display {
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 14px;
+  cursor: pointer;
+  word-break: break-all;
+  font-size: 0.75rem;
+  transition: all 0.2s;
 }
 
-.private-key-display {
-  .warning {
-    color: var(--danger);
-    margin-bottom: 1rem;
-    font-weight: 500;
-  }
-  
-  .key-container {
-    background: var(--background);
-    padding: 1rem;
-    border-radius: 0.5rem;
-    display: flex;
-    gap: 1rem;
-    align-items: center;
-    
-    code {
-      flex: 1;
-      font-family: monospace;
-      word-break: break-all;
-    }
-  }
+.key-display:hover {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-glow);
 }
 
-.delete-confirmation {
-  .warning {
-    color: var(--danger);
-    margin-bottom: 1.5rem;
-    
-    p {
-      margin-bottom: 0.5rem;
-      
-      &:last-child {
-        margin-bottom: 0;
-      }
-    }
-  }
-  
-  .confirmation-input {
-    margin-bottom: 1.5rem;
-    
-    label {
-      display: block;
-      margin-bottom: 0.5rem;
-      font-weight: 500;
-    }
-    
-    input {
-      width: 100%;
-      padding: 0.75rem;
-      border: 1px solid var(--border);
-      border-radius: 0.5rem;
-      font-family: monospace;
-      
-      &:focus {
-        outline: none;
-        border-color: var(--danger);
-      }
-    }
-  }
-  
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 1rem;
-  }
+/* ── Toast ── */
+.toast {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 24px;
+  border-radius: 10px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  z-index: 999;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 
-.server-info-section {
-  background: var(--card);
-  border-radius: 1rem;
-  padding: 2rem;
-  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
-
-  .info-card {
-    margin-top: 1.5rem;
-    padding: 1.5rem;
-    background: var(--background);
-    border-radius: 0.5rem;
-
-    .info-grid {
-      display: grid;
-      grid-template-columns: 150px 1fr;
-      gap: 1.5rem;
-      
-      @media (max-width: 768px) {
-        grid-template-columns: 1fr;
-        gap: 1rem;
-      }
-
-      .info-item {
-        &.network {
-          min-width: auto;
-        }
-
-        &.pubkey {
-          flex: 1;
-
-          code {
-            font-size: 0.75rem;
-          }
-        }
-
-        label {
-          display: block;
-          font-weight: 500;
-          margin-bottom: 0.5rem;
-          color: var(--text-light);
-        }
-
-        span, code {
-          display: block;
-          padding: 0.5rem;
-          background: var(--card);
-          border-radius: 0.25rem;
-          font-size: 0.875rem;
-        }
-
-        code {
-          font-family: monospace;
-          word-break: break-all;
-        }
-      }
-    }
-  }
+.toast.success {
+  background: var(--green);
+  color: var(--bg);
 }
 
-.ark-balance {
-  margin-top: 1rem;
-  padding: 1rem;
-  border: 1px solid #ddd;
-  border-radius: 4px;
+.toast.error {
+  background: var(--red);
+  color: #fff;
 }
 
-.faucet-container {
-  margin-top: 1rem;
-  display: flex;
-  justify-content: center;
-  
-  .faucet-button {
-    width: auto;
-    background: var(--primary);
-    color: white;
-    padding: 0.5rem 1rem;
-    font-size: 0.875rem;
-    font-weight: 600;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    transition: all 0.2s ease;
-    
-    &:hover {
-      opacity: 0.9;
-      transform: translateY(-1px);
-    }
-    
-    .material-icons {
-      font-size: 1rem;
-    }
-    
-    @media (max-width: 480px) {
-      width: 100%;
-      padding: 0.75rem;
-      font-size: 1rem;
-      
-      .material-icons {
-        font-size: 1.25rem;
-      }
-    }
-  }
+.toast-enter-active {
+  animation: slideUp 0.3s ease;
 }
-</style> 
+
+.toast-leave-active {
+  transition: all 0.2s ease;
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px);
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+</style>

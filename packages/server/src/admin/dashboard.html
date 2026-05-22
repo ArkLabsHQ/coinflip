@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Coinflip House Admin</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --card: #12121a;
+    --border: #1e1e2e;
+    --text: #e0e0e0;
+    --muted: #888;
+    --blue: #00d4ff;
+    --gold: #ffd700;
+    --green: #00ff88;
+    --red: #ff4444;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    padding: 20px;
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+  h1 {
+    color: var(--gold);
+    font-size: 1.5rem;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+    letter-spacing: 2px;
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+  }
+  .stat-card .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
+  .stat-card .value { font-size: 1.8rem; font-weight: 700; margin-top: 8px; font-family: 'SF Mono', 'Fira Code', monospace; }
+  .stat-card .value.balance { color: var(--gold); }
+  .stat-card .value.games { color: var(--blue); }
+  .stat-card .value.profit { color: var(--green); }
+  .stat-card .value.negative { color: var(--red); }
+
+  .section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .section h2 {
+    color: var(--blue);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 16px;
+  }
+
+  .address-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.85rem;
+    word-break: break-all;
+    cursor: pointer;
+    transition: border-color 0.2s;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .address-box:hover { border-color: var(--blue); }
+  .address-box .copy-btn {
+    background: var(--blue);
+    color: var(--bg);
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+
+  .config-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .config-row label {
+    color: var(--muted);
+    font-size: 0.85rem;
+    min-width: 80px;
+  }
+  input, select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: var(--text);
+    font-size: 0.9rem;
+    font-family: inherit;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--blue); }
+
+  .btn {
+    background: var(--blue);
+    color: var(--bg);
+    border: none;
+    border-radius: 6px;
+    padding: 8px 20px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.85rem;
+    transition: opacity 0.2s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn-gold { background: var(--gold); }
+  .btn-small { padding: 4px 12px; font-size: 0.75rem; }
+
+  .tier-chips {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .tier-chip {
+    background: var(--bg);
+    border: 1px solid var(--gold);
+    color: var(--gold);
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 0.8rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tier-chip .remove {
+    cursor: pointer;
+    color: var(--red);
+    font-weight: bold;
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  th {
+    color: var(--muted);
+    font-weight: 500;
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  tr.win td:nth-child(3) { color: var(--green); }
+  tr.loss td:nth-child(3) { color: var(--red); }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .badge-win { background: rgba(0,255,136,0.15); color: var(--green); }
+  .badge-loss { background: rgba(255,68,68,0.15); color: var(--red); }
+  .badge-pending { background: rgba(0,212,255,0.15); color: var(--blue); }
+  .badge-received { background: rgba(0,255,136,0.15); color: var(--green); }
+  .badge-sent { background: rgba(255,215,0,0.15); color: var(--gold); }
+  .badge-settled { background: rgba(0,255,136,0.12); color: var(--green); }
+  .badge-unsettled { background: rgba(0,212,255,0.12); color: var(--blue); }
+  .amount-pos { color: var(--green); }
+  .amount-neg { color: var(--gold); }
+  .txid-cell { cursor: pointer; }
+  .txid-cell:hover { color: var(--blue); }
+
+  .balance-input {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    align-items: center;
+  }
+  .balance-input label { color: var(--muted); font-size: 0.8rem; }
+
+  .empty { color: var(--muted); text-align: center; padding: 32px; font-style: italic; }
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: var(--green);
+    color: var(--bg);
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <h1>&#9824; COINFLIP HOUSE</h1>
+
+  <div class="stats">
+    <div class="stat-card">
+      <div class="label">Available Balance</div>
+      <div class="value balance" id="balance">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Settled / Preconfirmed</div>
+      <div class="value balance" id="balanceDetail">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Boarding (on-chain)</div>
+      <div class="value games" id="boardingBalance">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Games Today</div>
+      <div class="value games" id="gamesToday">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Profit (24h)</div>
+      <div class="value profit" id="profit24h">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">VTXOs</div>
+      <div class="value games" id="vtxoCount">—</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Ark Address</h2>
+    <div class="address-box" onclick="copyText('houseAddress')">
+      <span id="houseAddress">Loading...</span>
+      <button class="copy-btn">Copy</button>
+    </div>
+    <h2 style="margin-top:16px">Boarding Address (on-chain deposit)</h2>
+    <div class="address-box" onclick="copyText('boardingAddress')">
+      <span id="boardingAddress">Loading...</span>
+      <button class="copy-btn">Copy</button>
+    </div>
+    <p style="color:var(--muted);font-size:0.75rem;margin-top:8px">Send BTC to the boarding address. After confirmation, the wallet will settle it into Ark VTXOs automatically.</p>
+  </div>
+
+  <div class="section">
+    <h2>Configuration</h2>
+    <div class="config-row">
+      <label>Rake:</label>
+      <input type="number" id="rakeValue" style="width:80px" min="0">
+      <select id="rakeType">
+        <option value="percentage">%</option>
+        <option value="flat">sats (flat)</option>
+      </select>
+      <button class="btn btn-small" onclick="saveConfig()">Save</button>
+    </div>
+    <div class="config-row">
+      <label>Tiers:</label>
+      <div class="tier-chips" id="tierChips"></div>
+    </div>
+    <div class="config-row">
+      <input type="number" id="newTier" placeholder="New tier (sats)" style="width:160px">
+      <button class="btn btn-small btn-gold" onclick="addTier()">+ Add</button>
+    </div>
+    <div class="config-row">
+      <label>Min balance:</label>
+      <input type="number" id="minBalance" style="width:140px" min="0">
+      <button class="btn btn-small" onclick="saveConfig()">Save</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Recent Games</h2>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>Tier</th><th>Winner</th><th>Rake</th><th>Status</th><th>Time</th></tr>
+      </thead>
+      <tbody id="gamesTable">
+        <tr><td colspan="6" class="empty">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Wallet Activity</h2>
+    <table>
+      <thead>
+        <tr><th>Direction</th><th>Amount</th><th>Type</th><th>Status</th><th>Time</th><th>Txid</th></tr>
+      </thead>
+      <tbody id="activityTable">
+        <tr><td colspan="6" class="empty">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+  let currentTiers = [];
+
+  function fmt(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(n % 1000 === 0 ? 0 : 1) + 'K';
+    return String(n);
+  }
+
+  function timeAgo(dateStr) {
+    const d = new Date(dateStr + 'Z');
+    const s = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2000);
+  }
+
+  async function copyText(elementId) {
+    const text = document.getElementById(elementId).textContent;
+    await navigator.clipboard.writeText(text);
+    showToast('Copied!');
+  }
+
+  function renderTiers() {
+    const el = document.getElementById('tierChips');
+    el.innerHTML = currentTiers.map(t =>
+      `<span class="tier-chip">${fmt(t)} <span class="remove" onclick="removeTier(${t})">&times;</span></span>`
+    ).join('');
+  }
+
+  function addTier() {
+    const input = document.getElementById('newTier');
+    const val = parseInt(input.value);
+    if (!val || val <= 0) return;
+    if (currentTiers.includes(val)) { showToast('Tier already exists'); return; }
+    currentTiers.push(val);
+    currentTiers.sort((a, b) => a - b);
+    input.value = '';
+    renderTiers();
+    saveConfig();
+  }
+
+  function removeTier(val) {
+    currentTiers = currentTiers.filter(t => t !== val);
+    renderTiers();
+    saveConfig();
+  }
+
+  async function saveConfig() {
+    const body = {
+      rakeType: document.getElementById('rakeType').value,
+      rakeValue: parseInt(document.getElementById('rakeValue').value) || 0,
+      tiers: currentTiers,
+      minHouseBalance: parseInt(document.getElementById('minBalance').value) || 0,
+    };
+    await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    showToast('Config saved!');
+  }
+
+  async function loadStatus() {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    const bal = data.balance;
+    document.getElementById('balance').textContent = fmt(bal.available) + ' sats';
+    document.getElementById('balanceDetail').textContent = fmt(bal.settled) + ' / ' + fmt(bal.preconfirmed);
+    document.getElementById('boardingBalance').textContent = fmt(bal.boarding.total) + ' sats';
+    document.getElementById('gamesToday').textContent = data.gamesToday;
+    const profitEl = document.getElementById('profit24h');
+    profitEl.textContent = (data.profit24h >= 0 ? '+' : '') + fmt(data.profit24h) + ' sats';
+    profitEl.className = 'value ' + (data.profit24h >= 0 ? 'profit' : 'negative');
+  }
+
+  async function loadConfig() {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    document.getElementById('rakeValue').value = data.rakeValue;
+    document.getElementById('rakeType').value = data.rakeType;
+    document.getElementById('minBalance').value = data.minHouseBalance;
+    currentTiers = data.tiers;
+    renderTiers();
+  }
+
+  async function loadWallet() {
+    const res = await fetch('/api/wallet');
+    const data = await res.json();
+    document.getElementById('houseAddress').textContent = data.address;
+    document.getElementById('boardingAddress').textContent = data.boardingAddress;
+    document.getElementById('vtxoCount').textContent = data.vtxoCount;
+  }
+
+  async function loadGames() {
+    const res = await fetch('/api/games?limit=20');
+    const games = await res.json();
+    const tbody = document.getElementById('gamesTable');
+    if (games.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No games yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = games.map(g => {
+      const cls = g.winner === 'house' ? 'win' : g.winner === 'player' ? 'loss' : '';
+      const badge = g.winner === 'house' ? '<span class="badge badge-win">House</span>'
+        : g.winner === 'player' ? '<span class="badge badge-loss">Player</span>'
+        : '<span class="badge badge-pending">' + g.status + '</span>';
+      return `<tr class="${cls}">
+        <td>${g.id.substring(0, 8)}</td>
+        <td>${fmt(g.tier)}</td>
+        <td>${badge}</td>
+        <td>${g.rakeAmount}</td>
+        <td>${g.status}</td>
+        <td>${timeAgo(g.createdAt)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function timeAgoMs(ms) {
+    const s = Math.floor((Date.now() - ms) / 1000);
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
+
+  async function copyTxid(txid) {
+    await navigator.clipboard.writeText(txid);
+    showToast('Txid copied!');
+  }
+
+  async function loadActivity() {
+    const res = await fetch('/api/wallet/history');
+    const history = await res.json();
+    const tbody = document.getElementById('activityTable');
+    if (!Array.isArray(history) || history.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No transactions yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = history.map(tx => {
+      const isRecv = tx.type === 'RECEIVED';
+      const dirBadge = isRecv
+        ? '<span class="badge badge-received">&#9660; Received</span>'
+        : '<span class="badge badge-sent">&#9650; Sent</span>';
+      const amtClass = isRecv ? 'amount-pos' : 'amount-neg';
+      const amtSign = isRecv ? '+' : '−';
+      const typeBadge = tx.isBoarding
+        ? '<span class="badge badge-pending">Boarding</span>'
+        : '<span class="badge badge-pending">Ark</span>';
+      const statusBadge = tx.settled
+        ? '<span class="badge badge-settled">Settled</span>'
+        : '<span class="badge badge-unsettled">Pending</span>';
+      const short = tx.txid ? tx.txid.substring(0, 10) + '…' : '—';
+      const onclick = tx.txid ? `onclick="copyTxid('${tx.txid}')"` : '';
+      return `<tr>
+        <td>${dirBadge}</td>
+        <td class="${amtClass}">${amtSign}${fmt(Math.abs(tx.amount))} sats</td>
+        <td>${typeBadge}</td>
+        <td>${statusBadge}</td>
+        <td>${timeAgoMs(tx.createdAt)}</td>
+        <td class="txid-cell" ${onclick}>${short}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function init() {
+    await Promise.all([loadStatus(), loadConfig(), loadWallet(), loadGames(), loadActivity()]);
+  }
+
+  init();
+  setInterval(() => { loadStatus(); loadGames(); loadActivity(); }, 10000);
+</script>
+</body>
+</html>

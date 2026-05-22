@@ -1,0 +1,32 @@
+{
+  "name": "arkade-coinflip-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "E2E tests for arkade-coinflip against regtest",
+  "scripts": {
+    "test": "jest --runInBand --forceExit --testTimeout=120000",
+    "test:ci": "jest --runInBand --forceExit --testTimeout=120000 --ci"
+  },
+  "dependencies": {
+    "@arkade-os/boltz-swap": "^0.3.32",
+    "@arkade-os/sdk": "^0.4.27",
+    "@scure/base": "^1.2.1",
+    "arkade-coinflip": "file:../lib",
+    "arkade-coinflip-server": "file:../server",
+    "eventsource": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.2",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.19.15",
+    "@types/supertest": "^6.0.3",
+    "@types/ws": "^8.18.1",
+    "express": "^4.21.0",
+    "jest": "^29.7.0",
+    "supertest": "^7.1.0",
+    "ts-jest": "^29.3.4",
+    "typescript": "^5.7.2",
+    "ws": "^8.20.1"
+  },
+  "license": "MIT"
+}

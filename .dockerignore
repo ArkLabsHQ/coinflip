@@ -1,0 +1,9 @@
+node_modules
+dist
+packages/*/node_modules
+packages/*/dist
+.git
+arkade-regtest
+screenshots
+docs
+*.md

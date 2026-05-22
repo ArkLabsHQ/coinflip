@@ -1,0 +1,129 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [master, refactor/extract-coinflip-library]
+  pull_request:
+    branches: [master]
+
+jobs:
+  unit-tests:
+    name: Unit & Script Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install lib dependencies
+        working-directory: packages/lib
+        run: npm install --include=dev
+
+      - name: Type-check lib
+        working-directory: packages/lib
+        run: npx tsc --noEmit
+
+      - name: Build lib
+        working-directory: packages/lib
+        run: npm run build
+
+      - name: Install server dependencies
+        working-directory: packages/server
+        run: npm install --include=dev
+
+      - name: Type-check server
+        working-directory: packages/server
+        run: npx tsc --noEmit
+
+      - name: Install E2E test dependencies
+        working-directory: packages/e2e
+        run: npm install --include=dev
+
+      - name: Run unit tests (no regtest needed)
+        working-directory: packages/e2e
+        # Path anchored to `coinflip.test.ts` only — the broader `coinflip`
+        # substring matches every test file in this repo because the working
+        # directory itself contains "coinflip", which is not what we want.
+        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="src/coinflip\\.test\\.ts$" -t "gameFromEvents|determineWinner|generateSecret|CoinflipSetupScript|CoinflipFinalScript|coinSelect|event type guards|server-as-counterparty|ContractHandler"
+
+  e2e-tests:
+    name: E2E Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - uses: actions/cache@v4
+        with:
+          path: arkade-regtest/_build
+          key: nigiri-${{ hashFiles('arkade-regtest/.env.defaults', '.env.regtest') }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Start regtest environment
+        run: |
+          chmod +x arkade-regtest/*.sh arkade-regtest/helpers/*.sh
+          ./arkade-regtest/start-env.sh
+        timeout-minutes: 15
+
+      - name: Add nigiri to PATH
+        run: echo "${{ github.workspace }}/arkade-regtest/_build/nigiri/build" >> $GITHUB_PATH
+
+      - name: Diagnostic - dump regtest env state
+        run: |
+          echo "=== .env.regtest ==="
+          cat .env.regtest || echo "no .env.regtest"
+          echo "=== arkd info ==="
+          curl -s http://localhost:7070/v1/info | head -50 || true
+          echo "=== docker ps ==="
+          docker ps --format "table {{.Names}}\t{{.Status}}" || true
+
+      - name: Install lib dependencies
+        working-directory: packages/lib
+        run: npm install --include=dev
+
+      - name: Build lib
+        working-directory: packages/lib
+        run: npm run build
+
+      - name: Install server dependencies
+        working-directory: packages/server
+        run: npm install --include=dev
+
+      - name: Build server
+        working-directory: packages/server
+        run: npm run build
+
+      - name: Install E2E test dependencies
+        working-directory: packages/e2e
+        run: npm install --include=dev
+
+      - name: Run E2E tests
+        working-directory: packages/e2e
+        env:
+          ARK_SERVER_URL: http://localhost:7070
+          ESPLORA_URL: http://localhost:3000
+        run: npx jest --runInBand --forceExit --testTimeout=300000 --ci
+
+      - name: Capture logs on failure
+        if: failure()
+        run: |
+          docker logs arkd 2>&1 | tail -200 || true
+          docker logs ark-wallet 2>&1 | tail -200 || true
+          docker logs boltz 2>&1 | tail -100 || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          chmod +x arkade-regtest/clean-env.sh 2>/dev/null || true
+          ./arkade-regtest/clean-env.sh || true

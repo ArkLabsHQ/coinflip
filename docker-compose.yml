@@ -1,0 +1,45 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    volumes:
+      - server-data:/app/data
+    environment:
+      - ARK_SERVER_URL=http://ark:7070
+      - ESPLORA_URL=http://chopsticks:3000
+      - PUBLIC_PORT=3001
+      - ADMIN_PORT=3002
+      # Bind admin listener inside the container to all interfaces so
+      # the docker port mapping below can reach it. ADMIN_HOST defaults
+      # to 127.0.0.1 in src/index.ts for production-style isolation;
+      # the docker-compose port map is the right access boundary here.
+      - ADMIN_HOST=0.0.0.0
+      - DATA_DIR=/app/data
+    ports:
+      - "3002:3002"
+    networks:
+      - nigiri
+    restart: unless-stopped
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    environment:
+      - API_HOST=server
+      - API_PORT=3001
+    depends_on:
+      - server
+    networks:
+      - nigiri
+    restart: unless-stopped
+
+networks:
+  nigiri:
+    external: true
+
+volumes:
+  server-data:

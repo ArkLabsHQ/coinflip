@@ -1,26 +1,30 @@
-# Use Node.js LTS (Long Term Support) as base image
-FROM node:lts-alpine
+FROM node:20-alpine AS builder
 
-# Set working directory
 WORKDIR /app
 
-# Copy package.json and yarn.lock
-COPY package.json yarn.lock ./
+# Copy package files
+COPY package.json package-lock.json* yarn.lock* ./
 
 # Install dependencies
-RUN yarn install
+RUN npm install
 
-# Copy the rest of the application
-COPY . .
+# Copy source
+COPY src/ ./src/
+COPY public/ ./public/
+COPY tsconfig.json babel.config.js vue.config.js* ./
 
-# Build the application
-RUN yarn build
+# Build Vue app
+RUN npm run build
 
-# Install serve globally for production serving
-RUN yarn global add serve
+# Production stage — serve with nginx
+FROM nginx:alpine
 
-# Expose port 3000 (default port for serve)
-EXPOSE 3000
+# Copy built files
+COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Start the application using serve
-CMD ["serve", "-s", "dist"] 
+# Nginx config: SPA routing + reverse proxy /api to server
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

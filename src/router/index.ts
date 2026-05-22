@@ -1,21 +1,15 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
-import HomeView from '../views/HomeView.vue'
-import GameView from '../views/GameView.vue'
+import PlayView from '../views/PlayView.vue'
 import WalletView from '../views/WalletView.vue'
 import SetupView from '../views/SetupView.vue'
+import HistoryView from '../views/HistoryView.vue'
 import store from '../store'
 
 const routes: Array<RouteRecordRaw> = [
   {
     path: '/',
-    name: 'home',
-    component: HomeView,
-    meta: { requiresWallet: true }
-  },
-  {
-    path: '/game/:id',
-    name: 'game',
-    component: GameView,
+    name: 'play',
+    component: PlayView,
     meta: { requiresWallet: true }
   },
   {
@@ -25,15 +19,16 @@ const routes: Array<RouteRecordRaw> = [
     meta: { requiresWallet: true }
   },
   {
+    path: '/history',
+    name: 'history',
+    component: HistoryView,
+    meta: { requiresWallet: true }
+  },
+  {
     path: '/setup',
     name: 'setup',
     component: SetupView
   },
-  {
-    path: '/how-it-works',
-    name: 'how-it-works',
-    component: () => import('../views/HowItWorksView.vue')
-  }
 ]
 
 const router = createRouter({
@@ -41,7 +36,7 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, from, next) => {
+router.beforeEach((to, _from, next) => {
   if (to.meta.requiresWallet && !store.getters.isWalletInitialized) {
     next('/setup')
   } else {
@@ -49,4 +44,4 @@ router.beforeEach((to, from, next) => {
   }
 })
 
-export default router 
+export default router

@@ -22,3 +22,13 @@ pnpm-debug.log*
 dist/
 node_modules/
 .DS_Store
+
+# Superpowers docs
+docs/superpowers
+docs/superpowers/**
+
+# Working notes / plans — not part of the project history
+docs/plans
+
+# Temp data dir created by e2e tests
+packages/e2e/data

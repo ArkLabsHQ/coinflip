@@ -1,0 +1,21 @@
+{
+  "name": "arkade-coinflip",
+  "version": "0.1.0",
+  "description": "Trustless coinflip betting protocol for Ark",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@arkade-os/sdk": "^0.4.27",
+    "@scure/base": "^1.2.1",
+    "@scure/btc-signer": "^2.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
+}

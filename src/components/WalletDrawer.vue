@@ -190,9 +190,9 @@
           <button class="btn-outline" @click="showKey = true">Back Up Private Key</button>
           <button class="btn-danger" @click="showDeleteConfirm = true">Delete Wallet</button>
           <div class="server-info text-muted mono">
+            <div>Network: {{ info?.network || '—' }} <span class="net-note">(set by server)</span></div>
             <div>Ark: {{ arkServer }}</div>
             <div>Status: {{ arkStatus }}</div>
-            <div v-if="info">Network: {{ info.network }}</div>
           </div>
         </section>
       </div>
@@ -312,6 +312,7 @@ export default defineComponent({
     async function reconnect() {
       try { await store.dispatch('ark/checkConnection') } catch { /* shown via banner */ }
     }
+
 
     // Auto-trigger connection when the drawer opens and we're not yet connected.
     // Also fetch fees+limits once we are.
@@ -751,6 +752,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .boarding-conf { font-size: 0.72rem; margin-left: auto; }
 
 .settings-section { display: flex; flex-direction: column; gap: 12px; }
+.net-note { opacity: 0.7; }
 
 .activity-section { display: flex; flex-direction: column; gap: 4px; }
 .empty-state {

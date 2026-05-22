@@ -469,7 +469,8 @@ export default defineComponent({
       await loadTiers()
 
       if (store.state.ark.status !== 'connected' && store.state.ark.status !== 'connecting') {
-        store.dispatch('ark/checkConnection').catch(() => { /* surfaced in drawer */ })
+        // Align to the server's network (env-driven) before connecting.
+        store.dispatch('ark/syncNetworkFromServer').catch(() => { /* surfaced in drawer */ })
       }
       setTimeout(() => {
         const settled = Number(store.getters['ark/balance'] || 0)

@@ -3,6 +3,7 @@ import { hex } from '@scure/base'
 import type { State as RootState } from '@/store'
 import { Wallet, SingleKey, VtxoScript, type WalletBalance, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { initSwaps, destroySwaps } from '@/services/boltz'
+import { getNetwork } from '@/services/api'
 
 /** VtxoInput shape expected by the server's /api/play endpoint. */
 export interface VtxoInput {
@@ -76,6 +77,7 @@ export interface TxHistoryEntry {
 interface ArkState {
   server: string
   esplora: string
+  networkPreset: string
   status: 'disconnected' | 'connecting' | 'connected' | 'error'
   lastError: Error | null
   info: ArkServerInfo | null
@@ -85,6 +87,37 @@ interface ArkState {
   arkAddress: string | null
   boardingAddress: string | null
   txHistory: TxHistoryEntry[]
+}
+
+/**
+ * Network presets. Only the Ark server URL is strictly required — the SDK
+ * derives the network from the server's /v1/info, then auto-defaults esplora
+ * (ESPLORA_URL[network]) and the Boltz API (BASE_URLS[network]) when those are
+ * left empty. So mutinynet just needs the server URL; regtest pins all three
+ * at localhost.
+ */
+export interface NetworkPreset {
+  label: string
+  server: string
+  /** Empty string → let the SDK auto-default from the detected network. */
+  esplora: string
+  /** Empty string → let boltz-swap auto-default from the detected network. */
+  boltz: string
+}
+
+export const NETWORK_PRESETS: Record<string, NetworkPreset> = {
+  regtest: {
+    label: 'Regtest (local)',
+    server: 'http://localhost:7070',
+    esplora: 'http://localhost:3000',
+    boltz: 'http://localhost:9069',
+  },
+  mutinynet: {
+    label: 'Mutinynet',
+    server: 'https://mutinynet.arkade.sh',
+    esplora: '',
+    boltz: '',
+  },
 }
 
 // SDK wallet instance (kept outside Vuex state to avoid reactivity issues with complex objects)
@@ -105,6 +138,7 @@ const ark: Module<ArkState, RootState> = {
   state: {
     server: localStorage.getItem('ark_server') || 'http://localhost:7070',
     esplora: localStorage.getItem('ark_esplora') || 'http://localhost:3000',
+    networkPreset: localStorage.getItem('ark_network_preset') || 'regtest',
     status: 'disconnected',
     lastError: null,
     info: getCachedServerInfo(),
@@ -120,6 +154,15 @@ const ark: Module<ArkState, RootState> = {
     SET_SERVER(state, server: string) {
       state.server = server
       localStorage.setItem('ark_server', server)
+    },
+    SET_ESPLORA(state, esplora: string) {
+      state.esplora = esplora
+      if (esplora) localStorage.setItem('ark_esplora', esplora)
+      else localStorage.removeItem('ark_esplora')
+    },
+    SET_NETWORK_PRESET(state, preset: string) {
+      state.networkPreset = preset
+      localStorage.setItem('ark_network_preset', preset)
     },
     SET_STATUS(state, status: ArkState['status']) {
       state.status = status
@@ -160,6 +203,45 @@ const ark: Module<ArkState, RootState> = {
       commit('SET_SERVER', server)
     },
 
+    /**
+     * Apply a named network preset (regtest / mutinynet) and reconnect.
+     * Mutinynet only pins the Ark server URL; esplora + Boltz are left empty
+     * so the SDK auto-defaults them from the detected network. Driven by
+     * `syncNetworkFromServer`, not by the user — the network is the server's
+     * choice (its ARK_SERVER_URL env), not a client toggle.
+     */
+    async setNetworkPreset({ commit, dispatch }, preset: string) {
+      const p = NETWORK_PRESETS[preset]
+      if (!p) return
+      commit('SET_NETWORK_PRESET', preset)
+      commit('SET_SERVER', p.server)
+      commit('SET_ESPLORA', p.esplora)
+      if (p.boltz) localStorage.setItem('boltz_api', p.boltz)
+      else localStorage.removeItem('boltz_api')
+      // Drop the cached info so the UI doesn't show the previous network.
+      commit('SET_INFO', null)
+      await dispatch('checkConnection')
+    },
+
+    /**
+     * Ask the coinflip server which network it's on and align the client to
+     * it before connecting the wallet. The server's network is fixed by its
+     * env, so the client never picks independently — it follows. Falls back
+     * to the current preset if the server is unreachable.
+     */
+    async syncNetworkFromServer({ state, dispatch }) {
+      try {
+        const { network } = await getNetwork()
+        if (NETWORK_PRESETS[network] && network !== state.networkPreset) {
+          await dispatch('setNetworkPreset', network) // applies + reconnects
+          return
+        }
+      } catch {
+        /* server unreachable — connect with whatever we have */
+      }
+      await dispatch('checkConnection')
+    },
+
     async checkConnection({ commit, state, rootState, dispatch }) {
       try {
         commit('SET_STATUS', 'connecting')
@@ -169,12 +251,13 @@ const ark: Module<ArkState, RootState> = {
           throw new Error('No wallet key available')
         }
 
-        // Create SDK wallet
+        // Create SDK wallet. esploraUrl is omitted when empty so the SDK
+        // auto-defaults it from the network it detects at the Ark server.
         const identity = SingleKey.fromHex(privateKey)
         const wallet = await Wallet.create({
           identity,
           arkServerUrl: state.server,
-          esploraUrl: state.esplora,
+          ...(state.esplora ? { esploraUrl: state.esplora } : {}),
         })
 
         sdkWallet = wallet
@@ -349,6 +432,8 @@ const ark: Module<ArkState, RootState> = {
     },
     walletBalance: (state) => state.walletBalance,
     txHistory: (state) => state.txHistory,
+    networkPreset: (state) => state.networkPreset,
+    networkPresets: () => NETWORK_PRESETS,
   }
 }
 

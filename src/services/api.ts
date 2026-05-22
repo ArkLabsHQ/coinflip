@@ -62,6 +62,11 @@ export function getTiers(): Promise<TiersResponse> {
   return request('/api/tiers')
 }
 
+/** The network the coinflip server is pinned to (regtest / mutinynet / …). */
+export function getNetwork(): Promise<{ network: string }> {
+  return request('/api/network')
+}
+
 export function play(
   tier: number,
   choice: 'heads' | 'tails',

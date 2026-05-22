@@ -6,6 +6,13 @@ import type { AppDeps } from './deps.js'
 export function createPublicRoutes(deps: AppDeps): Router {
   const router = Router()
 
+  // GET /api/network — the network this server is pinned to (from its
+  // ARK_SERVER_URL env, surfaced via the Ark server's /v1/info). The client
+  // follows this; the server itself never switches networks at runtime.
+  router.get('/api/network', (_req: Request, res: Response) => {
+    res.json({ network: deps.arkInfo.network })
+  })
+
   // GET /api/tiers — available bet tiers and house readiness
   router.get('/api/tiers', async (_req: Request, res: Response) => {
     try {

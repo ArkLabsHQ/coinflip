@@ -281,6 +281,54 @@ export function buildClaimTransaction(
   return { arkTx, checkpoints }
 }
 
+export interface SweepArgs {
+  winner: 'player' | 'house'
+  /** Escrow VTXOs (both parties' single-party escrow sends sit at the same
+   * CoinflipFinal address) to sweep through the winner's leaf. */
+  escrowVtxos: { txid: string; vout: number; value: number }[]
+  payoutAddress: string
+  houseAddress: string
+  rake: number
+}
+
+/**
+ * Sweep all escrow VTXOs (per-party model) through the winner's leaf into one
+ * payout. Single-party: only the winner + Ark server sign. Player win → two
+ * outputs (pot−rake to player, rake to house); house win → single pot output.
+ * The condition witness (both secrets) is attached by the broadcaster.
+ */
+export function buildSweepTransaction(
+  game: Game,
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: SweepArgs,
+): BuiltOffchainTx {
+  void networkHrp
+  const finalScript = getFinalScript(game)
+  const leaf = args.winner === 'player' ? finalScript.playerWin() : finalScript.creatorWin()
+  const tapTree = finalScript.encode()
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const inputs: ArkTxInput[] = args.escrowVtxos.map((e) => ({
+    txid: e.txid, vout: e.vout, value: e.value, tapLeafScript: leaf, tapTree,
+  }))
+  const pot = args.escrowVtxos.reduce((a, e) => a + e.value, 0)
+
+  const winnerAddr = ArkAddress.decode(args.payoutAddress)
+  const outputs: { script: Uint8Array; amount: bigint }[] = []
+  if (args.winner === 'player' && args.rake > 0) {
+    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot - args.rake) })
+    outputs.push({ script: ArkAddress.decode(args.houseAddress).pkScript, amount: BigInt(args.rake) })
+  } else {
+    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot) })
+  }
+
+  const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
+  return { arkTx, checkpoints }
+}
+
 function getLeafHash(leaf: TapLeafScript): Uint8Array {
   const scriptWithVersion = leaf[1]
   const script = scriptWithVersion.slice(0, -1)

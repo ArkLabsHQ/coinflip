@@ -35,6 +35,15 @@ export { makeRepos } from './repositories/index.js'
 export { initHouseWallet } from './house-wallet.js'
 export { attachContractEventHandler, initContractManager } from './contract-manager.js'
 export { startExpiryTimer } from './game-engine.js'
+export {
+  handleTrustlessPlay,
+  handleTrustlessCommit,
+  type TrustlessPlayRequest,
+  type TrustlessPlayResult,
+  type TrustlessCommitRequest,
+  type TrustlessCommitResult,
+  type Outpoint,
+} from './trustless-game.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'
 export { createAdminRoutes } from './admin/routes.js'

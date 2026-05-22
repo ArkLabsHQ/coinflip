@@ -218,6 +218,69 @@ export function buildGameTransactions(
   }
 }
 
+/**
+ * The outpoint of the coinflip-final VTXO, addressable before the final tx is
+ * broadcast. The ark tx id excludes witness data, so it is stable across
+ * signing — this is what lets the player pre-sign the winner-claim (validated
+ * by the deterministic-txid gate test).
+ */
+export function getFinalOutpoint(finalArkTx: Transaction): { txid: string; vout: number } {
+  return { txid: finalArkTx.id!, vout: 0 }
+}
+
+export interface ClaimArgs {
+  winner: 'player' | 'house'
+  /** Outpoint of the coinflip-final VTXO (see getFinalOutpoint). */
+  finalOutpoint: { txid: string; vout: number }
+  /** Ark address the winner is paid to. */
+  payoutAddress: string
+  /** Ark address the rake goes to (player-win only). */
+  houseAddress: string
+  /** Rake in sats, deducted from the pot on a player win; 0 otherwise. */
+  rake: number
+}
+
+/**
+ * Build the winner-claim tx spending the coinflip-final VTXO via the winner's
+ * leaf. Player win → two outputs (pot−rake to player, rake to house); house win
+ * → single pot output to the house. The condition witness (both secrets) is
+ * attached by the broadcaster, not here — the signature does not cover it.
+ */
+export function buildClaimTransaction(
+  game: Game,
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: ClaimArgs,
+): BuiltOffchainTx {
+  void networkHrp // reserved for symmetry with the other builders
+  const pot = Number(getPotAmount(game))
+  const finalScript = getFinalScript(game)
+  const leaf = args.winner === 'player' ? finalScript.playerWin() : finalScript.creatorWin()
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const input: ArkTxInput = {
+    txid: args.finalOutpoint.txid,
+    vout: args.finalOutpoint.vout,
+    value: pot,
+    tapLeafScript: leaf,
+    tapTree: finalScript.encode(),
+  }
+
+  const winnerAddr = ArkAddress.decode(args.payoutAddress)
+  const outputs: { script: Uint8Array; amount: bigint }[] = []
+  if (args.winner === 'player' && args.rake > 0) {
+    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot - args.rake) })
+    outputs.push({ script: ArkAddress.decode(args.houseAddress).pkScript, amount: BigInt(args.rake) })
+  } else {
+    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot) })
+  }
+
+  const { arkTx, checkpoints } = buildOffchainTx([input], outputs, serverUnrollScript)
+  return { arkTx, checkpoints }
+}
+
 function getLeafHash(leaf: TapLeafScript): Uint8Array {
   const scriptWithVersion = leaf[1]
   const script = scriptWithVersion.slice(0, -1)

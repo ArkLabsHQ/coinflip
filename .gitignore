@@ -32,3 +32,6 @@ docs/plans
 
 # Temp data dir created by e2e tests
 packages/e2e/data
+
+# Local deploy compose (carries admin auth secret) — never commit
+docker-compose.mutinynet.yml

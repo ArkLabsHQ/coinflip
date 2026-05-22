@@ -97,6 +97,10 @@ interface SubmitArgs {
   arkTx: Transaction
   checkpoints: Transaction[]
   signers: Signer[]
+  /** Identities allowed to sign the post-submit checkpoints. Defaults to the
+   * ark-tx signers. Set to e.g. [houseId] to test whether server-only
+   * checkpoint signing is sufficient (decides if /commit can be server-side). */
+  checkpointSigners?: Identity[]
   conditionWitness?: { index: number; data: Uint8Array[] }
 }
 
@@ -113,6 +117,7 @@ async function trySign(tx: Transaction, id: Identity, indices: number[]): Promis
 
 async function submit(args: SubmitArgs): Promise<string> {
   const { arkProvider, arkTx, checkpoints, signers, conditionWitness } = args
+  const checkpointSigners = args.checkpointSigners ?? signers.map((s) => s.identity)
   if (conditionWitness) setArkPsbtField(arkTx, conditionWitness.index, ConditionWitness, conditionWitness.data)
   let signed = arkTx
   for (const s of signers) signed = await s.identity.sign(signed, s.inputs)
@@ -128,7 +133,7 @@ async function submit(args: SubmitArgs): Promise<string> {
     if (conditionWitness) setArkPsbtField(tx, conditionWitness.index, ConditionWitness, conditionWitness.data)
     const idx: number[] = []
     for (let i = 0; i < tx.inputsLength; i++) idx.push(i)
-    for (const s of signers) tx = await trySign(tx, s.identity, idx)
+    for (const id of checkpointSigners) tx = await trySign(tx, id, idx)
     finalCheckpoints.push(base64.encode(tx.toPSBT()))
   }
   await arkProvider.finalizeTx(arkTxid, finalCheckpoints)
@@ -150,12 +155,16 @@ describe('spike: trustless broadcast (setup → final → claim)', () => {
     }
   }, 15_000)
 
-  it('escrows both stakes and pays the winner on-chain', async () => {
-    if (!arkAvailable) {
-      console.warn('ark unavailable — spike skipped')
-      return
-    }
+  // Offchain-tx outputs are preconfirmed (not "settled"), so measure total
+  // spendable VTXO value rather than balance.settled.
+  const vtxoTotal = async (w: Wallet) => (await w.getVtxos()).reduce((a, v) => a + v.value, 0)
 
+  /**
+   * Play one full trustless game; return the winner's spendable VTXO total
+   * before/after the claim. `playerWins` controls secret sizes: equal → player
+   * wins (determineWinner), different → house (creator) wins.
+   */
+  async function runGame(playerWins: boolean): Promise<{ before: number; after: number }> {
     const houseId = SingleKey.fromRandomBytes()
     const playerId = SingleKey.fromRandomBytes()
     const houseW = await makeWallet(houseId)
@@ -173,8 +182,8 @@ describe('spike: trustless broadcast (setup → final → claim)', () => {
     const housePub = await houseId.xOnlyPublicKey()
     const playerPub = await playerId.xOnlyPublicKey()
     const serverPubkey = toXOnly(hex.decode(arkInfo.signerPubkey))
-    const creatorSecret = generateSecret('heads') // 15 → creator (house) wins vs tails
-    const playerSecret = generateSecret('tails')
+    const creatorSecret = generateSecret('heads') // 15 bytes
+    const playerSecret = generateSecret(playerWins ? 'heads' : 'tails') // equal size → player wins
 
     const houseVtxos = await houseW.getVtxos()
     const playerVtxos = await playerW.getVtxos()
@@ -193,38 +202,50 @@ describe('spike: trustless broadcast (setup → final → claim)', () => {
     const built = buildGameTransactions(game, arkInfo, NETWORK_HRP)
     console.log('[spike] setup id:', built.setup.arkTx.id, 'final id:', built.final.arkTx.id, 'escrow:', getSetupAddress(game, NETWORK_HRP).encode())
 
-    const setupTxid = await submit({
+    // 1) Escrow both stakes.
+    await submit({
       arkProvider, arkTx: built.setup.arkTx, checkpoints: built.setup.checkpoints,
       signers: [{ identity: houseId, inputs: [0] }, { identity: playerId, inputs: [1] }],
     })
-    console.log('[spike] OK setup submitted:', setupTxid)
-
-    const finalTxid = await submit({
+    // 2) Reveal the house secret via the final tx.
+    await submit({
       arkProvider, arkTx: built.final.arkTx, checkpoints: built.final.checkpoints,
       signers: [{ identity: houseId, inputs: [0] }, { identity: playerId, inputs: [0] }],
       conditionWitness: { index: 0, data: [creatorSecret] },
     })
-    console.log('[spike] OK final submitted:', finalTxid)
-
+    // 3) Winner claims the pot via their leaf (creatorWin / playerWin).
+    const winner: 'house' | 'player' = playerWins ? 'player' : 'house'
+    const winnerW = playerWins ? playerW : houseW
+    const winnerId = playerWins ? playerId : houseId
     const claim = buildClaimTransaction(game, arkInfo, NETWORK_HRP, {
-      winner: 'house', finalOutpoint: getFinalOutpoint(built.final.arkTx),
-      payoutAddress: game.creator!.changeAddress!, houseAddress: game.creator!.changeAddress!, rake: 0,
+      winner,
+      finalOutpoint: getFinalOutpoint(built.final.arkTx),
+      payoutAddress: playerWins ? game.player!.changeAddress! : game.creator!.changeAddress!,
+      houseAddress: game.creator!.changeAddress!,
+      rake: 0,
     })
-    // Offchain-tx outputs are preconfirmed (not "settled"), so measure total
-    // spendable VTXO value at the house address rather than balance.settled.
-    const vtxoTotal = async () => (await houseW.getVtxos()).reduce((a, v) => a + v.value, 0)
-    const before = await vtxoTotal()
-    const claimTxid = await submit({
+    const before = await vtxoTotal(winnerW)
+    await submit({
       arkProvider, arkTx: claim.arkTx, checkpoints: claim.checkpoints,
-      signers: [{ identity: houseId, inputs: [0] }],
+      signers: [{ identity: winnerId, inputs: [0] }],
       conditionWitness: { index: 0, data: [creatorSecret, playerSecret] },
     })
-    console.log('[spike] OK claim submitted:', claimTxid)
-
     await sleep(6000)
-    const after = await vtxoTotal()
-    console.log('[spike] house vtxo total before claim:', before, 'after:', after)
-    // The creatorWin claim adds the full pot (2× bet) to the house.
-    expect(after).toBeGreaterThan(before)
+    const after = await vtxoTotal(winnerW)
+    console.log(`[spike] winner=${winner} total before claim: ${before} after: ${after}`)
+    return { before, after }
+  }
+
+  it('house win: the player stake is escrowed and paid to the house', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    const { before, after } = await runGame(false)
+    // House claims the full pot (2x bet) — its own stake back plus the player's.
+    expect(after - before).toBeGreaterThanOrEqual(BET * 2 - 100)
+  }, 300_000)
+
+  it('player win: the house stake is escrowed and paid to the player', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    const { before, after } = await runGame(true)
+    expect(after - before).toBeGreaterThanOrEqual(BET * 2 - 100)
   }, 300_000)
 })

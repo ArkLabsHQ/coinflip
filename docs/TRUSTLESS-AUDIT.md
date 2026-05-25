@@ -75,11 +75,24 @@ gotcha to respect: `expirePending` flips pending→expired at 5 min, but the
 refund CLTV only matures at `finalExpiration` (~20 min), so the reclaim must be
 driven off the CLTV maturity, not the 5-min expiry sweep.
 
-### 🟠 5. Concurrency & VTXO pool for thousands of players
-- House VTXO pool: enough distinct VTXOs to escrow many concurrent games without
-  collisions; split/merge maintenance under load.
-- Reservation ledger must cover in-flight escrow liability (per-game house stake).
-- Parallel escrow sends must not double-spend a house VTXO (mutex coverage).
+### 🟠 5. Concurrency & VTXO pool for thousands of players (partial)
+**Done:** concurrent plays now escrow in PARALLEL without colliding. Liability
+check + VTXO pick + reservation are atomic under `selectionMutex` (fast, no
+network), and each play reserves its CHOSEN VTXO's outpoint — so even before the
+spend propagates to `getVtxos()`, no other play can select it. This closes a
+latent double-spend-under-lag window: the reservation previously held no
+outpoints, and `escrowHouseStake` had a `?? all.find()` fallback that could pick
+a *reserved* VTXO. That fallback is gone (pool exhaustion → retryable
+`HouseBusyError`), and the escrow SEND now runs OUTSIDE the mutex so
+distinct-VTXO escrows proceed concurrently. The in-flight liability ledger
+(restored on boot per #4) gates over-commitment. e2e-verified
+(`trustless-api.test.ts`): with a pre-split pool, **4 concurrent plays → 4 ok, 0
+busy, all on distinct house VTXOs, zero double-spend failures**.
+
+**Still open:** split/merge pool maintenance under SUSTAINED load (current
+`ensureHouseVtxoPool` tops up on a 120s timer + on boot; needs back-pressure /
+on-demand split when bursts outrun the pool), and production VTXO sizing + merge
+to bound fragmentation.
 
 ### 🟠 6. Real fee handling
 Regtest runs `txFeeRate=0`. Production escrow/sweep/refund txs need fee budgeting

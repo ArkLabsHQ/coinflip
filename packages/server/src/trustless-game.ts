@@ -38,7 +38,7 @@ import {
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
-import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, KeyedMutex } from './vtxo-pool.js'
+import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, KeyedMutex, outpointKey } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import type { GameRow } from './repositories/types.js'
 
@@ -201,13 +201,19 @@ function houseVtxoToInput(v: ExtendedVirtualCoin): ArkTxInput {
   return { txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree }
 }
 
-/** Escrow `amount` from the house wallet into the escrow address (single-party). */
-async function escrowHouseStake(deps: AppDeps, escrowPkScript: Uint8Array, amount: number): Promise<Outpoint> {
+/**
+ * Escrow `amount` from a PRE-SELECTED house VTXO into the escrow address
+ * (single-party). The caller picks + reserves `candidate` under the selection
+ * mutex so concurrent plays never escrow from the same VTXO; the actual send
+ * runs outside the mutex so escrows for distinct VTXOs proceed in parallel.
+ */
+async function escrowHouseStakeFrom(
+  deps: AppDeps,
+  candidate: ExtendedVirtualCoin,
+  escrowPkScript: Uint8Array,
+  amount: number,
+): Promise<Outpoint> {
   const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
-  const all = await deps.wallet.getVtxos()
-  const candidate = freeHouseVtxos(all).find((v) => v.value >= amount) ?? all.find((v) => v.value >= amount)
-  if (!candidate) throw new Error(`House has no single VTXO covering ${amount} sats`)
-
   const change = candidate.value - amount
   const houseChange = ArkAddress.decode(await deps.wallet.getAddress())
   const outputs: { script: Uint8Array; amount: bigint }[] = [{ script: escrowPkScript, amount: BigInt(amount) }]
@@ -242,17 +248,34 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   const houseEscrowScriptHex = hex.encode(houseEscrowScript.pkScript)
 
   const gameId = uuidv4()
-  // Reserve the house stake (its at-risk amount) and escrow it under the mutex
-  // so concurrent plays can't over-commit the house balance.
+  // Atomically (under the selection mutex) check liability and pick + reserve a
+  // free house VTXO; then escrow OUTSIDE the mutex so concurrent plays run in
+  // parallel, each on its own reserved VTXO.
   let houseEscrow!: Outpoint
+  let candidate!: ExtendedVirtualCoin
   await selectionMutex.runExclusive(async () => {
     const balance = await deps.wallet.getBalance()
     if (reservations.totalLiability() + req.tier > balance.available) {
       throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${req.tier} > ${balance.available}). Try again shortly.`)
     }
-    reservations.reserve(gameId, [], req.tier)
-    houseEscrow = await escrowHouseStake(deps, houseEscrowScript.pkScript, req.tier)
+    // Pick a FREE VTXO and reserve ITS OUTPOINT (not just liability): the
+    // reservation excludes it from every other play's selection even before
+    // this spend propagates to getVtxos(), so two plays can never escrow from
+    // the same VTXO. No fallback to a reserved VTXO — if the pool is momentarily
+    // exhausted we surface a retryable "busy" instead of risking a double-spend.
+    const picked = freeHouseVtxos(await deps.wallet.getVtxos()).find((v) => v.value >= req.tier)
+    if (!picked) {
+      throw new HouseBusyError(`House has no free VTXO covering ${req.tier} sats (pool may be splitting). Try again shortly.`)
+    }
+    candidate = picked
+    reservations.reserve(gameId, [outpointKey(picked.txid, picked.vout)], req.tier)
   })
+  try {
+    houseEscrow = await escrowHouseStakeFrom(deps, candidate, houseEscrowScript.pkScript, req.tier)
+  } catch (err) {
+    reservations.release(gameId)
+    throw err
+  }
 
   const state: TrustlessState = { finalExpiration, setupExpiration, houseEscrow }
   try {

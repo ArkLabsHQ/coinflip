@@ -170,6 +170,18 @@ describe('trustless coin flow (server handlers)', () => {
     }
   }
 
+  // Poll until the house holds at least `min` VTXOs each covering BET.
+  async function waitForHouseVtxos(min: number, t = 60_000): Promise<number> {
+    const start = Date.now()
+    let usable = 0
+    while (Date.now() - start < t) {
+      usable = (await deps.wallet.getVtxos()).filter((v: { value: number }) => v.value >= BET).length
+      if (usable >= min) return usable
+      await sleep(2000)
+    }
+    return usable
+  }
+
   it('plays a full trustless game; the winner receives the full pot', async () => {
     if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
 
@@ -289,5 +301,52 @@ describe('trustless coin flow (server handlers)', () => {
     const row = await deps.repos.games.get(gameId)
     expect(row.status).toBe('resolved')
     expect(row.winner).toBe(winner)
+  }, 300_000)
+
+  it('runs concurrent plays in parallel without double-spending a house VTXO', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    const N = 4
+
+    // Pre-split the house balance into enough distinct pieces that N plays can
+    // each grab their own, then wait until they're visible on-Ark.
+    await server.ensureHouseVtxoPool(deps, { targetCount: N + 2, pieceSize: BET * 2 })
+    const usable = await waitForHouseVtxos(N)
+    console.log(`[trustless-api] house has ${usable} usable VTXO(s) before ${N} concurrent plays`)
+
+    // N distinct players — a play only escrows the HOUSE stake, so no player
+    // funding is needed here. Distinct pubkeys dodge the per-player pending cap.
+    const players = await Promise.all(Array.from({ length: N }, async () => {
+      const id = SingleKey.fromRandomBytes()
+      const w = await makePlayerWallet(id)
+      const secret = Buffer.from(new Uint8Array(16)); crypto.getRandomValues(secret)
+      return {
+        tier: BET,
+        playerPubkey: hex.encode(toXOnly(await id.compressedPublicKey())),
+        playerHash: createHash('sha256').update(secret).digest('hex'),
+        playerChangeAddress: await w.getAddress(),
+      }
+    }))
+
+    // Fire them all at once.
+    const settled = await Promise.allSettled(players.map((p) => server.handleTrustlessPlay(p, deps)))
+    const ok = settled
+      .filter((s): s is PromiseFulfilledResult<{ houseEscrow: { txid: string; vout: number } }> => s.status === 'fulfilled')
+      .map((s) => s.value)
+    const failed = settled
+      .filter((s): s is PromiseRejectedResult => s.status === 'rejected')
+      .map((s) => String(s.reason?.message ?? s.reason))
+    console.log(`[trustless-api] concurrent plays: ${ok.length} ok, ${failed.length} busy${failed.length ? ' — ' + failed.join(' | ') : ''}`)
+
+    // Safety: every successful escrow used a DISTINCT house VTXO (distinct
+    // escrow outpoint) — no two plays spent the same one.
+    const outpoints = ok.map((r) => `${r.houseEscrow.txid}:${r.houseEscrow.vout}`)
+    expect(new Set(outpoints).size).toBe(outpoints.length)
+    // Real parallelism happened (more than one escrow in flight at once).
+    expect(ok.length).toBeGreaterThanOrEqual(2)
+    // Any failure must be the retryable busy/pool condition — never a double-spend.
+    for (const msg of failed) {
+      expect(msg).toMatch(/busy|free VTXO/i)
+      expect(msg).not.toMatch(/double|already spent|spent vtxo/i)
+    }
   }, 300_000)
 })

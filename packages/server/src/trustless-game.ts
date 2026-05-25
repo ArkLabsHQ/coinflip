@@ -38,7 +38,7 @@ import {
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
-import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, KeyedMutex, outpointKey } from './vtxo-pool.js'
+import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, KeyedMutex, outpointKey, pickEscrowVtxo } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import type { GameRow } from './repositories/types.js'
 
@@ -258,14 +258,17 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     if (reservations.totalLiability() + req.tier > balance.available) {
       throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${req.tier} > ${balance.available}). Try again shortly.`)
     }
-    // Pick a FREE VTXO and reserve ITS OUTPOINT (not just liability): the
-    // reservation excludes it from every other play's selection even before
+    // Pick a FREE, dust-safe VTXO and reserve ITS OUTPOINT (not just liability):
+    // the reservation excludes it from every other play's selection even before
     // this spend propagates to getVtxos(), so two plays can never escrow from
-    // the same VTXO. No fallback to a reserved VTXO — if the pool is momentarily
-    // exhausted we surface a retryable "busy" instead of risking a double-spend.
-    const picked = freeHouseVtxos(await deps.wallet.getVtxos()).find((v) => v.value >= req.tier)
+    // the same VTXO. `pickEscrowVtxo` skips VTXOs that would leave a sub-dust
+    // change output (rejected on mainnet). No fallback to a reserved VTXO — if
+    // the pool is momentarily exhausted we surface a retryable "busy" rather
+    // than risk a double-spend.
+    const dust = Number(deps.arkInfo.dust ?? 546n)
+    const picked = pickEscrowVtxo(freeHouseVtxos(await deps.wallet.getVtxos()), req.tier, dust)
     if (!picked) {
-      throw new HouseBusyError(`House has no free VTXO covering ${req.tier} sats (pool may be splitting). Try again shortly.`)
+      throw new HouseBusyError(`House has no free dust-safe VTXO covering ${req.tier} sats (pool may need refragmenting). Try again shortly.`)
     }
     candidate = picked
     reservations.reserve(gameId, [outpointKey(picked.txid, picked.vout)], req.tier)

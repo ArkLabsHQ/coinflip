@@ -185,6 +185,29 @@ export function freeHouseVtxos(all: ExtendedVirtualCoin[]): ExtendedVirtualCoin[
 }
 
 /**
+ * Pick a house VTXO to escrow `amount` from, avoiding a sub-dust change output.
+ * Offchain Ark txs are feeless (outputs = inputs + a zero-value anchor), but
+ * every VTXO output must clear the dust threshold or the server rejects the tx.
+ * So a valid VTXO covers the amount AND leaves either no change or >= `dust`
+ * change; we take the smallest such VTXO (best-fit) to keep larger ones free for
+ * bigger bets. Returns undefined if none qualify (caller surfaces "busy").
+ */
+export function pickEscrowVtxo<T extends { value: number }>(
+  candidates: T[],
+  amount: number,
+  dust: number,
+): T | undefined {
+  let best: T | undefined
+  for (const v of candidates) {
+    if (v.value < amount) continue
+    const change = v.value - amount
+    if (change !== 0 && change < dust) continue // would create a sub-dust change output
+    if (!best || v.value < best.value) best = v
+  }
+  return best
+}
+
+/**
  * Pool target: how many distinct spendable VTXOs we try to keep so
  * concurrent games can each grab their own. Configurable via env.
  */

@@ -94,9 +94,25 @@ busy, all on distinct house VTXOs, zero double-spend failures**.
 on-demand split when bursts outrun the pool), and production VTXO sizing + merge
 to bound fragmentation.
 
-### 🟠 6. Real fee handling
-Regtest runs `txFeeRate=0`. Production escrow/sweep/refund txs need fee budgeting
-(deduct from change / pot) and must stay above dust for every output.
+### 🟠 6. Real fee handling (clarified + dust-guarded; renewal still open)
+**Finding:** offchain Ark txs are FEELESS at the VTXO layer. `buildOffchainTx`
+emits outputs summing to the inputs plus a single zero-value P2A anchor
+(`ANCHOR_VALUE = 0n`); the on-chain cost is paid via that anchor (CPFP) by
+whoever settles/unrolls. So escrow/sweep/refund need NO per-tx fee budgeting —
+`outputs = inputs` is correct, on mainnet too. The original worry was misframed.
+
+**What actually matters on mainnet:**
+- **Dust on every output.** Sweep/refund outputs and the per-party escrows are
+  dust-safe for the configured tiers (all ≥ 1000 > dust). The one gap was the
+  escrow CHANGE output (`vtxo.value − tier`), which could be sub-dust and get
+  rejected. Fixed: `pickEscrowVtxo` selects only a house VTXO whose change is
+  zero or ≥ `arkInfo.dust` (best-fit smallest), else surfaces a retryable busy.
+  Unit-tested in `vtxo-pool.unit.test.ts`.
+- **Settlement / renewal fees (still open).** The real recurring cost is the
+  per-intent batch fee when settling/renewing VTXOs (~5k sats), not the offchain
+  game txs. The per-poll drain is already fixed (`settlementConfig:false` + a
+  manual boarding settle). Still to do: a mainnet renewal strategy that settles
+  boarding on fund and renews only near VTXO expiry.
 
 ### ✅ FIXED — 7. `/commit` idempotency & race safety
 Concurrent commits for the same game are serialized through a per-game

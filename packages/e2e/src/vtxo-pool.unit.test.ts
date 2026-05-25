@@ -15,7 +15,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
 const pool = require('arkade-coinflip-server/dist/vtxo-pool.js')
-const { KeyedMutex, reservations, rebuildReservations, maxLiabilityForTier } = pool
+const { KeyedMutex, reservations, rebuildReservations, maxLiabilityForTier, pickEscrowVtxo } = pool
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -117,5 +117,32 @@ describe('rebuildReservations', () => {
     } finally {
       reservations.release('tl-1'); reservations.release('lg-1')
     }
+  })
+})
+
+describe('pickEscrowVtxo (dust-safe house VTXO selection)', () => {
+  const v = (value: number) => ({ value })
+  const DUST = 546
+
+  it('picks the smallest VTXO that covers the amount with dust-safe change', () => {
+    expect(pickEscrowVtxo([v(50000), v(2000), v(10000)], 1000, DUST)).toEqual(v(2000))
+  })
+
+  it('allows an exact-match VTXO (zero change)', () => {
+    expect(pickEscrowVtxo([v(5000), v(1000)], 1000, DUST)).toEqual(v(1000))
+  })
+
+  it('skips VTXOs that would leave sub-dust change', () => {
+    // 1300 − 1000 = 300 < dust → skip; 5000 − 1000 = 4000 is fine.
+    expect(pickEscrowVtxo([v(1300), v(5000)], 1000, DUST)).toEqual(v(5000))
+  })
+
+  it('returns undefined when nothing covers the amount dust-safely', () => {
+    // 900 too small; 1300 leaves sub-dust change.
+    expect(pickEscrowVtxo([v(900), v(1300)], 1000, DUST)).toBeUndefined()
+  })
+
+  it('returns undefined for an empty candidate set', () => {
+    expect(pickEscrowVtxo([], 1000, DUST)).toBeUndefined()
   })
 })

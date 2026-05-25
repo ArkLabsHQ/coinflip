@@ -19,6 +19,8 @@ import { base64, hex } from '@scure/base'
 import { createHash } from 'crypto'
 import {
   CoinflipFinalScript,
+  CoinflipEscrowScript,
+  buildRefundTransaction,
   generateSecret,
   type VtxoInput,
 } from 'arkade-coinflip'
@@ -205,5 +207,48 @@ describe('spike: per-party escrow + winner sweep', () => {
     const after = await vtxoTotal()
     console.log('[escrow] house total before sweep:', before, 'after:', after)
     expect(after - before).toBeGreaterThanOrEqual(pot - 100)
+  }, 300_000)
+
+  it('player refunds its own escrow after a stall (house griefs)', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+
+    const houseId = SingleKey.fromRandomBytes() // house never escrows — it stalls
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await makeWallet(playerId)
+    await faucet(await playerW.getBoardingAddress(), FUND_BTC)
+    await waitFor(playerW, 'boarding', BET)
+    await playerW.settle()
+    await waitFor(playerW, 'settled', BET)
+
+    const housePub = await houseId.xOnlyPublicKey()
+    const playerPub = await playerId.xOnlyPublicKey()
+    const serverPubkey = toXOnly(hex.decode(arkInfo.signerPubkey))
+    // finalExpiration in the PAST so the refund's CLTV is already satisfiable.
+    const past = Math.floor(Date.now() / 1000) - 3600
+
+    const playerEscrowScript = new CoinflipEscrowScript({
+      creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey,
+      creatorHash: sha(generateSecret('heads')), playerHash: sha(generateSecret('tails')),
+      finalExpiration: BigInt(past), refundPubkey: playerPub, // player-only refund
+    })
+    const escrowAddr = playerEscrowScript.address(NETWORK_HRP, serverPubkey)
+
+    const playerEscrow = await escrow(playerW, playerId, escrowAddr.pkScript, await playerW.getAddress(), BET)
+    console.log('[refund] player escrowed:', playerEscrow.txid)
+
+    const vtxoTotal = async () => (await playerW.getVtxos()).reduce((a, v) => a + v.value, 0)
+    const before = await vtxoTotal()
+    const refund = buildRefundTransaction(arkInfo, NETWORK_HRP, {
+      escrowScript: playerEscrowScript, txid: playerEscrow.txid, vout: playerEscrow.vout,
+      value: playerEscrow.value, refundAddress: await playerW.getAddress(),
+    })
+    const refundTxid = await spend(refund.arkTx, refund.checkpoints, playerId, [0])
+    console.log('[refund] refunded:', refundTxid)
+
+    await sleep(6000)
+    const after = await vtxoTotal()
+    console.log('[refund] player total before refund:', before, 'after:', after)
+    // The escrowed stake comes back to the player.
+    expect(after - before).toBeGreaterThanOrEqual(BET - 100)
   }, 300_000)
 })

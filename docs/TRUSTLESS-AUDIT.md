@@ -18,6 +18,16 @@ under adversarial conditions**. Gaps below.
 
 ## Findings (prioritized)
 
+### ✅ FIXED — 1+2. Abort-theft vector + player refund
+`CoinflipEscrowScript` + per-party wiring (`5a622fc`) + verified refund. The
+player funds `PlayerEscrow` (refundable only by the player), the house funds
+`HouseEscrow` (refundable only by the house); the winner sweeps both via the
+shared win leaves. The house has no spendable path on the player's escrow except
+`creatorWin`-when-house-wins → **theft is unrepresentable**. And the player can
+reclaim a stalled escrow via the owner-only CLTV refund leaf (e2e verified:
+escrow → refund → funds back; CLTV spends offchain without an explicit
+nLockTime). Original analysis kept below for the record.
+
 ### 🔴 1. Escrow `abort` leaf lets the house steal the player's stake
 The shared escrow is `CoinflipFinalScript`, whose `abort` leaf is
 `CLTV(finalExpiration) + creator(house) + server`. Both parties' escrow VTXOs

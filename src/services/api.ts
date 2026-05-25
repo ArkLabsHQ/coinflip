@@ -26,6 +26,10 @@ export interface PlayResponse {
   betAmount: number
   finalExpiration: number
   houseEscrow: Outpoint
+  /** Variable-odds echo + total pot the winner sweeps (player stake + house stake). */
+  oddsN?: number
+  oddsTarget?: number
+  pot?: number
 }
 
 /** /api/game/:id/commit — resolved. House win → server swept (txid). Player win
@@ -98,10 +102,11 @@ export function play(
   playerPubkey: string,
   playerHash: string,
   playerChangeAddress: string,
+  odds?: { oddsN: number; oddsTarget: number },
 ): Promise<PlayResponse> {
   return request('/api/play', {
     method: 'POST',
-    body: JSON.stringify({ tier, playerPubkey, playerHash, playerChangeAddress }),
+    body: JSON.stringify({ tier, playerPubkey, playerHash, playerChangeAddress, oddsN: odds?.oddsN, oddsTarget: odds?.oddsTarget }),
   })
 }
 

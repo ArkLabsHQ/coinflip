@@ -523,7 +523,10 @@ const ark: Module<ArkState, RootState> = {
      *      already swept; player win → sign + submit the returned sweep PSBT.
      * Returns the commit result { winner, payout, houseSecret, playerSecret, proof }.
      */
-    async playTrustlessGame({ state, rootState, dispatch }, { tier, side }: { tier: number; side: 'heads' | 'tails' }) {
+    async playTrustlessGame(
+      { state, rootState, dispatch },
+      { tier, side, oddsN, oddsTarget }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number },
+    ) {
       if (!sdkWallet) throw new Error('Wallet not connected')
       const privateKey = rootState.wallet.privateKey
       if (!privateKey) throw new Error('No wallet key available')
@@ -537,14 +540,25 @@ const ark: Module<ArkState, RootState> = {
       const arkInfo = await arkProvider.getInfo()
       const serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
 
-      // 1. Commit a secret (15B heads / 16B tails) and start the game.
-      const secretLen = side === 'heads' ? 15 : 16
-      const secretBytes = new Uint8Array(secretLen)
+      // 1. Commit a secret + start the game. Coin: 15B heads / 16B tails.
+      // Variable-odds: encode a uniform digit in [0, oddsN) as the secret LENGTH
+      // (base 16 = the lib's VARIABLE_ODDS_BASE_LEN), so the summed roll is fair.
+      const isVariable = oddsN !== undefined && oddsTarget !== undefined
+      let secretBytes: Uint8Array
+      if (isVariable) {
+        const VARIABLE_ODDS_BASE_LEN = 16 // must match arkade-coinflip's constant
+        secretBytes = new Uint8Array(VARIABLE_ODDS_BASE_LEN + Math.floor(Math.random() * (oddsN as number)))
+      } else {
+        secretBytes = new Uint8Array(side === 'tails' ? 16 : 15)
+      }
       crypto.getRandomValues(secretBytes)
       const playerSecretHex = Array.from(secretBytes).map((b) => b.toString(16).padStart(2, '0')).join('')
       const playerHash = await createHash(secretBytes)
 
-      const playRes = await apiPlay(tier, playerPubkey, playerHash, playerChangeAddress)
+      const playRes = await apiPlay(
+        tier, playerPubkey, playerHash, playerChangeAddress,
+        isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number } : undefined,
+      )
 
       // 2. Escrow the player's stake into the shared escrow address (single-party).
       const escrowPk = ArkAddress.decode(playRes.escrowAddress).pkScript

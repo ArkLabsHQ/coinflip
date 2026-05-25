@@ -176,8 +176,12 @@ all apply unchanged. Verified: `odds-math.unit.test.ts` (stake math) +
 `trustless-api.test.ts` variable-odds case (asymmetric stakes, pot = player +
 house stake, winner sweeps the full pot, rake 0).
 
-**Still open:** client odds-picker UI (pick win probability → payout multiple;
-generate a variable-length secret in-browser; pass `oddsN`/`oddsTarget`).
+**Done — client (`PlayView`):** a bet-type selector (Coin / 2× / 3× / 6×) picks
+the odds; the store generates a variable-length secret in-browser (digit = secret
+length − 16, matching `VARIABLE_ODDS_BASE_LEN`) and passes `oddsN`/`oddsTarget`
+through `/play`. P&L already nets correctly (`payout − tier`), so asymmetric
+payouts display right. Full Vue build clean. **Variable-odds is now end-to-end:
+on-chain condition (proven) → server stakes/edge → client picker.**
 
 ### 🟡 9. Rake accounting
 Sub-dust rake is currently waived. Define production rake (which output, dust

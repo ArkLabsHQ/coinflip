@@ -67,10 +67,24 @@
         />
       </div>
 
-      <!-- Side selection only for skins where it's meaningful (coin). Default
-           is RANDOM so getting started is one click. Auto mode always
-           randomises, so the selector hides during auto. -->
-      <div v-if="currentSkin.supportsSide && !isAutoMode" class="side-selector">
+      <!-- Bet type: the 50/50 coin, or a variable-odds payout (lower win
+           chance, bigger multiple). Trustless either way — odds are enforced
+           on-chain. -->
+      <div v-if="!isAutoMode" class="odds-selector">
+        <button class="odds-chip" :class="{ selected: !selectedOdds }" @click="selectedOdds = null">Coin</button>
+        <button
+          v-for="p in oddsPresets"
+          :key="p.label"
+          class="odds-chip"
+          :class="{ selected: !!selectedOdds && selectedOdds.n === p.n && selectedOdds.target === p.target }"
+          :title="`Win ~1-in-${Math.round(p.n / p.target)} for a ${p.label} payout`"
+          @click="selectedOdds = p"
+        >{{ p.label }}</button>
+      </div>
+
+      <!-- Side selection only for the coin (variable-odds ignores heads/tails).
+           Default RANDOM so getting started is one click; hidden during auto. -->
+      <div v-if="currentSkin.supportsSide && !isAutoMode && !selectedOdds" class="side-selector">
         <button
           class="side-btn random"
           :class="{ selected: selectedSide === 'random' }"
@@ -200,6 +214,15 @@ export default defineComponent({
     // 'random' (default) flips a random side each play — getting started is
     // one click. 'heads'/'tails' are explicit player calls (coin skin only).
     const selectedSide = ref<'heads' | 'tails' | 'random'>('random')
+
+    // Bet type: null = the 50/50 coin (uses side); a preset = variable-odds
+    // (player wins ~target/n; payout ≈ n/target× minus the house edge).
+    const oddsPresets = [
+      { n: 2, target: 1, label: '2×' },
+      { n: 3, target: 1, label: '3×' },
+      { n: 6, target: 1, label: '6×' },
+    ]
+    const selectedOdds = ref<{ n: number; target: number; label: string } | null>(null)
 
     // ── Flip lifecycle state ──────────────────────────────────────────
     const phase = ref<'idle' | 'flipping' | 'resolved'>('idle')
@@ -369,7 +392,10 @@ export default defineComponent({
         // reveals, and (on a win) sweeps the pot — all on-Ark. Keep animating
         // for at least MIN_FLIP_MS so a fast resolution still reads as a flip.
         const [result] = await Promise.all([
-          store.dispatch('ark/playTrustlessGame', { tier: selectedTier.value, side }),
+          store.dispatch('ark/playTrustlessGame', {
+            tier: selectedTier.value, side,
+            oddsN: selectedOdds.value?.n, oddsTarget: selectedOdds.value?.target,
+          }),
           new Promise((r) => setTimeout(r, MIN_FLIP_MS)),
         ])
 
@@ -486,6 +512,7 @@ export default defineComponent({
     return {
       // Game config
       tiers, maxAvailable, houseReady, selectedTier, selectedSide,
+      oddsPresets, selectedOdds,
       // Lifecycle
       isFlipping, error, skinState, phase,
       // Auto
@@ -795,6 +822,36 @@ export default defineComponent({
   color: var(--gold);
 }
 .auto-chip:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Bet-type (coin vs variable-odds) selector */
+.odds-selector {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  flex-wrap: wrap;
+  width: 100%;
+  max-width: 340px;
+}
+.odds-chip {
+  flex: 1;
+  min-width: 52px;
+  background: var(--bg-elevated);
+  border: 1.5px solid var(--border-light);
+  color: var(--text-muted);
+  border-radius: 8px;
+  padding: 8px 4px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.odds-chip:hover { border-color: var(--blue); color: var(--text); }
+.odds-chip.selected {
+  border-color: var(--gold);
+  background: rgba(247, 201, 72, 0.1);
+  color: var(--gold);
+}
 
 /* Flip button */
 .flip-btn {

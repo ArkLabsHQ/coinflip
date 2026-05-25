@@ -133,11 +133,15 @@ whoever settles/unrolls. So escrow/sweep/refund need NO per-tx fee budgeting —
   rejected. Fixed: `pickEscrowVtxo` selects only a house VTXO whose change is
   zero or ≥ `arkInfo.dust` (best-fit smallest), else surfaces a retryable busy.
   Unit-tested in `vtxo-pool.unit.test.ts`.
-- **Settlement / renewal fees (still open).** The real recurring cost is the
-  per-intent batch fee when settling/renewing VTXOs (~5k sats), not the offchain
-  game txs. The per-poll drain is already fixed (`settlementConfig:false` + a
-  manual boarding settle). Still to do: a mainnet renewal strategy that settles
-  boarding on fund and renews only near VTXO expiry.
+- **Settlement / renewal fees — DONE.** The real recurring cost is the per-intent
+  batch fee when settling/renewing VTXOs (~5k sats), not the offchain game txs.
+  The per-poll drain is fixed (`settlementConfig:false`), and `startRenewalTimer`
+  (game-engine) replaces the SDK poll-loop with a long-cadence settle that fires
+  ONLY when `shouldRenew` is true — i.e. there are expiring house VTXOs to
+  re-anchor or boarding deposits to confirm — with a `renewing` guard against
+  overlap. Gating is unit-tested (`renewal.unit.test.ts`). Caveat: regtest uses a
+  block-height `batchExpiry`, so the expiry-driven path only fires live on a
+  time-based network; the gating + boarding-driven path work everywhere.
 
 ### ✅ FIXED — 7. `/commit` idempotency & race safety
 Concurrent commits for the same game are serialized through a per-game

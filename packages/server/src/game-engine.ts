@@ -586,6 +586,49 @@ export async function handleSign(gameId: string, req: SignRequest, deps: AppDeps
   }
 }
 
+/**
+ * Renew iff there's something to do: expiring house VTXOs to re-anchor, or
+ * boarding deposits to confirm into Ark. Gating this (vs. settling every poll)
+ * is the whole point — a blind poll-loop finalizes preconfirmed game VTXOs into
+ * batch rounds and pays the per-intent fee each cycle (~5k sats/flip drain).
+ */
+export function shouldRenew(expiringVtxoCount: number, boardingTotalSats: number): boolean {
+  return expiringVtxoCount > 0 || boardingTotalSats > 0
+}
+
+/**
+ * Production VTXO-renewal timer. The SDK settlement poll-loop is disabled
+ * (settlementConfig:false); this replaces it with a long-cadence settle that
+ * fires ONLY when `shouldRenew` says so — renewing house VTXOs before their
+ * batch expiry and confirming boarding deposits, without the per-poll fee drain.
+ * A `renewing` guard prevents overlapping settles if one runs long.
+ *
+ * Note: on regtest `batchExpiry` is a block height (not a timestamp), so
+ * `isVtxoExpiringSoon` always reports false — the expiry-driven path only
+ * exercises on a real time-based network. The boarding-driven path and the
+ * gating decision (`shouldRenew`) work everywhere.
+ */
+export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.Timeout {
+  let renewing = false
+  const tick = async () => {
+    if (renewing) return
+    renewing = true
+    try {
+      const [balance, all] = await Promise.all([deps.wallet.getBalance(), deps.wallet.getVtxos()])
+      const { dropped } = selectableHouseVtxos(all) // VTXOs expiring within the buffer
+      if (!shouldRenew(dropped.length, balance.boarding.total)) return
+      console.log(`[renewal] settling: ${dropped.length} expiring VTXO(s), boarding ${balance.boarding.total} sats`)
+      await deps.wallet.settle()
+    } catch (err) {
+      console.warn('[renewal] tick failed:', err instanceof Error ? err.message : err)
+    } finally {
+      renewing = false
+    }
+  }
+  setTimeout(tick, 15_000) // initial pass shortly after boot
+  return setInterval(tick, intervalMs)
+}
+
 // Cleanup expired pending games every 60 seconds
 export function startExpiryTimer(deps: AppDeps): NodeJS.Timeout {
   return setInterval(async () => {

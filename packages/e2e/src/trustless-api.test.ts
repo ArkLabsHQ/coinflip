@@ -27,7 +27,6 @@ import {
   SingleKey,
   InMemoryWalletRepository,
   InMemoryContractRepository,
-  type ExtendedVirtualCoin,
   type Identity,
   type ArkProvider,
 } from '@arkade-os/sdk'
@@ -40,7 +39,6 @@ const HOUSE_FUND_BTC = 0.005
 const PLAYER_FUND_BTC = 0.002
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-const sha = (b: Uint8Array) => new Uint8Array(createHash('sha256').update(b).digest())
 const toXOnly = (b: Uint8Array) => (b.length === 33 ? b.slice(1) : b)
 
 async function faucet(address: string, amountBtc: number): Promise<void> {

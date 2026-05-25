@@ -78,8 +78,13 @@ export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<App
   registerCoinflipContracts(contractHandlers)
   await initDb()
   const repos = makeRepos(getSqlExecutor())
+  // Default the SDK's auto-renewal loop OFF (settlementConfig:false). It fires a
+  // settle every ~30s that arkd rejects with INTENT_INSUFFICIENT_FEE, churning
+  // and slowly degrading the house VTXO pool. Renewal is instead driven by the
+  // gated `startRenewalTimer` (long cadence, only when VTXOs are expiring or
+  // boarding needs confirming). Callers (tests) may override.
   const { wallet, identity, arkInfo } = await initHouseWallet(repos, {
-    settlementConfig: options.walletSettlementConfig,
+    settlementConfig: options.walletSettlementConfig ?? false,
   })
   const contractManager = await initContractManager(wallet, { repos })
   const deps: AppDeps = { repos, wallet, identity, arkInfo, contractManager }

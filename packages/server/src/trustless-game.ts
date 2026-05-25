@@ -17,8 +17,10 @@ import { base64, hex } from '@scure/base'
 import {
   generateSecret,
   determineWinner,
-  getFinalScript,
-  getFinalAddress,
+  getPlayerEscrowScript,
+  getHouseEscrowScript,
+  getPlayerEscrowAddress,
+  getHouseEscrowAddress,
   buildSweepTransaction,
   type Game,
 } from 'arkade-coinflip'
@@ -211,9 +213,12 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   const setupExpiration = now + 600
 
   const game = await buildGame(deps, req.tier, houseHash, req.playerPubkey, req.playerHash, finalExpiration, setupExpiration)
-  const escrowScript = getFinalScript(game)
-  const escrowAddress = getFinalAddress(game, networkHrp).encode()
-  const escrowScriptHex = hex.encode(escrowScript.pkScript)
+  // Per-party escrow: the house funds the HOUSE escrow (refundable only by the
+  // house); the client funds the PLAYER escrow (refundable only by the player).
+  // Neither party's refund leaf can touch the other's stake — abort-theft fix.
+  const houseEscrowScript = getHouseEscrowScript(game)
+  const playerEscrowAddress = getPlayerEscrowAddress(game, networkHrp).encode()
+  const houseEscrowScriptHex = hex.encode(houseEscrowScript.pkScript)
 
   const gameId = uuidv4()
   // Reserve the house stake (its at-risk amount) and escrow it under the mutex
@@ -225,7 +230,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
       throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${req.tier} > ${balance.available}). Try again shortly.`)
     }
     reservations.reserve(gameId, [], req.tier)
-    houseEscrow = await escrowHouseStake(deps, escrowScript.pkScript, req.tier)
+    houseEscrow = await escrowHouseStake(deps, houseEscrowScript.pkScript, req.tier)
   })
 
   const state: TrustlessState = { finalExpiration, setupExpiration, houseEscrow }
@@ -238,7 +243,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
       playerHash: req.playerHash,
       playerChangeAddress: req.playerChangeAddress,
       houseSecretHex: Buffer.from(houseSecret).toString('hex'),
-      finalScriptHex: escrowScriptHex,
+      finalScriptHex: houseEscrowScriptHex,
       houseVtxosJson: JSON.stringify(state),
     })
   } catch (err) {
@@ -248,7 +253,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
 
   return {
     gameId,
-    escrowAddress,
+    escrowAddress: playerEscrowAddress,
     houseHash,
     housePubkey,
     serverPubkey: deps.arkInfo.signerPubkey,
@@ -279,8 +284,15 @@ export async function handleTrustlessCommit(
 
   const houseHash = hashSecret(houseSecret)
   const game2 = await buildGame(deps, game.tier, houseHash, game.player_pubkey, game.player_hash, state.finalExpiration, state.setupExpiration)
-  const escrowVtxos = [state.houseEscrow, req.playerEscrow]
-  const pot = escrowVtxos.reduce((a, e) => a + e.value, 0)
+  // Rebuild both per-party escrow scripts; the sweep spends each VTXO via its
+  // own script's win leaf.
+  const houseEscrowScript = getHouseEscrowScript(game2)
+  const playerEscrowScript = getPlayerEscrowScript(game2)
+  const escrows = [
+    { script: houseEscrowScript, ...state.houseEscrow },
+    { script: playerEscrowScript, ...req.playerEscrow },
+  ]
+  const pot = escrows.reduce((a, e) => a + e.value, 0)
   const houseAddress = await deps.wallet.getAddress()
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
 
@@ -291,8 +303,8 @@ export async function handleTrustlessCommit(
   let result: TrustlessCommitResult
   if (winner === 'house') {
     // House sweeps both escrow VTXOs via creatorWin (single-party, house+server).
-    const sweep = buildSweepTransaction(game2, deps.arkInfo, networkHrp, {
-      winner: 'house', escrowVtxos, payoutAddress: houseAddress, houseAddress, rake: 0,
+    const sweep = buildSweepTransaction(deps.arkInfo, networkHrp, {
+      winner: 'house', escrows, payoutAddress: houseAddress, houseAddress, rake: 0,
     })
     const txid = await submitOffchain(deps, sweep.arkTx, sweep.checkpoints, [0, 1], {
       inputs: [0, 1], data: [new Uint8Array(houseSecret), new Uint8Array(playerSecret)],
@@ -302,8 +314,8 @@ export async function handleTrustlessCommit(
     // Player won — the playerWin leaf needs the player's key, so the server
     // builds the sweep but the CLIENT signs + submits it. Return the PSBTs.
     const rake = await calcRake(pot, deps)
-    const sweep = buildSweepTransaction(game2, deps.arkInfo, networkHrp, {
-      winner: 'player', escrowVtxos, payoutAddress: game.player_change_address!, houseAddress, rake,
+    const sweep = buildSweepTransaction(deps.arkInfo, networkHrp, {
+      winner: 'player', escrows, payoutAddress: game.player_change_address!, houseAddress, rake,
     })
     result = {
       winner, houseSecret: game.house_secret_hex, playerSecret: req.playerSecretHex,
@@ -311,7 +323,7 @@ export async function handleTrustlessCommit(
       sweep: {
         sweepPsbt: hex.encode(sweep.arkTx.toPSBT()),
         sweepCheckpoints: sweep.checkpoints.map((c) => hex.encode(c.toPSBT())),
-        inputCount: escrowVtxos.length,
+        inputCount: escrows.length,
         witnessHex: [game.house_secret_hex, req.playerSecretHex],
       },
     }

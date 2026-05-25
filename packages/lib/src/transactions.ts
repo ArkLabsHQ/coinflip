@@ -22,7 +22,7 @@ import {
 // package.json `exports` map requires the `.js` suffix); without the
 // suffix Node's runtime resolver returns ERR_PACKAGE_PATH_NOT_EXPORTED.
 import { TAP_LEAF_VERSION, tapLeafHash } from '@scure/btc-signer/payment.js'
-import { CoinflipSetupScript, CoinflipFinalScript } from './script'
+import { CoinflipSetupScript, CoinflipFinalScript, CoinflipEscrowScript } from './script'
 import { Game, VtxoInput } from './types'
 
 function assertDefined<T>(value: T | undefined | null, name: string): asserts value is T {
@@ -83,6 +83,49 @@ export function getFinalAddress(game: Game, networkHrp: string): ArkAddress {
   assertDefined(game.serverPubkey, 'serverPubkey')
   const script = getFinalScript(game)
   return script.address(networkHrp, game.serverPubkey)
+}
+
+/**
+ * Per-party escrow scripts. Both share the win leaves but differ in an
+ * owner-scoped refund leaf, so each party can only reclaim its OWN escrow on a
+ * stall — the house cannot sweep the player's stake (abort-theft fix).
+ */
+function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScript {
+  assertDefined(game.creator, 'creator')
+  assertDefined(game.player, 'player')
+  assertDefined(game.serverPubkey, 'serverPubkey')
+  assertDefined(game.creator.hash, 'creator.hash')
+  assertDefined(game.creator.pubkey, 'creator.pubkey')
+  assertDefined(game.player.pubkey, 'player.pubkey')
+  assertDefined(game.player.hash, 'player.hash')
+  assertDefined(game.finalExpiration, 'finalExpiration')
+  return new CoinflipEscrowScript({
+    creatorPubkey: game.creator.pubkey,
+    playerPubkey: game.player.pubkey,
+    serverPubkey: game.serverPubkey,
+    creatorHash: game.creator.hash,
+    playerHash: game.player.hash,
+    finalExpiration: BigInt(game.finalExpiration),
+    refundPubkey,
+  })
+}
+
+/** Escrow the player funds; refundable only by the player after timeout. */
+export function getPlayerEscrowScript(game: Game): CoinflipEscrowScript {
+  return escrowScript(game, game.player!.pubkey!)
+}
+
+/** Escrow the house funds; refundable only by the house after timeout. */
+export function getHouseEscrowScript(game: Game): CoinflipEscrowScript {
+  return escrowScript(game, game.creator!.pubkey!)
+}
+
+export function getPlayerEscrowAddress(game: Game, networkHrp: string): ArkAddress {
+  return getPlayerEscrowScript(game).address(networkHrp, game.serverPubkey!)
+}
+
+export function getHouseEscrowAddress(game: Game, networkHrp: string): ArkAddress {
+  return getHouseEscrowScript(game).address(networkHrp, game.serverPubkey!)
 }
 
 /** Get the pot amount (2x bet) */
@@ -281,40 +324,50 @@ export function buildClaimTransaction(
   return { arkTx, checkpoints }
 }
 
+/** One escrow VTXO plus the per-party script it sits behind. */
+export interface SweepEscrow {
+  script: CoinflipEscrowScript
+  txid: string
+  vout: number
+  value: number
+}
+
 export interface SweepArgs {
   winner: 'player' | 'house'
-  /** Escrow VTXOs (both parties' single-party escrow sends sit at the same
-   * CoinflipFinal address) to sweep through the winner's leaf. */
-  escrowVtxos: { txid: string; vout: number; value: number }[]
+  /** The escrow VTXOs to sweep — each at its own per-party escrow address. */
+  escrows: SweepEscrow[]
   payoutAddress: string
   houseAddress: string
   rake: number
 }
 
 /**
- * Sweep all escrow VTXOs (per-party model) through the winner's leaf into one
- * payout. Single-party: only the winner + Ark server sign. Player win → two
- * outputs (pot−rake to player, rake to house); house win → single pot output.
- * The condition witness (both secrets) is attached by the broadcaster.
+ * Sweep the per-party escrow VTXOs through the winner's leaf into one payout.
+ * Each input is spent via ITS OWN escrow script's win leaf (the win leaves are
+ * identical across player/house escrows, but the taptrees differ, so each input
+ * carries its own leaf + tree). Single-party: only the winner + Ark server sign.
+ * Player win → two outputs (pot−rake to player, rake to house); house win →
+ * single pot output. The condition witness (both secrets) is attached by the
+ * broadcaster.
  */
 export function buildSweepTransaction(
-  game: Game,
   arkInfo: ArkInfo,
   networkHrp: string,
   args: SweepArgs,
 ): BuiltOffchainTx {
   void networkHrp
-  const finalScript = getFinalScript(game)
-  const leaf = args.winner === 'player' ? finalScript.playerWin() : finalScript.creatorWin()
-  const tapTree = finalScript.encode()
   const serverUnrollScript = decodeTapscript(
     hex.decode(arkInfo.checkpointTapscript),
   ) as CSVMultisigTapscript.Type
 
-  const inputs: ArkTxInput[] = args.escrowVtxos.map((e) => ({
-    txid: e.txid, vout: e.vout, value: e.value, tapLeafScript: leaf, tapTree,
+  const inputs: ArkTxInput[] = args.escrows.map((e) => ({
+    txid: e.txid,
+    vout: e.vout,
+    value: e.value,
+    tapLeafScript: args.winner === 'player' ? e.script.playerWin() : e.script.creatorWin(),
+    tapTree: e.script.encode(),
   }))
-  const pot = args.escrowVtxos.reduce((a, e) => a + e.value, 0)
+  const pot = args.escrows.reduce((a, e) => a + e.value, 0)
 
   const winnerAddr = ArkAddress.decode(args.payoutAddress)
   const outputs: { script: Uint8Array; amount: bigint }[] = []
@@ -326,6 +379,48 @@ export function buildSweepTransaction(
   }
 
   const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
+  return { arkTx, checkpoints }
+}
+
+export interface RefundArgs {
+  escrowScript: CoinflipEscrowScript
+  txid: string
+  vout: number
+  value: number
+  /** Address the funder reclaims to. */
+  refundAddress: string
+}
+
+/**
+ * Refund a single escrow VTXO to its funder via the `refund` leaf after the
+ * timeout. Only the funder (+ server) can sign this leaf, so a stalled game
+ * lets each side reclaim its own stake — and only its own. The CLTV timelock is
+ * baked into the leaf and enforced by arkd at the VTXO layer (mirrors how
+ * auto-claim.ts spends the CLTV abort leaf via buildOffchainTx).
+ */
+export function buildRefundTransaction(
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: RefundArgs,
+): BuiltOffchainTx {
+  void networkHrp
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const input: ArkTxInput = {
+    txid: args.txid,
+    vout: args.vout,
+    value: args.value,
+    tapLeafScript: args.escrowScript.refund(),
+    tapTree: args.escrowScript.encode(),
+  }
+  const refundAddr = ArkAddress.decode(args.refundAddress)
+  const { arkTx, checkpoints } = buildOffchainTx(
+    [input],
+    [{ script: refundAddr.pkScript, amount: BigInt(args.value) }],
+    serverUnrollScript,
+  )
   return { arkTx, checkpoints }
 }
 

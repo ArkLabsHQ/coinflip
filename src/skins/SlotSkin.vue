@@ -1,15 +1,23 @@
 <template>
   <div class="slot-machine">
-    <!-- The target line you must out-rank (read left-to-right). -->
+    <!-- The target hand you must out-rank (read left-to-right). -->
     <div class="slot-target">
       <span class="t-label">BEAT</span>
-      <span class="t-sym" v-for="(s, i) in targetSymbols" :key="i">{{ s }}</span>
+      <span class="t-card" v-for="(s, i) in targetSymbols" :key="i" :class="{ red: isRed(s) }">
+        <b>{{ s }}</b>{{ SUIT[s] }}
+      </span>
     </div>
 
     <div class="slot-frame" :class="tint">
       <div class="reel" v-for="(reel, i) in reels" :key="i" :class="{ spinning: reel.spinning }">
         <div class="reel-strip" :style="reel.spinning ? '' : `transform: translateY(-${reel.targetIndex * 64}px)`">
-          <div class="reel-cell" v-for="(sym, j) in reel.symbols" :key="j" :class="{ top: sym === TOP }">{{ sym }}</div>
+          <div class="reel-cell" v-for="(sym, j) in reel.symbols" :key="j">
+            <div class="card" :class="{ red: isRed(sym), ace: sym === TOP }">
+              <span class="corner tl"><b>{{ sym }}</b><i>{{ SUIT[sym] }}</i></span>
+              <span class="pip">{{ SUIT[sym] }}</span>
+              <span class="corner br"><b>{{ sym }}</b><i>{{ SUIT[sym] }}</i></span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -30,6 +38,11 @@ const SYMBOLS = ['10', 'J', 'Q', 'K', 'A']
 const SLOT_BASE = SYMBOLS.length
 const SLOT_REELS = 3
 const TOP = SYMBOLS[SYMBOLS.length - 1] // 'A' — the top rank
+
+// A suit per rank so each reel reads as a real card face (suit is decorative —
+// only the rank decides the beat-the-target order).
+const SUIT: Record<string, string> = { '10': '♣', J: '♦', Q: '♥', K: '♠', A: '♠' }
+const isRed = (rank: string): boolean => SUIT[rank] === '♥' || SUIT[rank] === '♦'
 
 interface Reel { symbols: string[]; targetIndex: number; spinning: boolean }
 
@@ -89,7 +102,7 @@ export default defineComponent({
       return '« BEAT THE TARGET · A HIGH »'
     })
 
-    return { reels, targetSymbols, ruleLabel, tint, TOP }
+    return { reels, targetSymbols, ruleLabel, tint, TOP, SUIT, isRed }
   },
 })
 </script>
@@ -112,7 +125,21 @@ export default defineComponent({
   opacity: 0.7;
 }
 .t-label { font-size: 0.6rem; letter-spacing: 2px; font-weight: 800; color: var(--text-muted); }
-.t-sym { font-size: 1.05rem; font-weight: 800; width: 34px; text-align: center; color: var(--text); }
+.t-card {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+  min-width: 30px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  background: linear-gradient(160deg, #ffffff 0%, #f0f0ea 100%);
+  color: #1a1a1a;
+  font-weight: 800;
+  font-size: 0.82rem;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.t-card.red { color: #c8102e; }
 
 .slot-frame {
   display: flex;
@@ -147,14 +174,41 @@ export default defineComponent({
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 2rem;
-  font-weight: 800;
-  font-family: ui-monospace, monospace;
-  color: var(--text);
+  padding: 4px;
   background: radial-gradient(circle at 50% 50%, #1a1413 0%, #000 100%);
 }
-/* Highlight the top (jackpot) symbol. */
-.reel-cell.top { color: var(--gold); text-shadow: 0 0 8px var(--gold-glow); }
+/* Each cell is a playing-card face — rank + suit corners, big centre pip. */
+.card {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 6px;
+  background: linear-gradient(160deg, #ffffff 0%, #ecece4 100%);
+  color: #1a1a1a;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18), 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+.card.red { color: #c8102e; }
+.card.ace { box-shadow: inset 0 0 0 1.5px var(--gold), 0 0 10px var(--gold-glow); }
+.corner {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 0.85;
+  font-weight: 800;
+}
+.corner b { font-size: 0.72rem; }
+.corner i { font-style: normal; font-size: 0.62rem; }
+.corner.tl { top: 3px; left: 4px; }
+.corner.br { bottom: 3px; right: 4px; transform: rotate(180deg); }
+.pip {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.7rem;
+}
 .slot-base {
   font-size: 0.6rem;
   letter-spacing: 1.5px;
@@ -171,6 +225,7 @@ export default defineComponent({
 
 @media (max-width: 640px) {
   .reel { width: 54px; height: 82px; }
-  .reel-cell { height: 54px; font-size: 2.2rem; }
+  .reel-cell { height: 54px; }
+  .pip { font-size: 1.4rem; }
 }
 </style>

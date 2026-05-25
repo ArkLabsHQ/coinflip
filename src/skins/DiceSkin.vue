@@ -49,6 +49,19 @@ export default defineComponent({
     let box: any = null
     let disposed = false
 
+    // Force the 3D dice onto specific faces (the @ notation makes the physics
+    // land there → provably fair). dice-box only runs its render loop while dice
+    // are in motion, so this is also what puts anything on the (otherwise black)
+    // canvas in the first place.
+    function showDice(faces: number[]) {
+      try {
+        box?.clearDice?.()
+        box?.roll(`${faces.length}d6@${faces.join(',')}`)
+      } catch (e) {
+        console.warn('[dice] roll failed:', e)
+      }
+    }
+
     onMounted(async () => {
       try {
         const DiceBox = (await import('@3d-dice/dice-box-threejs')).default
@@ -57,14 +70,20 @@ export default defineComponent({
           assetPath: '/dice-assets/',
           theme_colorset: 'white',
           theme_surface: 'green-felt',
-          theme_material: 'glass',
+          theme_material: 'plastic', // 'glass' needs an envmap.jpg we don't ship → renders dark
           gravity_multiplier: 400,
           light_intensity: 0.9,
           baseScale: 90,
           sounds: false,
         })
         if (typeof box.initialize === 'function') await box.initialize()
+        if (disposed) return
         ready.value = true
+        // Populate the felt at rest with the target dice (otherwise the canvas
+        // stays black until the first roll). A short delay lets assets finish.
+        if (props.state.phase !== 'resolved') {
+          setTimeout(() => { if (!disposed) showDice(targetFaces.value) }, 400)
+        }
       } catch (e) {
         console.warn('[dice] dice-box init failed:', e)
       }
@@ -76,23 +95,14 @@ export default defineComponent({
       box = null
     })
 
-    // Roll onto the server-determined value when the game resolves — the dice
-    // are FORCED to the real roll (provably fair), not a random physics result.
+    // On resolve, re-roll the 3D dice onto the server's actual roll. The dice
+    // stay on the felt afterwards (no clear on idle), so the stage is never blank.
     watch(() => props.state.phase, (phase, old) => {
       if (phase === 'resolved' && old === 'flipping' && props.state.outcome) {
         const roll = props.state.outcome.roll ?? threshold.value
-        const faces = facesOf(roll, diceCount.value)
         tint.value = props.state.outcome.won ? 'win' : 'loss'
-        try {
-          box?.clearDice?.()
-          box?.roll(`${diceCount.value}d6@${faces.join(',')}`)
-        } catch (e) {
-          console.warn('[dice] roll failed:', e)
-        }
+        showDice(facesOf(roll, diceCount.value))
       } else if (phase === 'flipping') {
-        tint.value = ''
-        try { box?.clearDice?.() } catch { /* ignore */ }
-      } else if (phase === 'idle') {
         tint.value = ''
       }
     })

@@ -1,6 +1,25 @@
 import { Router, Request, Response } from 'express'
 import path from 'path'
+import { isVtxoExpiringSoon } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
+import { reservations, ensureHouseVtxoPool } from '../vtxo-pool.js'
+
+/** Same buffer the game-engine uses to treat a VTXO as "expiring soon". */
+const VTXO_EXPIRING_BUFFER_MS = 30 * 60_000
+
+/** How long the settle endpoint waits before returning "in progress". */
+const SETTLE_TIMEOUT_MS = 60_000
+
+/** Resolve to the promise's value, or `{ timedOut: true }` after `ms`. */
+function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+): Promise<{ timedOut: false; value: T } | { timedOut: true }> {
+  return Promise.race([
+    p.then((value) => ({ timedOut: false as const, value })),
+    new Promise<{ timedOut: true }>((resolve) => setTimeout(() => resolve({ timedOut: true }), ms)),
+  ])
+}
 
 export function createAdminRoutes(deps: AppDeps): Router {
   const router = Router()
@@ -159,6 +178,127 @@ export function createAdminRoutes(deps: AppDeps): Router {
       })))
     } catch (err) {
       res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /api/vtxos — house VTXOs with value, expiry, and which game (if any)
+  // currently reserves each one (cross-referenced against the in-memory ledger).
+  router.get('/api/vtxos', async (_req: Request, res: Response) => {
+    try {
+      const vtxos = await deps.wallet.getVtxos()
+      const outpointToGame = new Map<string, string>()
+      for (const r of reservations.snapshot()) {
+        for (const op of r.outpoints) outpointToGame.set(op, r.gameId)
+      }
+      res.json(
+        vtxos.map((v) => ({
+          txid: v.txid,
+          vout: v.vout,
+          value: v.value,
+          batchExpiry: v.virtualStatus?.batchExpiry ?? null,
+          expiringSoon: isVtxoExpiringSoon(v, VTXO_EXPIRING_BUFFER_MS),
+          reservedBy: outpointToGame.get(`${v.txid}:${v.vout}`) ?? null,
+        })),
+      )
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
+  // GET /api/reservations — the in-flight reservation ledger (which VTXOs +
+  // liability are committed to which pending games) plus the rolled-up totals.
+  router.get('/api/reservations', (_req: Request, res: Response) => {
+    res.json({
+      activeGames: reservations.activeGames(),
+      totalLiability: reservations.totalLiability(),
+      reservations: reservations.snapshot(),
+    })
+  })
+
+  // POST /api/wallet/send — move house funds out to an address (Ark or on-chain;
+  // sendBitcoin routes by address type). Guards against draining funds reserved
+  // for in-flight games unless { force: true } is passed.
+  router.post('/api/wallet/send', async (req: Request, res: Response) => {
+    try {
+      const { address, force } = req.body
+      const amount = parseInt(String(req.body.amount), 10)
+      if (typeof address !== 'string' || !address.trim()) {
+        res.status(400).json({ error: 'address is required' })
+        return
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        res.status(400).json({ error: 'amount must be a positive number of sats' })
+        return
+      }
+      const balance = await deps.wallet.getBalance()
+      const liability = reservations.totalLiability()
+      const withdrawable = Math.max(0, balance.available - liability)
+      if (amount > withdrawable && !force) {
+        res.status(400).json({
+          error: `Amount ${amount} exceeds withdrawable ${withdrawable} (available ${balance.available} − reserved liability ${liability}). Pass force:true to override.`,
+          available: balance.available,
+          liability,
+          withdrawable,
+        })
+        return
+      }
+      const txid = await deps.wallet.sendBitcoin({ address: address.trim(), amount })
+      res.json({ txid })
+    } catch (err) {
+      res.status(500).json({ error: String(err instanceof Error ? err.message : err) })
+    }
+  })
+
+  // POST /api/wallet/settle — join a settlement round to renew (re-anchor)
+  // expiring VTXOs and confirm boarding deposits into Ark. settle() blocks until
+  // a batch round forms, which can be slow (or never, if there's nothing to
+  // settle), so we bound it: past SETTLE_TIMEOUT_MS we return 202 and let it
+  // finish in the background rather than hanging the HTTP request.
+  router.post('/api/wallet/settle', async (_req: Request, res: Response) => {
+    try {
+      const settlePromise = deps.wallet.settle()
+      // Ensure a late rejection (after we've already responded) can't surface as
+      // an unhandled rejection and crash the process.
+      settlePromise.catch((e) =>
+        console.warn('[admin] background settle failed:', e instanceof Error ? e.message : e),
+      )
+      const outcome = await withTimeout(settlePromise, SETTLE_TIMEOUT_MS)
+      if (outcome.timedOut) {
+        res.status(202).json({
+          status: 'in_progress',
+          message:
+            'Settlement is taking longer than expected (waiting for a batch round). It will continue in the background — refresh balances shortly.',
+        })
+        return
+      }
+      const balance = await deps.wallet.getBalance()
+      res.json({ txid: outcome.value ?? null, balance })
+    } catch (err) {
+      res.status(500).json({ error: String(err instanceof Error ? err.message : err) })
+    }
+  })
+
+  // POST /api/wallet/fragment — split large house VTXOs into `pieceSize`-sized
+  // pieces so concurrent games can each reserve their own (redistribute the
+  // pool). Defaults mirror the background pool maintenance.
+  router.post('/api/wallet/fragment', async (req: Request, res: Response) => {
+    try {
+      const pieceSize = parseInt(String(req.body.pieceSize ?? 50000), 10)
+      const targetCount =
+        req.body.targetCount !== undefined ? parseInt(String(req.body.targetCount), 10) : undefined
+      if (!Number.isFinite(pieceSize) || pieceSize <= 0) {
+        res.status(400).json({ error: 'pieceSize must be a positive number of sats' })
+        return
+      }
+      if (targetCount !== undefined && (!Number.isFinite(targetCount) || targetCount <= 0)) {
+        res.status(400).json({ error: 'targetCount must be a positive number' })
+        return
+      }
+      const created = await ensureHouseVtxoPool(deps, { targetCount, pieceSize })
+      const vtxos = await deps.wallet.getVtxos()
+      res.json({ created, vtxoCount: vtxos.length })
+    } catch (err) {
+      res.status(500).json({ error: String(err instanceof Error ? err.message : err) })
     }
   })
 

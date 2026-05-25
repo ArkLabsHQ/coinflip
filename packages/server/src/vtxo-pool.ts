@@ -142,6 +142,15 @@ export class VtxoReservations {
   activeGames(): number {
     return this.byGame.size
   }
+
+  /** Point-in-time view of the ledger for admin introspection (read-only). */
+  snapshot(): Array<{ gameId: string; outpoints: string[]; liability: number }> {
+    return [...this.byGame.entries()].map(([gameId, r]) => ({
+      gameId,
+      outpoints: [...r.outpoints],
+      liability: r.liability,
+    }))
+  }
 }
 
 /** Process-wide singletons. Game-engine selection serializes through these. */

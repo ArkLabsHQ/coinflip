@@ -114,6 +114,11 @@ interface TrustlessState {
    * return this instead of re-submitting (the escrow VTXOs are already spent).
    */
   resolveTxid?: string
+  /**
+   * Set once the house escrow has been reclaimed via refund on a STALLED game
+   * (recoverOrphanedHouseEscrows). Idempotency guard so recovery runs once.
+   */
+  houseRefundTxid?: string
 }
 
 /**
@@ -535,6 +540,76 @@ export async function handleTrustlessRefund(
     finalExpiration: state.finalExpiration,
     refundAddress: game.player_change_address,
   }
+}
+
+/**
+ * Reclaim orphaned HOUSE escrows for stalled (expired) games whose refund CLTV
+ * (finalExpiration) has matured. The per-party model means each side reclaims
+ * ONLY its own escrow on a stall — the player does so client-side (see the
+ * client reclaim flow); this is the house's counterpart. Without it the house's
+ * stake on every abandoned game would sit stuck at the escrow address — a slow
+ * fund leak at scale. Idempotent via the persisted `houseRefundTxid`, so it's
+ * safe to run on a timer and at boot. Returns the number of escrows reclaimed.
+ */
+export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number> {
+  const now = Math.floor(Date.now() / 1000)
+  const expired = await deps.repos.games.list({ status: 'expired', limit: 500 })
+  let recovered = 0
+  for (const game of expired) {
+    if (game.player_choice !== 'trustless' || !game.house_vtxos_json) continue
+    let state: TrustlessState
+    try {
+      state = JSON.parse(game.house_vtxos_json) as TrustlessState
+    } catch {
+      continue
+    }
+    if (!state.houseEscrow || state.houseRefundTxid) continue // not trustless, or already reclaimed
+    if (state.finalExpiration > now) continue // refund CLTV not matured yet
+
+    try {
+      const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
+      const game2 = await buildGame(
+        deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
+        state.finalExpiration, state.setupExpiration,
+      )
+      const houseEscrowScript = getHouseEscrowScript(game2)
+      const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
+      const refund = buildRefundTransaction(deps.arkInfo, networkHrp, {
+        escrowScript: houseEscrowScript,
+        txid: state.houseEscrow.txid,
+        vout: state.houseEscrow.vout,
+        value: state.houseEscrow.value,
+        refundAddress: await deps.wallet.getAddress(),
+      })
+      const txid = await submitOffchain(deps, refund.arkTx, refund.checkpoints, [0])
+      await deps.repos.games.update(game.id, {
+        houseVtxosJson: JSON.stringify({ ...state, houseRefundTxid: txid } as TrustlessState),
+      })
+      reservations.release(game.id)
+      recovered++
+      console.log(`[recovery] reclaimed house escrow for stalled game ${game.id} (${state.houseEscrow.value} sats), txid ${txid}`)
+    } catch (err) {
+      // Most likely the CLTV isn't accepted yet or the escrow was already spent;
+      // leave the game for a later pass rather than marking it reclaimed.
+      console.warn(`[recovery] house escrow reclaim failed for game ${game.id}:`, err instanceof Error ? err.message : err)
+    }
+  }
+  if (recovered > 0) console.log(`[recovery] reclaimed ${recovered} orphaned house escrow(s)`)
+  return recovered
+}
+
+/**
+ * Run house-escrow recovery shortly after boot, then on a timer. Pairs with the
+ * 5-min expiry sweep (game-engine) but fires on the longer `finalExpiration`
+ * CLTV cadence, so stalled games' house stakes are reclaimed once spendable.
+ */
+export function startEscrowRecoveryTimer(deps: AppDeps, intervalMs = 120_000): NodeJS.Timeout {
+  const tick = () =>
+    recoverOrphanedHouseEscrows(deps).catch((e) =>
+      console.error('[recovery] tick failed:', e instanceof Error ? e.message : e),
+    )
+  setTimeout(tick, 5_000)
+  return setInterval(tick, intervalMs)
 }
 
 // Re-export for callers that need the row shape.

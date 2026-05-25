@@ -21,6 +21,7 @@ import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
 import { attachContractEventHandler, initContractManager } from './contract-manager.js'
 import { startExpiryTimer } from './game-engine.js'
+import { startEscrowRecoveryTimer } from './trustless-game.js'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
 import { createAdminRoutes } from './admin/routes.js'
@@ -39,6 +40,8 @@ export {
   handleTrustlessPlay,
   handleTrustlessCommit,
   handleTrustlessRefund,
+  recoverOrphanedHouseEscrows,
+  startEscrowRecoveryTimer,
   type TrustlessPlayRequest,
   type TrustlessPlayResult,
   type TrustlessCommitRequest,
@@ -94,6 +97,10 @@ async function main() {
 
   // Start game expiry timer
   startExpiryTimer(deps)
+
+  // Reclaim orphaned house escrows from stalled games once their refund CLTV
+  // matures, so abandoned games don't slowly lock up house funds.
+  startEscrowRecoveryTimer(deps)
 
   // Public API server
   const publicApp = express()

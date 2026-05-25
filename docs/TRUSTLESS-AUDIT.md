@@ -26,7 +26,16 @@ shared win leaves. The house has no spendable path on the player's escrow except
 `creatorWin`-when-house-wins → **theft is unrepresentable**. And the player can
 reclaim a stalled escrow via the owner-only CLTV refund leaf (e2e verified:
 escrow → refund → funds back; CLTV spends offchain without an explicit
-nLockTime). Original analysis kept below for the record.
+nLockTime).
+
+**Now wired end-to-end (`40b760a`, `cd4a7bd`):** the player no longer needs to
+hand-craft that refund. `POST /api/game/:id/refund` builds the unsigned refund
+tx (server can't redirect it — pays the player's address, needs the player's
+key), and the client fetches + stashes it right after escrowing, BEFORE
+revealing. If the game then stalls, `StalledBets.vue` surfaces a "Reclaim"
+action that signs + submits the stashed refund once the CLTV lifts — so a
+stalled/crashed/malicious server can never strand the player's stake. The house
+side is covered by the recovery job in #4. Original analysis kept below.
 
 ### 🔴 1. Escrow `abort` leaf lets the house steal the player's stake
 The shared escrow is `CoinflipFinalScript`, whose `abort` leaf is
@@ -67,13 +76,20 @@ so the house could over-commit after a restart. Covered deterministically by
 `packages/e2e/src/vtxo-pool.unit.test.ts` (trustless object + legacy array +
 malformed/null/empty).
 
-**Still open (folded into #3 — needs on-chain escrow watching):** on boot,
-reconcile pending games whose escrow is already spent on-Ark — in particular the
+**Done — orphaned house-escrow reclaim:** `recoverOrphanedHouseEscrows` +
+`startEscrowRecoveryTimer` reclaim the HOUSE's escrow on stalled (expired) games
+once the refund CLTV matures, so abandoned games don't slowly lock up house
+funds. It runs at boot + on a 2-min timer, is idempotent via a persisted
+`houseRefundTxid`, and respects the timing gotcha (it fires on the
+`finalExpiration` CLTV cadence, NOT the 5-min `expirePending` sweep). This is the
+house-side counterpart to the player's client reclaim (see #2). e2e-verified in
+`escrow-recovery.test.ts` (reclaims a matured escrow with a real refund txid;
+skips not-yet-matured games; idempotent on a second pass).
+
+**Still open (folded into #3 — needs on-chain escrow watching):** the
 crash-mid-sweep window noted in #7 (house-win sweep submitted, status not yet
-persisted) — and reclaim orphaned house escrows via the `refund` leaf. Timing
-gotcha to respect: `expirePending` flips pending→expired at 5 min, but the
-refund CLTV only matures at `finalExpiration` (~20 min), so the reclaim must be
-driven off the CLTV maturity, not the 5-min expiry sweep.
+persisted) — boot reconciliation should detect the already-spent escrow and mark
+the game resolved. Narrow window; lower priority than the fund-leak reclaim above.
 
 ### 🟠 5. Concurrency & VTXO pool for thousands of players (partial)
 **Done:** concurrent plays now escrow in PARALLEL without colliding. Liability

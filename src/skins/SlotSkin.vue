@@ -22,13 +22,14 @@
 import { defineComponent, computed, ref, watch, type PropType } from 'vue'
 import type { SkinState } from './types'
 
-// Ranked low → high; ₿ is the top symbol. Your reels beat the target when they
-// out-rank it reading left-to-right. These MUST match slotLadder() in index.ts
+// Card ranks, low → high (10 < J < Q < K < A) — a familiar, self-evident order,
+// so "beat the target" needs no legend. Your reels beat the target when they
+// out-rank it reading left-to-right. Length MUST equal SLOT_BASE in index.ts
 // (SLOT_BASE = SYMBOLS.length, SLOT_REELS reels → n = SLOT_BASE^SLOT_REELS).
-const SYMBOLS = ['♦', '◆', '⚡', '★', '₿']
+const SYMBOLS = ['10', 'J', 'Q', 'K', 'A']
 const SLOT_BASE = SYMBOLS.length
 const SLOT_REELS = 3
-const TOP = SYMBOLS[SYMBOLS.length - 1]
+const TOP = SYMBOLS[SYMBOLS.length - 1] // 'A' — the top rank
 
 interface Reel { symbols: string[]; targetIndex: number; spinning: boolean }
 
@@ -85,7 +86,7 @@ export default defineComponent({
       if (props.state.phase === 'resolved' && props.state.outcome) {
         return props.state.outcome.won ? '« YOU OUT-RANKED IT »' : '« OUT-RANKED »'
       }
-      return `« BEAT THE TARGET · ${SYMBOLS.join(' ')} »`
+      return '« BEAT THE TARGET · A HIGH »'
     })
 
     return { reels, targetSymbols, ruleLabel, tint, TOP }
@@ -111,7 +112,7 @@ export default defineComponent({
   opacity: 0.7;
 }
 .t-label { font-size: 0.6rem; letter-spacing: 2px; font-weight: 800; color: var(--text-muted); }
-.t-sym { font-size: 1.3rem; width: 28px; text-align: center; color: var(--text); }
+.t-sym { font-size: 1.05rem; font-weight: 800; width: 34px; text-align: center; color: var(--text); }
 
 .slot-frame {
   display: flex;
@@ -146,8 +147,9 @@ export default defineComponent({
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 2.6rem;
+  font-size: 2rem;
   font-weight: 800;
+  font-family: ui-monospace, monospace;
   color: var(--text);
   background: radial-gradient(circle at 50% 50%, #1a1413 0%, #000 100%);
 }

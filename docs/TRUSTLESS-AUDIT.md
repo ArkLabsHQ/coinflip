@@ -164,10 +164,20 @@ optional `oddsN`/`oddsTarget` and otherwise reuses the whole per-party escrow
 winner — and only the winner — sweeps across player/house wins, both mod
 wraparounds, and the `roll == target` boundary; the loser's leaf is rejected.
 
-**Still open:** wire `oddsN`/`oddsTarget` through the server (`/play` accepts an
-odds choice; persist; use in escrow + sweep + `determineVariableWinner`) and the
-client (odds picker UI). The trustless settlement machinery is unchanged — only
-the condition + odds parameters flow through.
+**Done — server wiring (house-edge model):** `/play` accepts `oddsN`/`oddsTarget`;
+the player stakes `tier` while the house stakes a HOUSE-EDGED multiple
+(`computeHouseStake = floor(tier·(n−target)/target·(1−edge))`, edge configurable
+via `variable_odds_edge_bps`, default 3%), so payouts reflect the odds and the
+edge is the house's cut (no rake on variable-odds — it would double-charge).
+Odds are persisted in `TrustlessState` so commit/refund/recovery rebuild the
+SAME escrow script; commit resolves via `determineVariableWinner`. Liability,
+dust-safe VTXO pick, concurrency, idempotency, player refund + house recovery
+all apply unchanged. Verified: `odds-math.unit.test.ts` (stake math) +
+`trustless-api.test.ts` variable-odds case (asymmetric stakes, pot = player +
+house stake, winner sweeps the full pot, rake 0).
+
+**Still open:** client odds-picker UI (pick win probability → payout multiple;
+generate a variable-length secret in-browser; pass `oddsN`/`oddsTarget`).
 
 ### 🟡 9. Rake accounting
 Sub-dust rake is currently waived. Define production rake (which output, dust

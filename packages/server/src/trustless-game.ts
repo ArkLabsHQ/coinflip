@@ -17,6 +17,8 @@ import { base64, hex } from '@scure/base'
 import {
   generateSecret,
   determineWinner,
+  generateVariableSecret,
+  determineVariableWinner,
   getPlayerEscrowScript,
   getHouseEscrowScript,
   getPlayerEscrowAddress,
@@ -50,6 +52,13 @@ export interface TrustlessPlayRequest {
   playerPubkey: string
   playerHash: string
   playerChangeAddress: string
+  /**
+   * Variable-odds: player wins with probability `oddsTarget/oddsN`. Both or
+   * neither — omit for the 50/50 coin. The house stakes a (house-edged) multiple
+   * so payouts reflect the odds; the player still stakes `tier`.
+   */
+  oddsN?: number
+  oddsTarget?: number
 }
 
 export interface TrustlessPlayResult {
@@ -62,6 +71,11 @@ export interface TrustlessPlayResult {
   finalExpiration: number
   /** The house's escrow VTXO, so the client can build the winner sweep. */
   houseEscrow: Outpoint
+  /** Variable-odds echo + economics so the client can show/verify the bet. */
+  oddsN?: number
+  oddsTarget?: number
+  /** Total pot the winner sweeps = player stake (`betAmount`) + house stake. */
+  pot: number
 }
 
 export interface TrustlessCommitRequest {
@@ -119,6 +133,12 @@ interface TrustlessState {
    * (recoverOrphanedHouseEscrows). Idempotency guard so recovery runs once.
    */
   houseRefundTxid?: string
+  /**
+   * Variable-odds parameters (unset → 50/50 coin). Persisted so commit/refund/
+   * recovery rebuild the SAME escrow script (the condition depends on them).
+   */
+  oddsN?: number
+  oddsTarget?: number
 }
 
 /**
@@ -157,6 +177,7 @@ async function buildGame(
   playerHashHex: string,
   finalExpiration: number,
   setupExpiration: number,
+  odds?: { oddsN: number; oddsTarget: number },
 ): Promise<Game> {
   const housePub = await deps.identity.xOnlyPublicKey()
   const playerPub = toXOnly(hex.decode(playerPubkeyHex))
@@ -169,7 +190,33 @@ async function buildGame(
     finalExpiration,
     creator: { pubkey: housePub, hash: hex.decode(houseHashHex) },
     player: { pubkey: playerPub, hash: hex.decode(playerHashHex) },
+    oddsN: odds?.oddsN,
+    oddsTarget: odds?.oddsTarget,
   }
+}
+
+/**
+ * House stake for a variable-odds game with a fixed house edge. A FAIR game has
+ * the house stake `playerStake·(n−target)/target` (so EV=0); the edge shaves
+ * that down so the player wins less than fair (the house's expected cut). Edge
+ * is in basis points (300 = 3%). Pure + integer for deterministic agreement
+ * with what's escrowed. Unit-tested.
+ */
+export function computeHouseStake(playerStake: number, n: number, target: number, edgeBps: number): number {
+  return Math.floor((playerStake * (n - target) * (10000 - edgeBps)) / (target * 10000))
+}
+
+/** Configured variable-odds house edge in basis points (default 3%). */
+async function getOddsEdgeBps(deps: AppDeps): Promise<number> {
+  const v = parseInt((await deps.repos.config.get('variable_odds_edge_bps')) || '300', 10)
+  return Number.isFinite(v) && v >= 0 && v < 10000 ? v : 300
+}
+
+/** Extract variable-odds params from persisted state (undefined → coin). */
+function oddsFromState(state: TrustlessState): { oddsN: number; oddsTarget: number } | undefined {
+  return state.oddsN !== undefined && state.oddsTarget !== undefined
+    ? { oddsN: state.oddsN, oddsTarget: state.oddsTarget }
+    : undefined
 }
 
 /**
@@ -237,7 +284,27 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     throw new Error('Too many pending games. Complete or wait for existing games to expire.')
   }
 
-  const houseSecret = generateSecret(Math.random() < 0.5 ? 'heads' : 'tails')
+  // Variable-odds (both params set) vs. the 50/50 coin. The player always stakes
+  // `tier`; the house stakes a house-edged multiple so payouts reflect the odds.
+  const dust = Number(deps.arkInfo.dust ?? 546n)
+  const isVariable = req.oddsN !== undefined && req.oddsTarget !== undefined
+  let houseStake = req.tier
+  let odds: { oddsN: number; oddsTarget: number } | undefined
+  if (isVariable) {
+    const n = req.oddsN as number, target = req.oddsTarget as number
+    if (!Number.isInteger(n) || n < 2 || !Number.isInteger(target) || target < 1 || target >= n) {
+      throw new Error(`Invalid odds: need oddsN>=2 and 1<=oddsTarget<oddsN (got n=${n}, target=${target})`)
+    }
+    houseStake = computeHouseStake(req.tier, n, target, await getOddsEdgeBps(deps))
+    if (houseStake < dust) {
+      throw new Error(`Odds ${target}/${n} at tier ${req.tier} give a sub-dust house stake (${houseStake}); raise the tier or the win probability.`)
+    }
+    odds = { oddsN: n, oddsTarget: target }
+  }
+
+  const houseSecret = isVariable
+    ? generateVariableSecret(req.oddsN as number)
+    : generateSecret(Math.random() < 0.5 ? 'heads' : 'tails')
   const houseHash = hashSecret(houseSecret)
   const housePubkey = Buffer.from(await deps.identity.compressedPublicKey()).toString('hex')
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
@@ -245,7 +312,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   const finalExpiration = now + 1200
   const setupExpiration = now + 600
 
-  const game = await buildGame(deps, req.tier, houseHash, req.playerPubkey, req.playerHash, finalExpiration, setupExpiration)
+  const game = await buildGame(deps, req.tier, houseHash, req.playerPubkey, req.playerHash, finalExpiration, setupExpiration, odds)
   // Per-party escrow: the house funds the HOUSE escrow (refundable only by the
   // house); the client funds the PLAYER escrow (refundable only by the player).
   // Neither party's refund leaf can touch the other's stake — abort-theft fix.
@@ -255,38 +322,35 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
 
   const gameId = uuidv4()
   // Atomically (under the selection mutex) check liability and pick + reserve a
-  // free house VTXO; then escrow OUTSIDE the mutex so concurrent plays run in
-  // parallel, each on its own reserved VTXO.
+  // free house VTXO covering the HOUSE STAKE; then escrow OUTSIDE the mutex so
+  // concurrent plays run in parallel, each on its own reserved VTXO.
   let houseEscrow!: Outpoint
   let candidate!: ExtendedVirtualCoin
   await selectionMutex.runExclusive(async () => {
     const balance = await deps.wallet.getBalance()
-    if (reservations.totalLiability() + req.tier > balance.available) {
-      throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${req.tier} > ${balance.available}). Try again shortly.`)
+    if (reservations.totalLiability() + houseStake > balance.available) {
+      throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${houseStake} > ${balance.available}). Try again shortly.`)
     }
     // Pick a FREE, dust-safe VTXO and reserve ITS OUTPOINT (not just liability):
     // the reservation excludes it from every other play's selection even before
     // this spend propagates to getVtxos(), so two plays can never escrow from
-    // the same VTXO. `pickEscrowVtxo` skips VTXOs that would leave a sub-dust
-    // change output (rejected on mainnet). No fallback to a reserved VTXO — if
-    // the pool is momentarily exhausted we surface a retryable "busy" rather
-    // than risk a double-spend.
-    const dust = Number(deps.arkInfo.dust ?? 546n)
-    const picked = pickEscrowVtxo(freeHouseVtxos(await deps.wallet.getVtxos()), req.tier, dust)
+    // the same VTXO. No fallback to a reserved VTXO — pool exhaustion surfaces a
+    // retryable "busy" rather than risking a double-spend.
+    const picked = pickEscrowVtxo(freeHouseVtxos(await deps.wallet.getVtxos()), houseStake, dust)
     if (!picked) {
-      throw new HouseBusyError(`House has no free dust-safe VTXO covering ${req.tier} sats (pool may need refragmenting). Try again shortly.`)
+      throw new HouseBusyError(`House has no free dust-safe VTXO covering ${houseStake} sats (pool may need refragmenting). Try again shortly.`)
     }
     candidate = picked
-    reservations.reserve(gameId, [outpointKey(picked.txid, picked.vout)], req.tier)
+    reservations.reserve(gameId, [outpointKey(picked.txid, picked.vout)], houseStake)
   })
   try {
-    houseEscrow = await escrowHouseStakeFrom(deps, candidate, houseEscrowScript.pkScript, req.tier)
+    houseEscrow = await escrowHouseStakeFrom(deps, candidate, houseEscrowScript.pkScript, houseStake)
   } catch (err) {
     reservations.release(gameId)
     throw err
   }
 
-  const state: TrustlessState = { finalExpiration, setupExpiration, houseEscrow }
+  const state: TrustlessState = { finalExpiration, setupExpiration, houseEscrow, ...odds }
   try {
     await deps.repos.games.save({
       id: gameId,
@@ -313,6 +377,9 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     betAmount: req.tier,
     finalExpiration,
     houseEscrow,
+    oddsN: odds?.oddsN,
+    oddsTarget: odds?.oddsTarget,
+    pot: req.tier + houseStake,
   }
 }
 
@@ -345,13 +412,17 @@ async function buildCommitContext(
 ): Promise<CommitContext> {
   const houseSecret = new Uint8Array(Buffer.from(game.house_secret_hex, 'hex'))
   const playerSecret = new Uint8Array(Buffer.from(playerSecretHex, 'hex'))
-  const winnerRole = determineWinner(houseSecret, playerSecret)
+  // Variable-odds resolve via the mod-N rule; the coin via secret-length parity.
+  const odds = oddsFromState(state)
+  const winnerRole = odds
+    ? determineVariableWinner(houseSecret, playerSecret, odds.oddsN, odds.oddsTarget)
+    : determineWinner(houseSecret, playerSecret)
   const winner: 'house' | 'player' = winnerRole === 'creator' ? 'house' : 'player'
 
   const houseHash = hashSecret(houseSecret)
   const game2 = await buildGame(
     deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
-    state.finalExpiration, state.setupExpiration,
+    state.finalExpiration, state.setupExpiration, odds,
   )
   // Rebuild both per-party escrow scripts; the sweep spends each VTXO via its
   // own script's win leaf (win leaves are byte-identical, taptrees differ).
@@ -360,10 +431,12 @@ async function buildCommitContext(
     { script: getPlayerEscrowScript(game2), ...playerEscrow },
   ]
   const pot = escrows.reduce((a, e) => a + e.value, 0)
-  const rake = winner === 'player' ? await calcRake(pot, deps) : 0
+  // Variable-odds bake the house edge into the asymmetric stakes, so no rake is
+  // taken there (it would double-charge); the coin still rakes player wins.
+  const rake = winner === 'player' && !odds ? await calcRake(pot, deps) : 0
   const proof =
     `house secret ${houseSecret.length}B, player secret ${playerSecret.length}B ` +
-    `→ ${winner} wins (pot ${pot}).`
+    `→ ${winner} wins (pot ${pot})${odds ? ` [odds ${odds.oddsTarget}/${odds.oddsN}]` : ''}.`
 
   return {
     winner, houseSecret, playerSecret,
@@ -523,7 +596,7 @@ export async function handleTrustlessRefund(
   const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
   const game2 = await buildGame(
     deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
-    state.finalExpiration, state.setupExpiration,
+    state.finalExpiration, state.setupExpiration, oddsFromState(state),
   )
   const playerEscrowScript = getPlayerEscrowScript(game2)
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
@@ -570,7 +643,7 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
       const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
       const game2 = await buildGame(
         deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
-        state.finalExpiration, state.setupExpiration,
+        state.finalExpiration, state.setupExpiration, oddsFromState(state),
       )
       const houseEscrowScript = getHouseEscrowScript(game2)
       const networkHrp = networkHrpFromArkInfo(deps.arkInfo)

@@ -133,10 +133,12 @@ describe('trustless coin flow (server handlers)', () => {
   // Drive a game up to (but not including) /commit: fund a fresh player, run
   // handleTrustlessPlay, and have the player escrow its stake. Returns what a
   // client needs to commit. Shared by the idempotency + concurrency tests.
-  async function playAndEscrow(): Promise<{
+  async function playAndEscrow(opts: { oddsN?: number; oddsTarget?: number } = {}): Promise<{
     gameId: string
     playerEscrow: { txid: string; vout: number; value: number }
     playerSecretHex: string
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    play: any
   }> {
     const playerId = SingleKey.fromRandomBytes()
     const playerW = await makePlayerWallet(playerId)
@@ -145,13 +147,15 @@ describe('trustless coin flow (server handlers)', () => {
     await settleWithRetry(playerW)
     await waitFor(playerW, 'settled', BET)
 
+    // A 16-byte player secret = variable-odds digit 0 (valid); the house picks a
+    // random digit at /play, so the roll is fair regardless.
     const playerSecret = Buffer.from(new Uint8Array(16)); crypto.getRandomValues(playerSecret)
     const playerHash = createHash('sha256').update(playerSecret).digest('hex')
     const playerPubHex = hex.encode(toXOnly(await playerId.compressedPublicKey()))
     const playerChangeAddress = await playerW.getAddress()
 
     const play = await server.handleTrustlessPlay(
-      { tier: BET, playerPubkey: playerPubHex, playerHash, playerChangeAddress }, deps,
+      { tier: BET, playerPubkey: playerPubHex, playerHash, playerChangeAddress, oddsN: opts.oddsN, oddsTarget: opts.oddsTarget }, deps,
     )
     const escrowPk = ArkAddress.decode(play.escrowAddress).pkScript
     const pv = (await playerW.getVtxos())[0]
@@ -167,6 +171,7 @@ describe('trustless coin flow (server handlers)', () => {
       gameId: play.gameId,
       playerEscrow: { txid: playerEscrowTxid, vout: 0, value: BET },
       playerSecretHex: hex.encode(playerSecret),
+      play,
     }
   }
 
@@ -377,4 +382,28 @@ describe('trustless coin flow (server handlers)', () => {
     await server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps)
     await expect(server.handleTrustlessRefund(gameId, { playerEscrow }, deps)).rejects.toThrow(/resolved/)
   }, 120_000)
+
+  it('plays a variable-odds game end-to-end (asymmetric house-edged stakes, winner takes the pot)', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    const oddsN = 6, oddsTarget = 2 // player wins ~1/3; house stakes the edged 2x multiple
+    const { gameId, playerEscrow, playerSecretHex, play } = await playAndEscrow({ oddsN, oddsTarget })
+
+    // House staked the edged multiple (default 3% = 300 bps); pot = player + house stake.
+    const expectedHouseStake = Math.floor((BET * (oddsN - oddsTarget) * (10000 - 300)) / (oddsTarget * 10000))
+    expect(play.oddsN).toBe(oddsN)
+    expect(play.oddsTarget).toBe(oddsTarget)
+    expect(play.houseEscrow.value).toBe(expectedHouseStake)
+    expect(play.pot).toBe(BET + expectedHouseStake)
+
+    const commit = await server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps)
+    expect(['house', 'player']).toContain(commit.winner)
+    expect(commit.rake).toBe(0) // the edge replaces rake for variable-odds
+    expect(commit.payout).toBe(play.pot) // winner sweeps the full odds-weighted pot
+    console.log(`[trustless-api] variable-odds ${oddsTarget}/${oddsN}: ${commit.winner} wins pot=${play.pot} (house staked ${expectedHouseStake})`)
+    if (commit.winner === 'house') expect(commit.txid).toBeTruthy()
+    else expect(commit.sweep).toBeTruthy()
+
+    const row = await deps.repos.games.get(gameId)
+    expect(row.status).toBe('resolved')
+  }, 300_000)
 })

@@ -107,6 +107,8 @@ function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScrip
     playerHash: game.player.hash,
     finalExpiration: BigInt(game.finalExpiration),
     refundPubkey,
+    oddsN: game.oddsN,
+    oddsTarget: game.oddsTarget,
   })
 }
 

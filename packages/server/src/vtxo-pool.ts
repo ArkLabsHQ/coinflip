@@ -264,14 +264,30 @@ export async function rebuildReservations(deps: AppDeps): Promise<number> {
   let restored = 0
   for (const g of pending) {
     if (!g.house_vtxos_json) continue
+    let parsed: unknown
     try {
-      const outpoints = JSON.parse(g.house_vtxos_json) as string[]
-      if (Array.isArray(outpoints) && outpoints.length > 0) {
-        reservations.reserve(g.id, outpoints, maxLiabilityForTier(g.tier))
+      parsed = JSON.parse(g.house_vtxos_json)
+    } catch {
+      continue // malformed — skip
+    }
+    if (Array.isArray(parsed)) {
+      // Legacy setup/final flow: the JSON is a list of "txid:vout" house VTXOs
+      // baked into the game's fallback tx. Re-reserve those outpoints so a
+      // post-restart play can't pick a VTXO still committed to a live game.
+      if (parsed.length > 0) {
+        reservations.reserve(g.id, parsed as string[], maxLiabilityForTier(g.tier))
         restored++
       }
-    } catch {
-      /* malformed — skip */
+    } else if (parsed && typeof parsed === 'object' && 'houseEscrow' in parsed) {
+      // Trustless per-party flow: the house already spent its stake into the
+      // escrow address, so there's no live house VTXO to protect — but the
+      // in-flight liability MUST be restored, or concurrent post-restart plays
+      // would over-commit the house (the bug: this branch used to be skipped
+      // because TrustlessState is an object, not an array). Mirror
+      // handleTrustlessPlay's reservation: liability = the escrowed stake (tier),
+      // no outpoints.
+      reservations.reserve(g.id, [], g.tier)
+      restored++
     }
   }
   if (restored > 0) console.log(`[house pool] rebuilt ${restored} reservation(s) from pending games`)

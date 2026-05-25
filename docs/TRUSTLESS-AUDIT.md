@@ -59,10 +59,21 @@ broadcast it after `finalExpiration`.
 `ContractManager`, so the server can't detect a player exercising a refund or a
 stuck game. Register `PlayerEscrow`/`HouseEscrow` per game; watch + reconcile.
 
-### 🟠 4. Crash recovery / pending-escrow reconciliation
-A server crash between escrowing the house stake and resolving must, on boot:
-reconcile pending games, reclaim orphaned house escrows via `refund` after
-timeout, and release reservations. Extend `rebuildReservations`.
+### 🟠 4. Crash recovery / pending-escrow reconciliation (partial)
+**Done (`fad35d0`+):** `rebuildReservations` now restores in-flight liability
+for trustless per-party games on boot. It previously parsed `house_vtxos_json`
+only as the legacy `string[]` and silently skipped the `TrustlessState` object,
+so the house could over-commit after a restart. Covered deterministically by
+`packages/e2e/src/vtxo-pool.unit.test.ts` (trustless object + legacy array +
+malformed/null/empty).
+
+**Still open (folded into #3 — needs on-chain escrow watching):** on boot,
+reconcile pending games whose escrow is already spent on-Ark — in particular the
+crash-mid-sweep window noted in #7 (house-win sweep submitted, status not yet
+persisted) — and reclaim orphaned house escrows via the `refund` leaf. Timing
+gotcha to respect: `expirePending` flips pending→expired at 5 min, but the
+refund CLTV only matures at `finalExpiration` (~20 min), so the reclaim must be
+driven off the CLTV maturity, not the 5-min expiry sweep.
 
 ### 🟠 5. Concurrency & VTXO pool for thousands of players
 - House VTXO pool: enough distinct VTXOs to escrow many concurrent games without

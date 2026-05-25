@@ -86,10 +86,19 @@ house-side counterpart to the player's client reclaim (see #2). e2e-verified in
 `escrow-recovery.test.ts` (reclaims a matured escrow with a real refund txid;
 skips not-yet-matured games; idempotent on a second pass).
 
-**Still open (folded into #3 — needs on-chain escrow watching):** the
-crash-mid-sweep window noted in #7 (house-win sweep submitted, status not yet
-persisted) — boot reconciliation should detect the already-spent escrow and mark
-the game resolved. Narrow window; lower priority than the fund-leak reclaim above.
+**Done — crash-mid-sweep reconciliation:** `reconcilePendingSweeps` (boot + on
+the recovery timer) resolves games left `pending` by a crash AFTER a house-win
+sweep submit but BEFORE the resolve write. It checks the house escrow's `isSpent`
+via the indexer (`RestIndexerProvider.getVtxos({ outpoints })`); since a player
+win is persisted `resolved` BEFORE the client ever spends the escrow, a
+`pending` game with a spent house escrow is unambiguously a crashed house win →
+marked resolved (winner = house, pot to house, `spentBy` recorded as the sweep
+txid). No hot-path write-ahead needed. e2e-verified (`reconcile.test.ts`):
+resolves a pending+spent game to a house win and leaves a pending+unspent game
+untouched. This closes the #7 edge. (Full SDK contract-watching/registration —
+observability of live escrow events — remains an optional enhancement; the
+correctness it would provide is already covered by this + player refund + house
+recovery.)
 
 ### 🟠 5. Concurrency & VTXO pool for thousands of players (partial)
 **Done:** concurrent plays now escrow in PARALLEL without colliding. Liability

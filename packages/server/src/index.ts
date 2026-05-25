@@ -21,7 +21,7 @@ import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
 import { attachContractEventHandler, initContractManager } from './contract-manager.js'
 import { startExpiryTimer } from './game-engine.js'
-import { startEscrowRecoveryTimer } from './trustless-game.js'
+import { startEscrowRecoveryTimer, reconcilePendingSweeps } from './trustless-game.js'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
 import { createAdminRoutes } from './admin/routes.js'
@@ -41,6 +41,7 @@ export {
   handleTrustlessCommit,
   handleTrustlessRefund,
   recoverOrphanedHouseEscrows,
+  reconcilePendingSweeps,
   startEscrowRecoveryTimer,
   type TrustlessPlayRequest,
   type TrustlessPlayResult,
@@ -93,6 +94,13 @@ async function main() {
   // Rebuild VTXO reservations from any pending games that survived a restart,
   // then keep a healthy pool of distinct house VTXOs for concurrent play.
   await rebuildReservations(deps)
+
+  // Resolve any games left `pending` by a crash mid house-win sweep (their
+  // escrow is already spent) before the expiry timer can flip them to expired.
+  await reconcilePendingSweeps(deps).catch((e) =>
+    console.error('[reconcile] boot pass failed:', e instanceof Error ? e.message : e),
+  )
+
   startPoolMaintenance(deps)
 
   // Start game expiry timer

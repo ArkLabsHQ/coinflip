@@ -37,6 +37,7 @@ import {
   setArkPsbtField,
   Transaction,
   ArkAddress,
+  RestIndexerProvider,
   type ArkTxInput,
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
@@ -672,15 +673,68 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
 }
 
 /**
- * Run house-escrow recovery shortly after boot, then on a timer. Pairs with the
- * 5-min expiry sweep (game-engine) but fires on the longer `finalExpiration`
- * CLTV cadence, so stalled games' house stakes are reclaimed once spendable.
+ * Reconcile games stuck `pending` because the server crashed AFTER submitting a
+ * house-win sweep but BEFORE persisting the result. A player win is persisted
+ * `resolved` BEFORE the client ever spends the escrow, so a `pending` game whose
+ * HOUSE escrow is already spent on-Ark can ONLY be a crashed house-win sweep —
+ * we mark it resolved (winner = house, pot to the house). Detection is a direct
+ * indexer lookup of the escrow outpoint's `isSpent`; no hot-path write-ahead
+ * needed. Returns the number reconciled.
+ */
+export async function reconcilePendingSweeps(deps: AppDeps): Promise<number> {
+  const pending = await deps.repos.games.list({ status: 'pending', limit: 500 })
+  const trustless = pending.filter((g) => g.player_choice === 'trustless' && g.house_vtxos_json)
+  if (trustless.length === 0) return 0
+
+  const indexer = new RestIndexerProvider(process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh')
+  let reconciled = 0
+  for (const game of trustless) {
+    let state: TrustlessState
+    try {
+      state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+    } catch {
+      continue
+    }
+    if (!state.houseEscrow) continue
+    try {
+      const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid: state.houseEscrow.txid, vout: state.houseEscrow.vout }] })
+      const v = vtxos.find((x) => x.txid === state.houseEscrow.txid && x.vout === state.houseEscrow.vout) ?? vtxos[0]
+      if (!v || !v.isSpent) continue // not swept → still genuinely pending
+
+      const pot = state.houseEscrow.value + game.tier // house stake + player stake
+      await deps.repos.games.update(game.id, {
+        winner: 'house',
+        rakeAmount: 0,
+        payoutAmount: pot,
+        status: 'resolved',
+        houseVtxosJson: JSON.stringify({ ...state, resolveTxid: v.spentBy ?? state.resolveTxid } as TrustlessState),
+      })
+      reservations.release(game.id)
+      reconciled++
+      console.log(`[reconcile] crash-mid-sweep house win ${game.id} resolved (escrow spent by ${v.spentBy ?? 'unknown'})`)
+    } catch (err) {
+      console.warn(`[reconcile] spent-check failed for game ${game.id}:`, err instanceof Error ? err.message : err)
+    }
+  }
+  if (reconciled > 0) console.log(`[reconcile] resolved ${reconciled} crash-mid-sweep game(s)`)
+  return reconciled
+}
+
+/**
+ * Run escrow reconciliation + house-escrow recovery shortly after boot, then on
+ * a timer. `reconcilePendingSweeps` cleans up crash-mid-sweep house wins;
+ * `recoverOrphanedHouseEscrows` reclaims stalled house stakes once their CLTV
+ * matures (the longer `finalExpiration` cadence, not the 5-min expiry sweep).
  */
 export function startEscrowRecoveryTimer(deps: AppDeps, intervalMs = 120_000): NodeJS.Timeout {
-  const tick = () =>
-    recoverOrphanedHouseEscrows(deps).catch((e) =>
+  const tick = async () => {
+    await reconcilePendingSweeps(deps).catch((e) =>
+      console.error('[reconcile] tick failed:', e instanceof Error ? e.message : e),
+    )
+    await recoverOrphanedHouseEscrows(deps).catch((e) =>
       console.error('[recovery] tick failed:', e instanceof Error ? e.message : e),
     )
+  }
   setTimeout(tick, 5_000)
   return setInterval(tick, intervalMs)
 }

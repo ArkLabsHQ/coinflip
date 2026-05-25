@@ -130,6 +130,46 @@ describe('trustless coin flow (server handlers)', () => {
     return arkTxid
   }
 
+  // Drive a game up to (but not including) /commit: fund a fresh player, run
+  // handleTrustlessPlay, and have the player escrow its stake. Returns what a
+  // client needs to commit. Shared by the idempotency + concurrency tests.
+  async function playAndEscrow(): Promise<{
+    gameId: string
+    playerEscrow: { txid: string; vout: number; value: number }
+    playerSecretHex: string
+  }> {
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await makePlayerWallet(playerId)
+    await faucet(await playerW.getBoardingAddress(), PLAYER_FUND_BTC)
+    await waitFor(playerW, 'boarding', PLAYER_FUND_BTC * 1e8 * 0.9)
+    await settleWithRetry(playerW)
+    await waitFor(playerW, 'settled', BET)
+
+    const playerSecret = Buffer.from(new Uint8Array(16)); crypto.getRandomValues(playerSecret)
+    const playerHash = createHash('sha256').update(playerSecret).digest('hex')
+    const playerPubHex = hex.encode(toXOnly(await playerId.compressedPublicKey()))
+    const playerChangeAddress = await playerW.getAddress()
+
+    const play = await server.handleTrustlessPlay(
+      { tier: BET, playerPubkey: playerPubHex, playerHash, playerChangeAddress }, deps,
+    )
+    const escrowPk = ArkAddress.decode(play.escrowAddress).pkScript
+    const pv = (await playerW.getVtxos())[0]
+    const change = pv.value - BET
+    const pOutputs: { script: Uint8Array; amount: bigint }[] = [{ script: escrowPk, amount: BigInt(BET) }]
+    if (change > 0) pOutputs.push({ script: ArkAddress.decode(playerChangeAddress).pkScript, amount: BigInt(change) })
+    const escrowTx = buildOffchainTx(
+      [{ txid: pv.txid, vout: pv.vout, value: pv.value, tapLeafScript: pv.forfeitTapLeafScript, tapTree: pv.tapTree }],
+      pOutputs, serverUnroll,
+    )
+    const playerEscrowTxid = await submit(escrowTx.arkTx, escrowTx.checkpoints, playerId, [0])
+    return {
+      gameId: play.gameId,
+      playerEscrow: { txid: playerEscrowTxid, vout: 0, value: BET },
+      playerSecretHex: hex.encode(playerSecret),
+    }
+  }
+
   it('plays a full trustless game; the winner receives the full pot', async () => {
     if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
 
@@ -191,5 +231,63 @@ describe('trustless coin flow (server handlers)', () => {
     const row = await deps.repos.games.get(play.gameId)
     expect(row.status).toBe('resolved')
     expect(row.winner).toBe(commit.winner)
+  }, 300_000)
+
+  it('is idempotent: a retried commit returns the same result, not an error', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    const { gameId, playerEscrow, playerSecretHex } = await playAndEscrow()
+
+    const first = await server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps)
+    // Replay the exact same commit (simulating a lost response). The old code
+    // threw "Game is not pending: resolved"; now it must hand back the same
+    // outcome so the client can recover — critical for a player-win sweep.
+    const second = await server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps)
+
+    expect(second.winner).toBe(first.winner)
+    expect(second.payout).toBe(first.payout)
+    expect(second.rake).toBe(first.rake)
+    if (first.winner === 'house') {
+      expect(first.txid).toBeTruthy()
+      expect(second.txid).toBe(first.txid) // same sweep, NOT re-submitted
+    } else {
+      expect(first.sweep).toBeTruthy()
+      expect(second.sweep).toBeTruthy()
+      // The replay rebuilds a usable sweep for the same pot + secrets.
+      expect(second.sweep.witnessHex).toEqual(first.sweep.witnessHex)
+      expect(second.sweep.inputCount).toBe(first.sweep.inputCount)
+    }
+    console.log(`[trustless-api] idempotent retry ok (winner=${first.winner})`)
+
+    const row = await deps.repos.games.get(gameId)
+    expect(row.status).toBe('resolved')
+    expect(row.winner).toBe(first.winner)
+  }, 300_000)
+
+  it('serializes concurrent commits: same game resolves once, no double-sweep', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    const { gameId, playerEscrow, playerSecretHex } = await playAndEscrow()
+
+    // Fire several commits for the SAME game at once. The per-game lock must let
+    // exactly one resolve+sweep and have the rest replay the persisted result.
+    // Without it a house win would double-submit the sweep → arkd double-spend
+    // rejection → one promise rejects → Promise.all throws and this test fails.
+    const N = 4
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps),
+      ),
+    )
+
+    const { winner, payout, txid } = results[0]
+    for (const r of results) {
+      expect(r.winner).toBe(winner)
+      expect(r.payout).toBe(payout)
+      if (winner === 'house') expect(r.txid).toBe(txid)
+    }
+    console.log(`[trustless-api] ${N} concurrent commits resolved once (winner=${winner})`)
+
+    const row = await deps.repos.games.get(gameId)
+    expect(row.status).toBe('resolved')
+    expect(row.winner).toBe(winner)
   }, 300_000)
 })

@@ -63,6 +63,39 @@ export class Mutex {
   }
 }
 
+/**
+ * Per-key FIFO mutex. Serializes async sections that share a key (e.g. all
+ * `/commit` calls for one game) while letting different keys run concurrently.
+ *
+ * Each key's lock entry is reference-counted and dropped once idle, so the map
+ * doesn't grow without bound across many distinct keys (thousands of games).
+ * The ref bump and the entry lookup are synchronous (no `await` between them),
+ * so concurrent callers for the same key always share one entry and the last
+ * one out deletes it — a new caller never reuses a half-deleted entry.
+ */
+export class KeyedMutex {
+  private readonly entries = new Map<string, { mutex: Mutex; refs: number }>()
+
+  async runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    let entry = this.entries.get(key)
+    if (!entry) {
+      entry = { mutex: new Mutex(), refs: 0 }
+      this.entries.set(key, entry)
+    }
+    entry.refs++
+    try {
+      return await entry.mutex.runExclusive(fn)
+    } finally {
+      if (--entry.refs === 0) this.entries.delete(key)
+    }
+  }
+
+  /** Number of live key entries (introspection / tests). */
+  get size(): number {
+    return this.entries.size
+  }
+}
+
 interface Reservation {
   outpoints: Set<string>
   liability: number

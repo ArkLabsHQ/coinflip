@@ -23,6 +23,8 @@ import {
   getHouseEscrowAddress,
   buildSweepTransaction,
   type Game,
+  type SweepEscrow,
+  type BuiltOffchainTx,
 } from 'arkade-coinflip'
 import {
   buildOffchainTx,
@@ -36,7 +38,7 @@ import {
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
-import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError } from './vtxo-pool.js'
+import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, KeyedMutex } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import type { GameRow } from './repositories/types.js'
 
@@ -100,7 +102,26 @@ interface TrustlessState {
   finalExpiration: number
   setupExpiration: number
   houseEscrow: Outpoint
+  /**
+   * The player's escrow outpoint, persisted at resolve. Lets a retried
+   * `/commit` rebuild the player-win sweep deterministically — independent of
+   * what the client re-sends — so idempotent replay needs no live request data.
+   */
+  playerEscrow?: Outpoint
+  /**
+   * The sweep txid, persisted at resolve on a HOUSE win. On a retried commit we
+   * return this instead of re-submitting (the escrow VTXOs are already spent).
+   */
+  resolveTxid?: string
 }
+
+/**
+ * Serializes concurrent `/commit` calls for the SAME game so a game is resolved
+ * (and its escrows swept) exactly once; commits for different games run in
+ * parallel. Combined with the persisted replay data above, a retried commit
+ * returns the original result instead of erroring or double-sweeping.
+ */
+const commitLocks = new KeyedMutex()
 
 async function getTiers(deps: AppDeps): Promise<number[]> {
   const tiersStr = (await deps.repos.config.get('tiers')) || '[1000,5000,10000,50000]'
@@ -263,81 +284,172 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   }
 }
 
+/**
+ * Everything needed to (re)build a commit result, derived deterministically
+ * from the persisted game + escrow state. Shared by the fresh resolve and the
+ * idempotent-replay path so both produce identical economics.
+ */
+interface CommitContext {
+  winner: 'house' | 'player'
+  houseSecret: Uint8Array
+  playerSecret: Uint8Array
+  houseSecretHex: string
+  playerSecretHex: string
+  escrows: SweepEscrow[]
+  pot: number
+  rake: number
+  proof: string
+  houseAddress: string
+  playerPayoutAddress: string
+  networkHrp: string
+}
+
+async function buildCommitContext(
+  game: GameRow,
+  state: TrustlessState,
+  playerSecretHex: string,
+  playerEscrow: Outpoint,
+  deps: AppDeps,
+): Promise<CommitContext> {
+  const houseSecret = new Uint8Array(Buffer.from(game.house_secret_hex, 'hex'))
+  const playerSecret = new Uint8Array(Buffer.from(playerSecretHex, 'hex'))
+  const winnerRole = determineWinner(houseSecret, playerSecret)
+  const winner: 'house' | 'player' = winnerRole === 'creator' ? 'house' : 'player'
+
+  const houseHash = hashSecret(houseSecret)
+  const game2 = await buildGame(
+    deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
+    state.finalExpiration, state.setupExpiration,
+  )
+  // Rebuild both per-party escrow scripts; the sweep spends each VTXO via its
+  // own script's win leaf (win leaves are byte-identical, taptrees differ).
+  const escrows: SweepEscrow[] = [
+    { script: getHouseEscrowScript(game2), ...state.houseEscrow },
+    { script: getPlayerEscrowScript(game2), ...playerEscrow },
+  ]
+  const pot = escrows.reduce((a, e) => a + e.value, 0)
+  const rake = winner === 'player' ? await calcRake(pot, deps) : 0
+  const proof =
+    `house secret ${houseSecret.length}B, player secret ${playerSecret.length}B ` +
+    `→ ${winner} wins (pot ${pot}).`
+
+  return {
+    winner, houseSecret, playerSecret,
+    houseSecretHex: game.house_secret_hex, playerSecretHex,
+    escrows, pot, rake, proof,
+    houseAddress: await deps.wallet.getAddress(),
+    playerPayoutAddress: game.player_change_address!,
+    networkHrp: networkHrpFromArkInfo(deps.arkInfo),
+  }
+}
+
+/**
+ * Build the commit result from a context, WITHOUT side effects. On a house win
+ * it also returns the unsigned sweep tx — the caller submits it on a fresh
+ * resolve, or discards it and supplies the persisted txid on a replay. On a
+ * player win the sweep PSBTs are embedded for the client to sign + submit.
+ */
+function buildCommitResult(
+  ctx: CommitContext,
+  deps: AppDeps,
+): { result: TrustlessCommitResult; houseSweepTx?: BuiltOffchainTx } {
+  if (ctx.winner === 'house') {
+    const houseSweepTx = buildSweepTransaction(deps.arkInfo, ctx.networkHrp, {
+      winner: 'house', escrows: ctx.escrows,
+      payoutAddress: ctx.houseAddress, houseAddress: ctx.houseAddress, rake: 0,
+    })
+    const result: TrustlessCommitResult = {
+      winner: 'house', houseSecret: ctx.houseSecretHex, playerSecret: ctx.playerSecretHex,
+      payout: ctx.pot, rake: 0, proof: ctx.proof,
+    }
+    return { result, houseSweepTx }
+  }
+  // Player won — the playerWin leaf needs the player's key, so the server builds
+  // the sweep but the CLIENT signs + submits it. Return the PSBTs.
+  const sweep = buildSweepTransaction(deps.arkInfo, ctx.networkHrp, {
+    winner: 'player', escrows: ctx.escrows,
+    payoutAddress: ctx.playerPayoutAddress, houseAddress: ctx.houseAddress, rake: ctx.rake,
+  })
+  const result: TrustlessCommitResult = {
+    winner: 'player', houseSecret: ctx.houseSecretHex, playerSecret: ctx.playerSecretHex,
+    payout: ctx.pot - ctx.rake, rake: ctx.rake, proof: ctx.proof,
+    sweep: {
+      sweepPsbt: hex.encode(sweep.arkTx.toPSBT()),
+      sweepCheckpoints: sweep.checkpoints.map((c) => hex.encode(c.toPSBT())),
+      inputCount: ctx.escrows.length,
+      witnessHex: [ctx.houseSecretHex, ctx.playerSecretHex],
+    },
+  }
+  return { result }
+}
+
+/**
+ * Rebuild the result of an already-resolved game for an idempotent `/commit`
+ * replay. Rebuilds from the persisted record only — never re-resolves and never
+ * re-submits: a house win returns the persisted sweep txid; a player win
+ * rebuilds the sweep PSBTs the client still needs to claim.
+ */
+async function rebuildResolvedResult(game: GameRow, deps: AppDeps): Promise<TrustlessCommitResult> {
+  const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+  if (!state.playerEscrow || !game.player_secret_hex) {
+    throw new Error(`Game ${game.id} resolved without replay data; cannot rebuild commit result`)
+  }
+  const ctx = await buildCommitContext(game, state, game.player_secret_hex, state.playerEscrow, deps)
+  const { result } = buildCommitResult(ctx, deps)
+  if (ctx.winner === 'house') result.txid = state.resolveTxid
+  return result
+}
+
 export async function handleTrustlessCommit(
   gameId: string,
   req: TrustlessCommitRequest,
   deps: AppDeps,
 ): Promise<TrustlessCommitResult> {
-  const game = await deps.repos.games.get(gameId)
-  if (!game) throw new Error(`Game not found: ${gameId}`)
-  if (game.status !== 'pending') throw new Error(`Game is not pending: ${game.status}`)
+  // One game resolves once. Serialize commits per game so concurrent calls (or
+  // a client retry) can't double-resolve or double-sweep; different games still
+  // commit in parallel.
+  return commitLocks.runExclusive(gameId, async () => {
+    const game = await deps.repos.games.get(gameId)
+    if (!game) throw new Error(`Game not found: ${gameId}`)
 
-  const playerSecret = Buffer.from(req.playerSecretHex, 'hex')
-  if (createHash('sha256').update(playerSecret).digest('hex') !== game.player_hash) {
-    throw new Error('Player secret does not match committed hash')
-  }
-  const houseSecret = Buffer.from(game.house_secret_hex, 'hex')
-  const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+    // Idempotent replay: a retried commit (e.g. the client lost our response)
+    // returns the SAME result without re-resolving. Essential on a player win —
+    // the client needs the sweep PSBT to claim, so erroring here would strand
+    // the winnings until the refund timeout.
+    if (game.status === 'resolved') return rebuildResolvedResult(game, deps)
+    if (game.status !== 'pending') throw new Error(`Game is not pending: ${game.status}`)
 
-  const winnerRole = determineWinner(new Uint8Array(houseSecret), new Uint8Array(playerSecret))
-  const winner: 'house' | 'player' = winnerRole === 'creator' ? 'house' : 'player'
-
-  const houseHash = hashSecret(houseSecret)
-  const game2 = await buildGame(deps, game.tier, houseHash, game.player_pubkey, game.player_hash, state.finalExpiration, state.setupExpiration)
-  // Rebuild both per-party escrow scripts; the sweep spends each VTXO via its
-  // own script's win leaf.
-  const houseEscrowScript = getHouseEscrowScript(game2)
-  const playerEscrowScript = getPlayerEscrowScript(game2)
-  const escrows = [
-    { script: houseEscrowScript, ...state.houseEscrow },
-    { script: playerEscrowScript, ...req.playerEscrow },
-  ]
-  const pot = escrows.reduce((a, e) => a + e.value, 0)
-  const houseAddress = await deps.wallet.getAddress()
-  const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
-
-  const proof =
-    `house secret ${houseSecret.length}B, player secret ${playerSecret.length}B ` +
-    `→ ${winner} wins (pot ${pot}).`
-
-  let result: TrustlessCommitResult
-  if (winner === 'house') {
-    // House sweeps both escrow VTXOs via creatorWin (single-party, house+server).
-    const sweep = buildSweepTransaction(deps.arkInfo, networkHrp, {
-      winner: 'house', escrows, payoutAddress: houseAddress, houseAddress, rake: 0,
-    })
-    const txid = await submitOffchain(deps, sweep.arkTx, sweep.checkpoints, [0, 1], {
-      inputs: [0, 1], data: [new Uint8Array(houseSecret), new Uint8Array(playerSecret)],
-    })
-    result = { winner, houseSecret: game.house_secret_hex, playerSecret: req.playerSecretHex, payout: pot, rake: 0, proof, txid }
-  } else {
-    // Player won — the playerWin leaf needs the player's key, so the server
-    // builds the sweep but the CLIENT signs + submits it. Return the PSBTs.
-    const rake = await calcRake(pot, deps)
-    const sweep = buildSweepTransaction(deps.arkInfo, networkHrp, {
-      winner: 'player', escrows, payoutAddress: game.player_change_address!, houseAddress, rake,
-    })
-    result = {
-      winner, houseSecret: game.house_secret_hex, playerSecret: req.playerSecretHex,
-      payout: pot - rake, rake, proof,
-      sweep: {
-        sweepPsbt: hex.encode(sweep.arkTx.toPSBT()),
-        sweepCheckpoints: sweep.checkpoints.map((c) => hex.encode(c.toPSBT())),
-        inputCount: escrows.length,
-        witnessHex: [game.house_secret_hex, req.playerSecretHex],
-      },
+    const playerSecret = Buffer.from(req.playerSecretHex, 'hex')
+    if (createHash('sha256').update(playerSecret).digest('hex') !== game.player_hash) {
+      throw new Error('Player secret does not match committed hash')
     }
-  }
+    const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+    const ctx = await buildCommitContext(game, state, req.playerSecretHex, req.playerEscrow, deps)
+    const { result, houseSweepTx } = buildCommitResult(ctx, deps)
 
-  await deps.repos.games.update(gameId, {
-    playerSecretHex: req.playerSecretHex,
-    winner,
-    rakeAmount: result.rake,
-    payoutAmount: result.payout,
-    status: 'resolved',
+    let resolveTxid: string | undefined
+    if (houseSweepTx) {
+      // House sweeps both escrow VTXOs via creatorWin (single-party, house+server).
+      resolveTxid = await submitOffchain(deps, houseSweepTx.arkTx, houseSweepTx.checkpoints, [0, 1], {
+        inputs: [0, 1], data: [ctx.houseSecret, ctx.playerSecret],
+      })
+      result.txid = resolveTxid
+    }
+
+    // Persist resolution + the replay data (player escrow outpoint, house-win
+    // sweep txid) atomically with the status flip, inside the per-game lock.
+    const persisted: TrustlessState = { ...state, playerEscrow: req.playerEscrow, resolveTxid }
+    await deps.repos.games.update(gameId, {
+      playerSecretHex: req.playerSecretHex,
+      winner: ctx.winner,
+      rakeAmount: result.rake,
+      payoutAmount: result.payout,
+      status: 'resolved',
+      houseVtxosJson: JSON.stringify(persisted),
+    })
+    reservations.release(gameId)
+    return result
   })
-  reservations.release(gameId)
-  return result
 }
 
 // Re-export for callers that need the row shape.

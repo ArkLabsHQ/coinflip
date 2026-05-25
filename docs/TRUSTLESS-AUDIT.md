@@ -74,9 +74,24 @@ timeout, and release reservations. Extend `rebuildReservations`.
 Regtest runs `txFeeRate=0`. Production escrow/sweep/refund txs need fee budgeting
 (deduct from change / pot) and must stay above dust for every output.
 
-### 🟡 7. `/commit` idempotency & replay protection
-A retried `/commit` (network flake) must not double-sweep or mis-resolve. Resolve
-is gated on `status === 'pending'`; verify it's race-safe + idempotent.
+### ✅ FIXED — 7. `/commit` idempotency & race safety
+Concurrent commits for the same game are serialized through a per-game
+`KeyedMutex` (refcounted, auto-dropped when idle → bounded under thousands of
+games; `vtxo-pool.ts`), and a resolved game **replays** its original result
+instead of erroring or re-resolving. At resolve we persist the player's escrow
+outpoint + (on a house win) the sweep txid in `TrustlessState`, so a retried
+`/commit` rebuilds the same outcome from the record alone: a house win returns
+the persisted txid (no re-submit of the already-spent escrows); a player win
+rebuilds the sweep PSBTs the client still needs — so a lost response no longer
+strands a winner's payout until the refund timeout. e2e-verified on regtest
+(`trustless-api.test.ts`): a retried commit returns the same result (not a "not
+pending" error), and **4 concurrent commits on a house win** resolved exactly
+once with no double-spend rejection.
+
+Remaining edge (tracked under #4): a crash *between* the house-win sweep submit
+and the status persist leaves the game `pending` with escrows already spent; a
+retry then hits an arkd double-spend rejection. Boot-time reconciliation must
+detect the spent escrow and mark the game resolved.
 
 ### 🟡 8. Variable-odds trustless settlement
 `feat/variable-odds` is Phase-1 (server-resolved, no escrow). Generalize this

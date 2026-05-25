@@ -22,7 +22,7 @@ import {
 // package.json `exports` map requires the `.js` suffix); without the
 // suffix Node's runtime resolver returns ERR_PACKAGE_PATH_NOT_EXPORTED.
 import { TAP_LEAF_VERSION, tapLeafHash } from '@scure/btc-signer/payment.js'
-import { CoinflipSetupScript, CoinflipFinalScript, CoinflipEscrowScript } from './script'
+import { CoinflipSetupScript, CoinflipFinalScript, CoinflipEscrowScript, VARIABLE_ODDS_BASE_LEN } from './script'
 import { Game, VtxoInput } from './types'
 
 function assertDefined<T>(value: T | undefined | null, name: string): asserts value is T {
@@ -506,6 +506,35 @@ export function determineWinner(
 export function generateSecret(choice: 'heads' | 'tails'): Uint8Array {
   const length = choice === 'heads' ? 15 : 16
   return randomBytes(length)
+}
+
+/**
+ * Off-chain mirror of the variable-odds on-chain condition (must match its
+ * branch order exactly): an out-of-range secret makes its submitter lose, else
+ * the player wins iff `(digitC + digitP) mod n < target`. `digit = length - base`.
+ */
+export function determineVariableWinner(
+  creatorSecret: Uint8Array,
+  playerSecret: Uint8Array,
+  n: number,
+  target: number,
+): 'creator' | 'player' {
+  const base = VARIABLE_ODDS_BASE_LEN
+  const digitP = playerSecret.length - base
+  const digitC = creatorSecret.length - base
+  if (digitP < 0 || digitP >= n) return 'creator' // player out of range → loses
+  if (digitC < 0 || digitC >= n) return 'player' // creator out of range → loses
+  const roll = (digitC + digitP) % n
+  return roll < target ? 'player' : 'creator'
+}
+
+/**
+ * Random variable-odds secret: a uniformly chosen digit in [0, n) encoded as the
+ * byte length (`base + digit`). Choosing uniformly makes the summed roll uniform.
+ */
+export function generateVariableSecret(n: number): Uint8Array {
+  const digit = Math.floor(Math.random() * n)
+  return randomBytes(VARIABLE_ODDS_BASE_LEN + digit)
 }
 
 /**

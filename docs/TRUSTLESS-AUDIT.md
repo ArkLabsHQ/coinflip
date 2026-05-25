@@ -149,9 +149,25 @@ and the status persist leaves the game `pending` with escrows already spent; a
 retry then hits an arkd double-spend rejection. Boot-time reconciliation must
 detect the spent escrow and mark the game resolved.
 
-### 🟡 8. Variable-odds trustless settlement
-`feat/variable-odds` is Phase-1 (server-resolved, no escrow). Generalize this
-per-party model to the mod-N `roll < target` condition once the coin is solid.
+### 🟡 8. Variable-odds trustless settlement (on-chain condition DONE; wiring next)
+**Done — the hard part:** the win condition is generalized from the coin's
+equal/different-length check to a mod-N `roll < target` predicate, enforced
+ON-CHAIN. Each party's secret LENGTH encodes a digit in [0, n) (committed before
+reveal → fair); `roll = (digitC + digitP) mod n`, player wins iff `roll < target`
+(probability `target/n`). OP_MOD is disabled in Script, so the mod is a single
+conditional `OP_SUB` (sum ∈ [0, 2n-2] ⇒ one `-n`). Out-of-range secrets make
+their submitter LOSE (not void the game), mirroring the coin's invalid-size
+handling, so a sure-loser can't grief a refund. `CoinflipEscrowScript` takes
+optional `oddsN`/`oddsTarget` and otherwise reuses the whole per-party escrow
+(leaves, refund, sweep). Off-chain mirror: `determineVariableWinner` +
+`generateVariableSecret`. **Proven on regtest** (`variable-odds.test.ts`): the
+winner — and only the winner — sweeps across player/house wins, both mod
+wraparounds, and the `roll == target` boundary; the loser's leaf is rejected.
+
+**Still open:** wire `oddsN`/`oddsTarget` through the server (`/play` accepts an
+odds choice; persist; use in escrow + sweep + `determineVariableWinner`) and the
+client (odds picker UI). The trustless settlement machinery is unchanged — only
+the condition + odds parameters flow through.
 
 ### 🟡 9. Rake accounting
 Sub-dust rake is currently waived. Define production rake (which output, dust

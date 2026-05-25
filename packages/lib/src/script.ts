@@ -122,6 +122,85 @@ function buildCoinflipConditionScript(
 }
 
 /**
+ * Base secret length for variable-odds games. Each party's "digit" is encoded
+ * as `secretLength - VARIABLE_ODDS_BASE_LEN`, so a valid secret is
+ * `BASE_LEN .. BASE_LEN + n - 1` bytes. 16 bytes keeps the SHA256 commit
+ * brute-force-resistant (≥128 bits) at the smallest digit.
+ */
+export const VARIABLE_ODDS_BASE_LEN = 16
+
+/** Minimal numeric push: OP_0 / OP_1..OP_16 / single-byte (values 0..127). */
+function pushNum(v: number): number[] {
+  if (v === 0) return [0x00]
+  if (v >= 1 && v <= 16) return [0x50 + v] // OP_1..OP_16
+  if (v <= 127) return [0x01, v] // 1-byte minimal-encoded script number
+  throw new Error(`pushNum: ${v} out of supported range [0,127]`)
+}
+
+/** size ∈ [base, base+n) → leaves one bool on the stack (consumes the size). */
+function rangeCheckOps(base: number, n: number): number[] {
+  return [
+    OP.DUP, ...pushNum(base), OP.GREATERTHANOREQUAL, // size (size>=base)
+    OP.SWAP, ...pushNum(base + n), OP.LESSTHAN,       // (size>=base) (size<base+n)
+    OP.BOOLAND,                                       // isInRange
+  ]
+}
+
+/**
+ * Variable-odds win condition (generalizes the coin's same/different-size check).
+ *
+ * Stack expects: <creatorSecret> <playerSecret>. Result: pushes 1 if the PLAYER
+ * wins, 0 if the creator (house) wins. The creatorWin leaf wraps this in OP_NOT.
+ *
+ * Fairness: each party commits a secret hash whose LENGTH encodes a digit in
+ * [0, n) — chosen before seeing the opponent's digit (commit-reveal). The roll
+ * is `(digitC + digitP) mod n`; the player wins iff `roll < target`, i.e. with
+ * probability `target/n`. OP_MOD is disabled in Script, so the mod is done with
+ * a single conditional subtraction (sum ∈ [0, 2n-2] ⇒ one `-n` suffices).
+ *
+ * An out-of-range secret makes its submitter LOSE (not void the game), so a
+ * sure-loser can't grief a refund by revealing a bad length — exactly the
+ * coin's invalid-size handling, generalized.
+ */
+function buildVariableOddsConditionScript(
+  creatorHash: Uint8Array,
+  playerHash: Uint8Array,
+  n: number,
+  target: number,
+): Uint8Array {
+  const base = VARIABLE_ODDS_BASE_LEN
+  if (!Number.isInteger(n) || n < 2 || base + n > 127) throw new Error(`invalid n: ${n}`)
+  if (!Number.isInteger(target) || target < 1 || target >= n) throw new Error(`invalid target: ${target}`)
+
+  return new Uint8Array([
+    // Validate both hashes; leaves: cS pS
+    OP['2DUP'],
+    OP.SHA256, 0x20, ...playerHash, OP.EQUALVERIFY,
+    OP.SHA256, 0x20, ...creatorHash, OP.EQUALVERIFY,
+    // Validate player secret length ∈ [base, base+n)
+    OP.SIZE, ...rangeCheckOps(base, n),  // cS pS isValidP
+    OP.NOTIF,
+      OP['2DROP'], 0x00,                  // player out of range → house wins (0)
+    OP.ELSE,
+      OP.SWAP,                            // pS cS
+      OP.SIZE, ...rangeCheckOps(base, n), // pS cS isValidC
+      OP.NOTIF,
+        OP['2DROP'], 0x51,                // creator out of range → player wins (1)
+      OP.ELSE,
+        // both valid; stack: pS cS. roll = (digitC + digitP) mod n
+        OP.SIZE, OP.NIP, ...pushNum(base), OP.SUB,  // pS digitC
+        OP.SWAP,                                     // digitC pS
+        OP.SIZE, OP.NIP, ...pushNum(base), OP.SUB,  // digitC digitP
+        OP.ADD,                                      // sum ∈ [0, 2n-2]
+        OP.DUP, ...pushNum(n), OP.GREATERTHANOREQUAL,
+        OP.IF, ...pushNum(n), OP.SUB, OP.ENDIF,      // roll = sum mod n
+        ...pushNum(target), OP.LESSTHAN,             // roll < target → player wins
+      OP.ENDIF,
+    OP.ENDIF,
+  ])
+}
+
+/**
  * Setup output VtxoScript.
  * Two leaves:
  *   1. Reveal: condition(SHA256 check) + creator + player + server
@@ -233,6 +312,14 @@ export interface CoinflipEscrowOptions {
    * player's stake on a stall.
    */
   refundPubkey: Uint8Array
+  /**
+   * Variable-odds parameters. When BOTH are set the win condition becomes
+   * `roll < oddsTarget` over `oddsN` outcomes (probability `oddsTarget/oddsN`)
+   * instead of the 50/50 coin (equal/different secret length). The escrow
+   * structure (leaves, refund, sweep) is otherwise identical.
+   */
+  oddsN?: number
+  oddsTarget?: number
 }
 
 /**
@@ -252,9 +339,13 @@ export class CoinflipEscrowScript extends VtxoScript {
   readonly refundScriptHex: string
 
   constructor(readonly options: CoinflipEscrowOptions) {
-    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, refundPubkey } = options
+    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, refundPubkey, oddsN, oddsTarget } = options
 
-    const conditionScript = buildCoinflipConditionScript(creatorHash, playerHash)
+    // Variable-odds when both params are set; otherwise the 50/50 coin.
+    const conditionScript =
+      oddsN !== undefined && oddsTarget !== undefined
+        ? buildVariableOddsConditionScript(creatorHash, playerHash, oddsN, oddsTarget)
+        : buildCoinflipConditionScript(creatorHash, playerHash)
 
     const creatorWinCondition = new Uint8Array([...conditionScript, OP.NOT])
     const creatorWinTapscript = ConditionMultisigTapscript.encode({

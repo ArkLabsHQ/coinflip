@@ -14,6 +14,7 @@ import {
   generateSecret,
   CoinflipSetupScript,
   CoinflipFinalScript,
+  CoinflipEscrowScript,
   isCreateEvent,
   isJoinEvent,
   coinSelect,
@@ -267,6 +268,36 @@ describe('CoinflipFinalScript', () => {
     expect(playerWin).toBeTruthy()
     const abort = script.abort()
     expect(abort).toBeTruthy()
+  })
+})
+
+describe('CoinflipEscrowScript', () => {
+  const creatorPubkey = new Uint8Array(32).fill(1)
+  const playerPubkey = new Uint8Array(32).fill(2)
+  const serverPubkey = new Uint8Array(32).fill(3)
+  const creatorHash = new Uint8Array(32).fill(0xaa)
+  const playerHash = new Uint8Array(32).fill(0xbb)
+  const base = { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration: 2000n }
+
+  const playerEscrow = new CoinflipEscrowScript({ ...base, refundPubkey: playerPubkey })
+  const houseEscrow = new CoinflipEscrowScript({ ...base, refundPubkey: creatorPubkey })
+
+  it('has 3 leaves (creatorWin / playerWin / refund)', () => {
+    expect(playerEscrow.leaves.length).toBe(3)
+    expect(playerEscrow.creatorWin()).toBeTruthy()
+    expect(playerEscrow.playerWin()).toBeTruthy()
+    expect(playerEscrow.refund()).toBeTruthy()
+  })
+
+  it('shares identical win leaves so the winner sweeps both escrows via one leaf', () => {
+    expect(playerEscrow.creatorWinScriptHex).toBe(houseEscrow.creatorWinScriptHex)
+    expect(playerEscrow.playerWinScriptHex).toBe(houseEscrow.playerWinScriptHex)
+  })
+
+  it('owner-scopes the refund leaf — player vs house escrow addresses differ (no cross-theft)', () => {
+    // Different refund pubkey → different refund leaf → different taproot output.
+    expect(playerEscrow.refundScriptHex).not.toBe(houseEscrow.refundScriptHex)
+    expect(hex.encode(playerEscrow.pkScript)).not.toBe(hex.encode(houseEscrow.pkScript))
   })
 })
 

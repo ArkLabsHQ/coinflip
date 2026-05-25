@@ -95,7 +95,9 @@ no selective-stall advantage. Fair.
 
 ## Iteration plan
 1. ✅ Audit (this doc).
-2. lib: per-party escrow scripts (`PlayerEscrow`/`HouseEscrow`) with owner refunds + tests.
+2. ✅ lib: `CoinflipEscrowScript` (refund-pubkey-parameterized) + tests — shared win
+   leaves (winner sweeps both), owner-scoped refund (player vs house escrow
+   addresses differ → no cross-theft). `script.ts`, proven in `coinflip.test.ts`.
 3. server/client: escrow into the two addresses; sweep across both; refund flow.
 4. e2e: griefing test (house stalls → player refunds; player can't be robbed).
 5. contract registration + watching + crash reconciliation.

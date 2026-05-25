@@ -38,8 +38,10 @@ export {
 export {
   CoinflipSetupScript,
   CoinflipFinalScript,
+  CoinflipEscrowScript,
   type CoinflipSetupOptions,
   type CoinflipFinalOptions,
+  type CoinflipEscrowOptions,
 } from './script'
 
 // Transaction building

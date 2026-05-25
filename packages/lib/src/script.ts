@@ -217,3 +217,78 @@ export class CoinflipFinalScript extends VtxoScript {
     return this.findLeaf(this.abortScriptHex)
   }
 }
+
+export interface CoinflipEscrowOptions {
+  creatorPubkey: Uint8Array
+  playerPubkey: Uint8Array
+  serverPubkey: Uint8Array
+  creatorHash: Uint8Array
+  playerHash: Uint8Array
+  finalExpiration: bigint
+  /**
+   * The FUNDER's pubkey: only this party (+ server) may refund after the
+   * timeout. Set to `playerPubkey` for the player's escrow and `creatorPubkey`
+   * for the house's. This is the abort-theft fix — because the player's escrow
+   * refund leaf requires the PLAYER's key, the house can never sweep the
+   * player's stake on a stall.
+   */
+  refundPubkey: Uint8Array
+}
+
+/**
+ * Per-party escrow output. Both parties fund a (different) escrow address that
+ * shares the win leaves but differs only in the owner-scoped refund leaf:
+ *   1. creatorWin: condition(sizes differ → house wins) + creator + server
+ *   2. playerWin:  condition(sizes equal → player wins) + player + server
+ *   3. refund:     CLTV(finalExpiration) + refundPubkey(funder) + server
+ *
+ * The winner sweeps BOTH escrow VTXOs through `creatorWin`/`playerWin` (same
+ * leaf script in either escrow); on a stall each side reclaims ONLY its own
+ * escrow via `refund`. No cross-party theft is expressible.
+ */
+export class CoinflipEscrowScript extends VtxoScript {
+  readonly creatorWinScriptHex: string
+  readonly playerWinScriptHex: string
+  readonly refundScriptHex: string
+
+  constructor(readonly options: CoinflipEscrowOptions) {
+    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, refundPubkey } = options
+
+    const conditionScript = buildCoinflipConditionScript(creatorHash, playerHash)
+
+    const creatorWinCondition = new Uint8Array([...conditionScript, OP.NOT])
+    const creatorWinTapscript = ConditionMultisigTapscript.encode({
+      conditionScript: creatorWinCondition,
+      pubkeys: [creatorPubkey, serverPubkey],
+    })
+
+    const playerWinTapscript = ConditionMultisigTapscript.encode({
+      conditionScript,
+      pubkeys: [playerPubkey, serverPubkey],
+    })
+
+    // Owner-scoped refund: only the funder (+ server) can reclaim after timeout.
+    const refundTapscript = CLTVMultisigTapscript.encode({
+      absoluteTimelock: finalExpiration,
+      pubkeys: [refundPubkey, serverPubkey],
+    })
+
+    super([creatorWinTapscript.script, playerWinTapscript.script, refundTapscript.script])
+
+    this.creatorWinScriptHex = hex.encode(creatorWinTapscript.script)
+    this.playerWinScriptHex = hex.encode(playerWinTapscript.script)
+    this.refundScriptHex = hex.encode(refundTapscript.script)
+  }
+
+  creatorWin(): TapLeafScript {
+    return this.findLeaf(this.creatorWinScriptHex)
+  }
+
+  playerWin(): TapLeafScript {
+    return this.findLeaf(this.playerWinScriptHex)
+  }
+
+  refund(): TapLeafScript {
+    return this.findLeaf(this.refundScriptHex)
+  }
+}

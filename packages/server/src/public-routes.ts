@@ -2,8 +2,10 @@ import { Router, Request, Response } from 'express'
 import {
   handleTrustlessPlay,
   handleTrustlessCommit,
+  handleTrustlessRefund,
   type TrustlessPlayRequest,
   type TrustlessCommitRequest,
+  type TrustlessRefundRequest,
 } from './trustless-game.js'
 import { HouseBusyError } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
@@ -93,6 +95,33 @@ export function createPublicRoutes(deps: AppDeps): Router {
         res.status(400).json({ error: message })
       } else {
         console.error('Commit error:', err)
+        res.status(500).json({ error: message })
+      }
+    }
+  })
+
+  // POST /api/game/:id/refund — build the player's escrow-refund PSBT so the
+  // player can reclaim a stalled game trustlessly. The server only assembles
+  // the unsigned tx (refund leaf is player+server, CLTV-locked, pays the
+  // player's own address); the client verifies, signs, and submits after the
+  // timelock. Clients should fetch this right after escrowing and keep it.
+  router.post('/api/game/:id/refund', async (req: Request, res: Response) => {
+    try {
+      const body = req.body as TrustlessRefundRequest
+      if (!body.playerEscrow?.txid) {
+        res.status(400).json({ error: 'Missing required field: playerEscrow' })
+        return
+      }
+      const result = await handleTrustlessRefund(String(req.params.id), body, deps)
+      res.json(result)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      if (message.includes('not found')) {
+        res.status(404).json({ error: message })
+      } else if (message.includes('resolved') || message.includes('no player change')) {
+        res.status(400).json({ error: message })
+      } else {
+        console.error('Refund error:', err)
         res.status(500).json({ error: message })
       }
     }

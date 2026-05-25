@@ -22,6 +22,7 @@ import {
   getPlayerEscrowAddress,
   getHouseEscrowAddress,
   buildSweepTransaction,
+  buildRefundTransaction,
   type Game,
   type SweepEscrow,
   type BuiltOffchainTx,
@@ -476,6 +477,64 @@ export async function handleTrustlessCommit(
     reservations.release(gameId)
     return result
   })
+}
+
+export interface TrustlessRefundRequest {
+  /** The player's escrow VTXO outpoint to reclaim. */
+  playerEscrow: Outpoint
+}
+
+export interface TrustlessRefundResult {
+  /** Unsigned refund tx spending the player escrow back to the player. The
+   * client verifies the output pays its own address, signs, and submits. */
+  refundPsbt: string
+  refundCheckpoints: string[]
+  /** The CLTV the refund is timelocked to; arkd won't co-sign before it. */
+  finalExpiration: number
+  /** Address the refund pays — the client must check this is its own. */
+  refundAddress: string
+}
+
+/**
+ * Build the player's escrow-refund tx so a player can reclaim a stalled game
+ * WITHOUT trusting the server to resolve. The refund leaf is owner-scoped
+ * (player + server, CLTV at `finalExpiration`), so the server can't redirect
+ * the funds — it only assembles the unsigned tx. Only the player's key can
+ * sign it, and arkd won't co-sign until `finalExpiration`. The client fetches
+ * this right after escrowing and keeps it, so even a later server outage can't
+ * strand the stake. Rejected once the game is resolved (escrow already swept).
+ */
+export async function handleTrustlessRefund(
+  gameId: string,
+  req: TrustlessRefundRequest,
+  deps: AppDeps,
+): Promise<TrustlessRefundResult> {
+  const game = await deps.repos.games.get(gameId)
+  if (!game) throw new Error(`Game not found: ${gameId}`)
+  if (game.status === 'resolved') throw new Error(`Game ${gameId} is resolved; escrow already swept`)
+  if (!game.player_change_address) throw new Error(`Game ${gameId} has no player change address`)
+
+  const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+  const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
+  const game2 = await buildGame(
+    deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
+    state.finalExpiration, state.setupExpiration,
+  )
+  const playerEscrowScript = getPlayerEscrowScript(game2)
+  const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
+  const refund = buildRefundTransaction(deps.arkInfo, networkHrp, {
+    escrowScript: playerEscrowScript,
+    txid: req.playerEscrow.txid,
+    vout: req.playerEscrow.vout,
+    value: req.playerEscrow.value,
+    refundAddress: game.player_change_address,
+  })
+  return {
+    refundPsbt: hex.encode(refund.arkTx.toPSBT()),
+    refundCheckpoints: refund.checkpoints.map((c) => hex.encode(c.toPSBT())),
+    finalExpiration: state.finalExpiration,
+    refundAddress: game.player_change_address,
+  }
 }
 
 // Re-export for callers that need the row shape.

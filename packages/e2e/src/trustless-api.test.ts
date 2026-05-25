@@ -349,4 +349,32 @@ describe('trustless coin flow (server handlers)', () => {
       expect(msg).not.toMatch(/double|already spent|spent vtxo/i)
     }
   }, 300_000)
+
+  it('builds a player refund PSBT for a stalled game (reclaimable, CLTV-locked, pays the player)', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    const { gameId, playerEscrow } = await playAndEscrow()
+
+    // The player can reclaim WITHOUT the server resolving — proof the escrow
+    // isn't stranded if the server stalls after the escrow step.
+    const refund = await server.handleTrustlessRefund(gameId, { playerEscrow }, deps)
+    expect(refund.refundAddress.startsWith(HRP)).toBe(true)
+    expect(refund.finalExpiration).toBeGreaterThan(Math.floor(Date.now() / 1000)) // future CLTV
+
+    const tx = Transaction.fromPSBT(hex.decode(refund.refundPsbt))
+    expect(tx.lockTime).toBe(refund.finalExpiration) // timelocked to finalExpiration
+    expect(tx.inputsLength).toBe(1) // the player escrow VTXO
+    // Output 0 returns the FULL escrow value to the player's own address (no
+    // fee — offchain tx); output 1 is the zero-value P2A anchor.
+    const out0 = tx.getOutput(0)
+    expect(Number(out0.amount)).toBe(playerEscrow.value)
+    expect(hex.encode(out0.script!)).toBe(hex.encode(ArkAddress.decode(refund.refundAddress).pkScript))
+    console.log(`[trustless-api] refund PSBT ok — ${playerEscrow.value} sats reclaimable after ${refund.finalExpiration}`)
+  }, 120_000)
+
+  it('refuses to refund a resolved game (escrow already swept)', async () => {
+    if (!arkAvailable) return
+    const { gameId, playerEscrow, playerSecretHex } = await playAndEscrow()
+    await server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps)
+    await expect(server.handleTrustlessRefund(gameId, { playerEscrow }, deps)).rejects.toThrow(/resolved/)
+  }, 120_000)
 })

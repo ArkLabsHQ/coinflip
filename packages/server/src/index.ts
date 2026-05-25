@@ -38,10 +38,13 @@ export { startExpiryTimer } from './game-engine.js'
 export {
   handleTrustlessPlay,
   handleTrustlessCommit,
+  handleTrustlessRefund,
   type TrustlessPlayRequest,
   type TrustlessPlayResult,
   type TrustlessCommitRequest,
   type TrustlessCommitResult,
+  type TrustlessRefundRequest,
+  type TrustlessRefundResult,
   type Outpoint,
 } from './trustless-game.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'

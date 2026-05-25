@@ -46,12 +46,14 @@ export interface Game {
   setupExpiration?: number
   finalExpiration?: number
   /**
-   * Variable-odds parameters. When both are set the escrow win condition is
-   * `roll < oddsTarget` over `oddsN` outcomes (probability `oddsTarget/oddsN`);
-   * unset → the 50/50 coin. Flows into `CoinflipEscrowScript`.
+   * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the escrow win
+   * condition is `(oddsLo ?? 0) <= roll < oddsTarget` over `oddsN` outcomes
+   * (probability `(oddsTarget - (oddsLo ?? 0))/oddsN`); unset → the 50/50 coin.
+   * Flows into `CoinflipEscrowScript`.
    */
   oddsN?: number
   oddsTarget?: number
+  oddsLo?: number
 }
 
 // -- Game Events --

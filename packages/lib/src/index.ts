@@ -69,6 +69,7 @@ export {
   generateSecret,
   determineVariableWinner,
   generateVariableSecret,
+  computeVariableRoll,
   addConditionWitness,
   getConditionWitness,
   type BuiltOffchainTx,

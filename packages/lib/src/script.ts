@@ -137,13 +137,18 @@ function pushNum(v: number): number[] {
   throw new Error(`pushNum: ${v} out of supported range [0,127]`)
 }
 
+/** value ∈ [lo, hi) → leaves one bool on the stack (consumes the value). */
+function inRangeOps(lo: number, hi: number): number[] {
+  return [
+    OP.DUP, ...pushNum(lo), OP.GREATERTHANOREQUAL, // v (v>=lo)
+    OP.SWAP, ...pushNum(hi), OP.LESSTHAN,           // (v>=lo) (v<hi)
+    OP.BOOLAND,                                     // inRange
+  ]
+}
+
 /** size ∈ [base, base+n) → leaves one bool on the stack (consumes the size). */
 function rangeCheckOps(base: number, n: number): number[] {
-  return [
-    OP.DUP, ...pushNum(base), OP.GREATERTHANOREQUAL, // size (size>=base)
-    OP.SWAP, ...pushNum(base + n), OP.LESSTHAN,       // (size>=base) (size<base+n)
-    OP.BOOLAND,                                       // isInRange
-  ]
+  return inRangeOps(base, base + n)
 }
 
 /**
@@ -154,9 +159,11 @@ function rangeCheckOps(base: number, n: number): number[] {
  *
  * Fairness: each party commits a secret hash whose LENGTH encodes a digit in
  * [0, n) — chosen before seeing the opponent's digit (commit-reveal). The roll
- * is `(digitC + digitP) mod n`; the player wins iff `roll < target`, i.e. with
- * probability `target/n`. OP_MOD is disabled in Script, so the mod is done with
- * a single conditional subtraction (sum ∈ [0, 2n-2] ⇒ one `-n` suffices).
+ * is `(digitC + digitP) mod n`; the player wins iff `lo <= roll < target`, i.e.
+ * with probability `(target - lo)/n`. This arbitrary range lets a skin express
+ * "roll a 1" ([0,1)), "roll 4+" ([3,6)), "exactly a 6" ([5,6)), etc. OP_MOD is
+ * disabled in Script, so the mod is a single conditional subtraction (sum ∈
+ * [0, 2n-2] ⇒ one `-n` suffices).
  *
  * An out-of-range secret makes its submitter LOSE (not void the game), so a
  * sure-loser can't grief a refund by revealing a bad length — exactly the
@@ -167,10 +174,13 @@ function buildVariableOddsConditionScript(
   playerHash: Uint8Array,
   n: number,
   target: number,
+  lo = 0,
 ): Uint8Array {
   const base = VARIABLE_ODDS_BASE_LEN
   if (!Number.isInteger(n) || n < 2 || base + n > 127) throw new Error(`invalid n: ${n}`)
-  if (!Number.isInteger(target) || target < 1 || target >= n) throw new Error(`invalid target: ${target}`)
+  if (!Number.isInteger(lo) || !Number.isInteger(target) || lo < 0 || target <= lo || target > n) {
+    throw new Error(`invalid odds range: need 0<=lo<target<=n (got lo=${lo}, target=${target}, n=${n})`)
+  }
 
   return new Uint8Array([
     // Validate both hashes; leaves: cS pS
@@ -194,7 +204,7 @@ function buildVariableOddsConditionScript(
         OP.ADD,                                      // sum ∈ [0, 2n-2]
         OP.DUP, ...pushNum(n), OP.GREATERTHANOREQUAL,
         OP.IF, ...pushNum(n), OP.SUB, OP.ENDIF,      // roll = sum mod n
-        ...pushNum(target), OP.LESSTHAN,             // roll < target → player wins
+        ...inRangeOps(lo, target),                   // lo <= roll < target → player wins
       OP.ENDIF,
     OP.ENDIF,
   ])
@@ -313,13 +323,15 @@ export interface CoinflipEscrowOptions {
    */
   refundPubkey: Uint8Array
   /**
-   * Variable-odds parameters. When BOTH are set the win condition becomes
-   * `roll < oddsTarget` over `oddsN` outcomes (probability `oddsTarget/oddsN`)
-   * instead of the 50/50 coin (equal/different secret length). The escrow
-   * structure (leaves, refund, sweep) is otherwise identical.
+   * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the win
+   * condition becomes `oddsLo <= roll < oddsTarget` over `oddsN` outcomes
+   * (probability `(oddsTarget - oddsLo)/oddsN`) instead of the 50/50 coin.
+   * `oddsLo` defaults to 0 (a low-threshold bet); an arbitrary range expresses
+   * "roll 4+", "exactly a 6", etc. Escrow structure is otherwise identical.
    */
   oddsN?: number
   oddsTarget?: number
+  oddsLo?: number
 }
 
 /**
@@ -339,12 +351,12 @@ export class CoinflipEscrowScript extends VtxoScript {
   readonly refundScriptHex: string
 
   constructor(readonly options: CoinflipEscrowOptions) {
-    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, refundPubkey, oddsN, oddsTarget } = options
+    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, refundPubkey, oddsN, oddsTarget, oddsLo } = options
 
     // Variable-odds when both params are set; otherwise the 50/50 coin.
     const conditionScript =
       oddsN !== undefined && oddsTarget !== undefined
-        ? buildVariableOddsConditionScript(creatorHash, playerHash, oddsN, oddsTarget)
+        ? buildVariableOddsConditionScript(creatorHash, playerHash, oddsN, oddsTarget, oddsLo ?? 0)
         : buildCoinflipConditionScript(creatorHash, playerHash)
 
     const creatorWinCondition = new Uint8Array([...conditionScript, OP.NOT])

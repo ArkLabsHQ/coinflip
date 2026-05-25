@@ -60,6 +60,7 @@ export interface TrustlessPlayRequest {
    */
   oddsN?: number
   oddsTarget?: number
+  oddsLo?: number
 }
 
 export interface TrustlessPlayResult {
@@ -75,6 +76,7 @@ export interface TrustlessPlayResult {
   /** Variable-odds echo + economics so the client can show/verify the bet. */
   oddsN?: number
   oddsTarget?: number
+  oddsLo?: number
   /** Total pot the winner sweeps = player stake (`betAmount`) + house stake. */
   pot: number
 }
@@ -140,6 +142,7 @@ interface TrustlessState {
    */
   oddsN?: number
   oddsTarget?: number
+  oddsLo?: number
 }
 
 /**
@@ -178,7 +181,7 @@ async function buildGame(
   playerHashHex: string,
   finalExpiration: number,
   setupExpiration: number,
-  odds?: { oddsN: number; oddsTarget: number },
+  odds?: { oddsN: number; oddsTarget: number; oddsLo: number },
 ): Promise<Game> {
   const housePub = await deps.identity.xOnlyPublicKey()
   const playerPub = toXOnly(hex.decode(playerPubkeyHex))
@@ -193,6 +196,7 @@ async function buildGame(
     player: { pubkey: playerPub, hash: hex.decode(playerHashHex) },
     oddsN: odds?.oddsN,
     oddsTarget: odds?.oddsTarget,
+    oddsLo: odds?.oddsLo,
   }
 }
 
@@ -203,8 +207,9 @@ async function buildGame(
  * is in basis points (300 = 3%). Pure + integer for deterministic agreement
  * with what's escrowed. Unit-tested.
  */
-export function computeHouseStake(playerStake: number, n: number, target: number, edgeBps: number): number {
-  return Math.floor((playerStake * (n - target) * (10000 - edgeBps)) / (target * 10000))
+export function computeHouseStake(playerStake: number, n: number, target: number, lo: number, edgeBps: number): number {
+  const win = target - lo // size of the player's winning range [lo, target)
+  return Math.floor((playerStake * (n - win) * (10000 - edgeBps)) / (win * 10000))
 }
 
 /** Configured variable-odds house edge in basis points (default 3%). */
@@ -214,9 +219,9 @@ async function getOddsEdgeBps(deps: AppDeps): Promise<number> {
 }
 
 /** Extract variable-odds params from persisted state (undefined → coin). */
-function oddsFromState(state: TrustlessState): { oddsN: number; oddsTarget: number } | undefined {
+function oddsFromState(state: TrustlessState): { oddsN: number; oddsTarget: number; oddsLo: number } | undefined {
   return state.oddsN !== undefined && state.oddsTarget !== undefined
-    ? { oddsN: state.oddsN, oddsTarget: state.oddsTarget }
+    ? { oddsN: state.oddsN, oddsTarget: state.oddsTarget, oddsLo: state.oddsLo ?? 0 }
     : undefined
 }
 
@@ -290,17 +295,17 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   const dust = Number(deps.arkInfo.dust ?? 546n)
   const isVariable = req.oddsN !== undefined && req.oddsTarget !== undefined
   let houseStake = req.tier
-  let odds: { oddsN: number; oddsTarget: number } | undefined
+  let odds: { oddsN: number; oddsTarget: number; oddsLo: number } | undefined
   if (isVariable) {
-    const n = req.oddsN as number, target = req.oddsTarget as number
-    if (!Number.isInteger(n) || n < 2 || !Number.isInteger(target) || target < 1 || target >= n) {
-      throw new Error(`Invalid odds: need oddsN>=2 and 1<=oddsTarget<oddsN (got n=${n}, target=${target})`)
+    const n = req.oddsN as number, target = req.oddsTarget as number, lo = req.oddsLo ?? 0
+    if (!Number.isInteger(n) || n < 2 || !Number.isInteger(target) || !Number.isInteger(lo) || lo < 0 || target <= lo || target > n) {
+      throw new Error(`Invalid odds: need oddsN>=2 and 0<=oddsLo<oddsTarget<=oddsN (got n=${n}, target=${target}, lo=${lo})`)
     }
-    houseStake = computeHouseStake(req.tier, n, target, await getOddsEdgeBps(deps))
+    houseStake = computeHouseStake(req.tier, n, target, lo, await getOddsEdgeBps(deps))
     if (houseStake < dust) {
-      throw new Error(`Odds ${target}/${n} at tier ${req.tier} give a sub-dust house stake (${houseStake}); raise the tier or the win probability.`)
+      throw new Error(`Odds [${lo},${target})/${n} at tier ${req.tier} give a sub-dust house stake (${houseStake}); raise the tier or the win probability.`)
     }
-    odds = { oddsN: n, oddsTarget: target }
+    odds = { oddsN: n, oddsTarget: target, oddsLo: lo }
   }
 
   const houseSecret = isVariable
@@ -380,6 +385,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     houseEscrow,
     oddsN: odds?.oddsN,
     oddsTarget: odds?.oddsTarget,
+    oddsLo: odds?.oddsLo,
     pot: req.tier + houseStake,
   }
 }
@@ -416,7 +422,7 @@ async function buildCommitContext(
   // Variable-odds resolve via the mod-N rule; the coin via secret-length parity.
   const odds = oddsFromState(state)
   const winnerRole = odds
-    ? determineVariableWinner(houseSecret, playerSecret, odds.oddsN, odds.oddsTarget)
+    ? determineVariableWinner(houseSecret, playerSecret, odds.oddsN, odds.oddsTarget, odds.oddsLo)
     : determineWinner(houseSecret, playerSecret)
   const winner: 'house' | 'player' = winnerRole === 'creator' ? 'house' : 'player'
 
@@ -437,7 +443,7 @@ async function buildCommitContext(
   const rake = winner === 'player' && !odds ? await calcRake(pot, deps) : 0
   const proof =
     `house secret ${houseSecret.length}B, player secret ${playerSecret.length}B ` +
-    `→ ${winner} wins (pot ${pot})${odds ? ` [odds ${odds.oddsTarget}/${odds.oddsN}]` : ''}.`
+    `→ ${winner} wins (pot ${pot})${odds ? ` [odds [${odds.oddsLo},${odds.oddsTarget})/${odds.oddsN}]` : ''}.`
 
   return {
     winner, houseSecret, playerSecret,

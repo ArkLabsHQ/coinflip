@@ -109,6 +109,7 @@ function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScrip
     refundPubkey,
     oddsN: game.oddsN,
     oddsTarget: game.oddsTarget,
+    oddsLo: game.oddsLo,
   })
 }
 
@@ -513,13 +514,15 @@ export function generateSecret(choice: 'heads' | 'tails'): Uint8Array {
 /**
  * Off-chain mirror of the variable-odds on-chain condition (must match its
  * branch order exactly): an out-of-range secret makes its submitter lose, else
- * the player wins iff `(digitC + digitP) mod n < target`. `digit = length - base`.
+ * the player wins iff `lo <= (digitC + digitP) mod n < target`. `digit = length
+ * - base`; `lo` defaults to 0.
  */
 export function determineVariableWinner(
   creatorSecret: Uint8Array,
   playerSecret: Uint8Array,
   n: number,
   target: number,
+  lo = 0,
 ): 'creator' | 'player' {
   const base = VARIABLE_ODDS_BASE_LEN
   const digitP = playerSecret.length - base
@@ -527,7 +530,24 @@ export function determineVariableWinner(
   if (digitP < 0 || digitP >= n) return 'creator' // player out of range → loses
   if (digitC < 0 || digitC >= n) return 'player' // creator out of range → loses
   const roll = (digitC + digitP) % n
-  return roll < target ? 'player' : 'creator'
+  return roll >= lo && roll < target ? 'player' : 'creator'
+}
+
+/**
+ * The roll `(digitC + digitP) mod n` for display (e.g. the dice face the player
+ * rolled), or null if either secret's length is out of [base, base+n) — in which
+ * case the outcome was decided by the cheat-penalty, not a fair roll.
+ */
+export function computeVariableRoll(
+  creatorSecret: Uint8Array,
+  playerSecret: Uint8Array,
+  n: number,
+): number | null {
+  const base = VARIABLE_ODDS_BASE_LEN
+  const digitP = playerSecret.length - base
+  const digitC = creatorSecret.length - base
+  if (digitP < 0 || digitP >= n || digitC < 0 || digitC >= n) return null
+  return (digitC + digitP) % n
 }
 
 /**

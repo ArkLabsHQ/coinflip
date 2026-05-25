@@ -118,7 +118,7 @@ describe('variable-odds on-chain condition', () => {
 
   const total = async (w: Wallet) => (await w.getVtxos()).reduce((a, v) => a + v.value, 0)
 
-  it('the winner (and only the winner) sweeps across odds, wraparound, and the boundary', async () => {
+  it('the winner sweeps across arbitrary ranges (roll 4+, exactly a 6), wraparound, and boundaries', async () => {
     if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
     const housePub = await houseId.xOnlyPublicKey()
     const playerPub = await playerId.xOnlyPublicKey()
@@ -126,26 +126,31 @@ describe('variable-odds on-chain condition', () => {
 
     // n=6, target=3 → player wins 1/2. Cases cover: player no-wrap, house
     // boundary (roll==target), house with-wrap+boundary, player with-wrap.
-    const cases: Array<[number, number, number, number]> = [
-      [6, 3, 0, 0], // sum 0 → roll 0 < 3 → player
-      [6, 3, 1, 2], // sum 3 → roll 3 == target → house
-      [6, 3, 4, 5], // sum 9 → 9-6=3 == target → house (wraps)
-      [6, 3, 5, 2], // sum 7 → 7-6=1 < 3 → player (wraps)
+    // [n, target, lo, dC, dP] — player wins iff lo <= (dC+dP) mod n < target.
+    // Covers low-threshold, "roll 4+" ([3,6)), "exactly a 6" ([5,6)), wraparound
+    // into a shifted range, and the out-of-range (house) cases.
+    const cases: Array<[number, number, number, number, number]> = [
+      [6, 3, 0, 0, 0], // roll 0 ∈ [0,3) → player
+      [6, 6, 3, 1, 2], // roll 3 ∈ [3,6) "roll 4+" → player
+      [6, 6, 3, 0, 0], // roll 0 ∉ [3,6) → house
+      [6, 6, 3, 4, 5], // sum 9 → roll 3 ∈ [3,6) → player (wraps into the range)
+      [6, 6, 5, 2, 3], // roll 5 ∈ [5,6) "exactly a 6" → player
+      [6, 6, 5, 0, 1], // roll 1 ∉ [5,6) → house
     ]
 
-    for (const [n, target, dC, dP] of cases) {
+    for (const [n, target, lo, dC, dP] of cases) {
       const cSecret = secretOfDigit(dC)
       const pSecret = secretOfDigit(dP)
       const script = new CoinflipEscrowScript({
         creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey,
         creatorHash: sha(cSecret), playerHash: sha(pSecret),
-        finalExpiration: past, refundPubkey: housePub, oddsN: n, oddsTarget: target,
+        finalExpiration: past, refundPubkey: housePub, oddsN: n, oddsTarget: target, oddsLo: lo,
       })
       const pk = script.address(HRP, serverPubkey).pkScript
       const hEsc = await escrow(houseW, houseId, pk, BET)
       const pEsc = await escrow(playerW, playerId, pk, BET)
 
-      const winner = determineVariableWinner(cSecret, pSecret, n, target)
+      const winner = determineVariableWinner(cSecret, pSecret, n, target, lo)
       const leaf = winner === 'creator' ? script.creatorWin() : script.playerWin()
       const winId = winner === 'creator' ? houseId : playerId
       const winW = winner === 'creator' ? houseW : playerW
@@ -159,7 +164,7 @@ describe('variable-odds on-chain condition', () => {
       await spend(arkTx, checkpoints, winId, [0, 1], [cSecret, pSecret])
       await sleep(6000)
       const after = await total(winW)
-      console.log(`[variable-odds] n=${n} target=${target} digits(${dC},${dP}) → ${winner} wins; ${before}→${after}`)
+      console.log(`[variable-odds] n=${n} range[${lo},${target}) digits(${dC},${dP}) → ${winner} wins; ${before}→${after}`)
       expect(after - before).toBeGreaterThanOrEqual(pot - 100)
     }
   }, 300_000)

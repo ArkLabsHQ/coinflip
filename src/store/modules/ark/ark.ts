@@ -7,7 +7,7 @@ import {
   type WalletBalance, type ExtendedVirtualCoin, type ArkTxInput, type ArkProvider, type Identity,
 } from '@arkade-os/sdk'
 import { initSwaps, destroySwaps } from '@/services/boltz'
-import { getNetwork, play as apiPlay, commit as apiCommit, type Outpoint } from '@/services/api'
+import { getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund, type Outpoint } from '@/services/api'
 import { createHash } from '@/utils/crypto'
 
 /** VtxoInput shape expected by the server's /api/play endpoint. */
@@ -37,6 +37,46 @@ function vtxoToPlayerInput(v: ExtendedVirtualCoin): VtxoInput {
     },
     leaf: hex.encode(forfeitScript),
   }
+}
+
+/**
+ * Stalled-bet refunds. When the player escrows a stake we immediately fetch the
+ * server-built refund tx and persist it locally — BEFORE revealing/committing.
+ * If the server then stalls (or the tab closes mid-game), the player still holds
+ * a self-submittable refund and can reclaim the stake after the CLTV with no
+ * trust in the server. The stash is cleared once the game resolves.
+ */
+const REFUNDS_KEY = 'trustlessRefunds'
+
+export interface StashedRefund {
+  gameId: string
+  tier: number
+  playerEscrow: Outpoint
+  refundPsbt: string
+  refundCheckpoints: string[]
+  finalExpiration: number
+  createdAt: number
+}
+
+function loadRefunds(): StashedRefund[] {
+  try {
+    const arr = JSON.parse(localStorage.getItem(REFUNDS_KEY) || '[]')
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
+}
+
+function saveRefunds(list: StashedRefund[]): void {
+  localStorage.setItem(REFUNDS_KEY, JSON.stringify(list))
+}
+
+function stashRefund(r: StashedRefund): void {
+  saveRefunds([...loadRefunds().filter((x) => x.gameId !== r.gameId), r])
+}
+
+function clearRefund(gameId: string): void {
+  saveRefunds(loadRefunds().filter((x) => x.gameId !== gameId))
 }
 
 export interface ArkServerInfo {
@@ -521,21 +561,72 @@ const ark: Module<ArkState, RootState> = {
       const playerEscrowTxid = await submitOffchain(arkProvider, identity, escrowTx.arkTx, escrowTx.checkpoints, [0])
       const playerEscrow: Outpoint = { txid: playerEscrowTxid, vout: 0, value: tier }
 
-      // 3. Reveal + resolve.
-      const result = await apiCommit(playRes.gameId, playerSecretHex, playerEscrow)
-
-      // Player win → the server built the playerWin sweep; we sign + submit it.
-      if (result.winner === 'player' && result.sweep) {
-        const s = result.sweep
-        const sweepArk = Transaction.fromPSBT(hex.decode(s.sweepPsbt))
-        const sweepCps = s.sweepCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
-        const witness = s.witnessHex.map((w) => hex.decode(w))
-        const inputs = Array.from({ length: s.inputCount }, (_, i) => i)
-        await submitOffchain(arkProvider, identity, sweepArk, sweepCps, inputs, witness)
+      // 2b. Stash a self-submittable refund BEFORE revealing. If the server now
+      // stalls, the player can still reclaim the escrow after finalExpiration
+      // without trusting it. Best-effort: a stash failure shouldn't abort a game
+      // that will almost certainly resolve, but log it loudly.
+      try {
+        const r = await apiRefund(playRes.gameId, playerEscrow)
+        stashRefund({
+          gameId: playRes.gameId, tier, playerEscrow,
+          refundPsbt: r.refundPsbt, refundCheckpoints: r.refundCheckpoints,
+          finalExpiration: r.finalExpiration, createdAt: Date.now(),
+        })
+      } catch (e) {
+        console.warn('[trustless] could not stash refund (continuing):', e instanceof Error ? e.message : e)
       }
+
+      // 3. Reveal + resolve. On ANY failure the stash is kept so the player can
+      // reclaim after the timelock; on success the escrow is swept, so we clear
+      // it. Player win → the server built the playerWin sweep; we sign + submit.
+      let result: Awaited<ReturnType<typeof apiCommit>>
+      try {
+        result = await apiCommit(playRes.gameId, playerSecretHex, playerEscrow)
+        if (result.winner === 'player' && result.sweep) {
+          const s = result.sweep
+          const sweepArk = Transaction.fromPSBT(hex.decode(s.sweepPsbt))
+          const sweepCps = s.sweepCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+          const witness = s.witnessHex.map((w) => hex.decode(w))
+          const inputs = Array.from({ length: s.inputCount }, (_, i) => i)
+          await submitOffchain(arkProvider, identity, sweepArk, sweepCps, inputs, witness)
+        }
+      } catch (e) {
+        const when = new Date(playRes.finalExpiration * 1000).toLocaleString()
+        throw new Error(
+          `${e instanceof Error ? e.message : 'Game failed to resolve'} — your ${tier} sat stake is safe and reclaimable after ${when} (see "Reclaim stalled bets").`,
+        )
+      }
+      clearRefund(playRes.gameId)
 
       await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
       return result
+    },
+
+    /** Locally-stashed stalled bets (escrows reclaimable if the server stalled). */
+    listStalledBets(): StashedRefund[] {
+      return loadRefunds()
+    },
+
+    /**
+     * Reclaim a stalled bet by signing + submitting its stashed refund. arkd
+     * enforces the CLTV, so this only succeeds at/after finalExpiration; before
+     * that we surface a clear "not yet" message. Clears the stash on success.
+     */
+    async reclaimStalledBet({ rootState, dispatch }, gameId: string) {
+      if (!sdkWallet) throw new Error('Wallet not connected')
+      const privateKey = rootState.wallet.privateKey
+      if (!privateKey) throw new Error('No wallet key available')
+      const stash = loadRefunds().find((x) => x.gameId === gameId)
+      if (!stash) throw new Error('No stashed refund for this game')
+      if (Math.floor(Date.now() / 1000) < stash.finalExpiration) {
+        throw new Error(`Not reclaimable yet — the timelock lifts at ${new Date(stash.finalExpiration * 1000).toLocaleString()}.`)
+      }
+      const identity = SingleKey.fromHex(privateKey)
+      const refundArk = Transaction.fromPSBT(hex.decode(stash.refundPsbt))
+      const refundCps = stash.refundCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+      await submitOffchain(sdkWallet.arkProvider, identity, refundArk, refundCps, [0])
+      clearRefund(gameId)
+      await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
     },
   },
 

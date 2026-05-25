@@ -46,6 +46,15 @@ export interface CommitResponse {
   }
 }
 
+/** /api/game/:id/refund — unsigned PlayerEscrow refund tx the client signs +
+ *  submits to reclaim a stalled game (only succeeds after `finalExpiration`). */
+export interface RefundResponse {
+  refundPsbt: string
+  refundCheckpoints: string[]
+  finalExpiration: number
+  refundAddress: string
+}
+
 export interface GameResponse {
   id: string
   tier: number
@@ -109,4 +118,12 @@ export function commit(
 
 export function getGame(gameId: string): Promise<GameResponse> {
   return request(`/api/game/${gameId}`)
+}
+
+/** Fetch the unsigned refund tx for a (possibly stalled) game's player escrow. */
+export function refund(gameId: string, playerEscrow: Outpoint): Promise<RefundResponse> {
+  return request(`/api/game/${gameId}/refund`, {
+    method: 'POST',
+    body: JSON.stringify({ playerEscrow }),
+  })
 }

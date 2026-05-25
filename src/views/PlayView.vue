@@ -28,6 +28,10 @@
       </div>
     </div>
 
+    <!-- Trustless safety net: if a game ever fails to resolve, the player's
+         escrowed stake is reclaimable here (no trust in the server). -->
+    <StalledBets />
+
     <!-- Sparkline row: last-50 win/loss results. Rollbit pattern. -->
     <div class="sparkline" v-if="sparkline.length">
       <span
@@ -155,6 +159,7 @@ import { defineComponent, ref, computed, onMounted, onUnmounted, watch } from 'v
 import { useStore } from 'vuex'
 import TierSelector from '@/components/TierSelector.vue'
 import GameHistoryList, { type GameHistoryItem } from '@/components/GameHistoryList.vue'
+import StalledBets from '@/components/StalledBets.vue'
 import { getTiers } from '@/services/api'
 import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState } from '@/skins'
 
@@ -182,7 +187,7 @@ interface SlabResult { won: boolean; amount: number }
 
 export default defineComponent({
   name: 'PlayView',
-  components: { TierSelector, GameHistoryList },
+  components: { TierSelector, GameHistoryList, StalledBets },
   emits: ['open-wallet'],
   setup(_props, { emit }) {
     const store = useStore()

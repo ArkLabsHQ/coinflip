@@ -24,16 +24,6 @@ export interface OddsBet {
   target: number
 }
 
-/** A thematic bet option a skin offers (chip in the odds selector). */
-export interface OddsPreset {
-  /** Stable id, used for selection and as the render :key. */
-  id: string
-  /** Chip label in the skin's own language ("ROLL 4+", "EXACTLY 6", "3×"). */
-  label: string
-  /** The bet, or null for the classic 50/50 coin (heads/tails, coin path). */
-  bet: OddsBet | null
-}
-
 export interface SkinState {
   /** Lifecycle phase of the current flip. */
   phase: 'idle' | 'flipping' | 'resolved'
@@ -49,9 +39,9 @@ export interface SkinState {
     roll: number | null
   } | null
   /**
-   * The active bet — null for the classic 50/50 coin. Set from the moment a flip
-   * starts (not just on resolve) so a skin can frame the target up front, e.g.
-   * highlight the winning dice faces while the cube tumbles.
+   * The active bet — never null now (every bet is a variable-odds range). Set
+   * from the moment a flip starts (not just on resolve) so a skin can frame the
+   * target up front (the dice count, the number of coins/reels, etc.).
    */
   odds: OddsBet | null
 }
@@ -63,17 +53,15 @@ export interface SkinMeta {
   icon: string
   component: Component
   /**
-   * Whether picking heads/tails is meaningful for this skin. Coin → yes;
-   * slot/dice → no (the visual has no "side", so the outcome is always
-   * randomised). When false, the side selector is hidden.
+   * The skin's bet ladder — the ordered set of slider positions, with strictly
+   * decreasing win rate. Each step is a variable-odds range; the skin scales its
+   * visual with the bet (more coins / reels / dice). The slider indexes into it.
    */
-  supportsSide: boolean
-  /**
-   * The bet menu shown when this skin is active, phrased in the skin's own
-   * theme. The first entry is the skin's default. A preset with `bet: null` is
-   * the classic 50/50 coin (side-pickable); any other is a variable-odds bet.
-   */
-  oddsPresets: OddsPreset[]
+  oddsLadder: OddsBet[]
+  /** Initial slider index when the skin is selected. */
+  defaultStep: number
+  /** Themed label for a ladder step ("3 COINS", "LINE UP 2 ₿", "ROLL 4+"). */
+  stepLabel: (bet: OddsBet, index: number) => string
 }
 
 /** Props all skin components must accept. */

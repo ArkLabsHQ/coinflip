@@ -39,6 +39,10 @@ export function createPublicRoutes(deps: AppDeps): Router {
       res.json({
         tiers,
         maxAvailable,
+        // The house's actual spendable balance — the ceiling on a single payout,
+        // so the client can size variable-odds bets (a 6× bet escrows ~5× the
+        // stake). Distinct from maxAvailable, which is the largest playable tier.
+        houseBankroll: available,
         houseReady: available >= minBalance,
         rakeType,
         rakeValue,

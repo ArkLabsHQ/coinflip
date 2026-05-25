@@ -129,12 +129,22 @@ function buildCoinflipConditionScript(
  */
 export const VARIABLE_ODDS_BASE_LEN = 16
 
-/** Minimal numeric push: OP_0 / OP_1..OP_16 / single-byte (values 0..127). */
+/**
+ * Minimal numeric push: OP_0 / OP_1..OP_16 / a minimally-encoded CScriptNum.
+ * For v ≤ 127 this is the original `[0x01, v]` 1-byte form (unchanged); for
+ * larger v it emits little-endian bytes with a 0x00 pad when the MSB's high bit
+ * is set, so the value stays positive. Lets variable-odds use n ≥ 128 (e.g. a
+ * 3-dice "beat target" bet, n = 216, threshold up to 215).
+ */
 function pushNum(v: number): number[] {
+  if (!Number.isInteger(v) || v < 0) throw new Error(`pushNum: ${v} must be a non-negative integer`)
   if (v === 0) return [0x00]
   if (v >= 1 && v <= 16) return [0x50 + v] // OP_1..OP_16
-  if (v <= 127) return [0x01, v] // 1-byte minimal-encoded script number
-  throw new Error(`pushNum: ${v} out of supported range [0,127]`)
+  const bytes: number[] = []
+  let n = v
+  while (n > 0) { bytes.push(n & 0xff); n >>= 8 }
+  if (bytes[bytes.length - 1] & 0x80) bytes.push(0x00) // keep positive
+  return [bytes.length, ...bytes]
 }
 
 /** value ∈ [lo, hi) → leaves one bool on the stack (consumes the value). */
@@ -177,7 +187,10 @@ function buildVariableOddsConditionScript(
   lo = 0,
 ): Uint8Array {
   const base = VARIABLE_ODDS_BASE_LEN
-  if (!Number.isInteger(n) || n < 2 || base + n > 127) throw new Error(`invalid n: ${n}`)
+  // The secret LENGTH encodes the digit (base + digit), so the largest valid
+  // secret is `base + n - 1` bytes; cap it at the 520-byte push limit. arkd
+  // handles the resulting >127 OP_SIZE / pushNum values as ordinary CScriptNums.
+  if (!Number.isInteger(n) || n < 2 || base + n - 1 > 520) throw new Error(`invalid n: ${n}`)
   if (!Number.isInteger(lo) || !Number.isInteger(target) || lo < 0 || target <= lo || target > n) {
     throw new Error(`invalid odds range: need 0<=lo<target<=n (got lo=${lo}, target=${target}, n=${n})`)
   }

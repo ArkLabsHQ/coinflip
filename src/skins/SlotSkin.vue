@@ -1,15 +1,20 @@
 <template>
   <div class="slot-machine">
-    <div class="slot-frame">
+    <!-- The target line you must out-rank (read left-to-right). -->
+    <div class="slot-target">
+      <span class="t-label">BEAT</span>
+      <span class="t-sym" v-for="(s, i) in targetSymbols" :key="i">{{ s }}</span>
+    </div>
+
+    <div class="slot-frame" :class="tint">
       <div class="reel" v-for="(reel, i) in reels" :key="i" :class="{ spinning: reel.spinning }">
         <div class="reel-strip" :style="reel.spinning ? '' : `transform: translateY(-${reel.targetIndex * 64}px)`">
-          <div class="reel-cell" v-for="(sym, j) in reel.symbols" :key="j">{{ sym }}</div>
+          <div class="reel-cell" v-for="(sym, j) in reel.symbols" :key="j" :class="{ top: sym === TOP }">{{ sym }}</div>
         </div>
       </div>
     </div>
-    <div class="slot-base">
-      <span class="payline">&laquo; {{ paylineLabel }} &raquo;</span>
-    </div>
+
+    <div class="slot-base" :class="tint">{{ ruleLabel }}</div>
   </div>
 </template>
 
@@ -17,51 +22,29 @@
 import { defineComponent, computed, ref, watch, type PropType } from 'vue'
 import type { SkinState } from './types'
 
-// Slot symbols, ordered common → rare. The win/loss outcome is server-driven;
-// the reels just reflect it (3-of-3 jackpot for a win, a non-matching row for a
-// loss). The jackpot SYMBOL is chosen by the payout multiple — bigger bets land
-// rarer symbols — so the reels visibly reflect which bet is in play. ₿ is the
-// grand jackpot (6×+).
+// Ranked low → high; ₿ is the top symbol. Your reels beat the target when they
+// out-rank it reading left-to-right. These MUST match slotLadder() in index.ts
+// (SLOT_BASE = SYMBOLS.length, SLOT_REELS reels → n = SLOT_BASE^SLOT_REELS).
 const SYMBOLS = ['♦', '◆', '⚡', '★', '₿']
+const SLOT_BASE = SYMBOLS.length
+const SLOT_REELS = 3
+const TOP = SYMBOLS[SYMBOLS.length - 1]
 
-interface Reel {
-  symbols: string[]
-  targetIndex: number
-  spinning: boolean
+interface Reel { symbols: string[]; targetIndex: number; spinning: boolean }
+
+/** The `count` base-SLOT_BASE symbols of `value`, most-significant reel first. */
+function symbolsOf(value: number, count: number): string[] {
+  return Array.from({ length: count }, (_, j) => SYMBOLS[Math.floor(value / SLOT_BASE ** (count - 1 - j)) % SLOT_BASE])
 }
 
-function shuffle<T>(arr: T[]): T[] {
-  const a = [...arr]
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    ;[a[i], a[j]] = [a[j], a[i]]
-  }
-  return a
+function spunStrip(): { symbols: string[]; targetIndex: number } {
+  return { symbols: Array.from({ length: 12 }, () => SYMBOLS[Math.floor(Math.random() * SLOT_BASE)]), targetIndex: 0 }
 }
-
-function buildReelStrip(target: string, stripLen = 12): { symbols: string[]; targetIndex: number } {
-  // Build a strip of stripLen symbols with the target placed roughly in
-  // the middle so the "snap to target" animation feels natural.
-  const symbols: string[] = []
-  for (let i = 0; i < stripLen; i++) {
-    symbols.push(SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)])
-  }
+function stripEndingOn(sym: string, stripLen = 12): { symbols: string[]; targetIndex: number } {
+  const symbols = Array.from({ length: stripLen }, () => SYMBOLS[Math.floor(Math.random() * SLOT_BASE)])
   const targetIndex = Math.floor(stripLen / 2)
-  symbols[targetIndex] = target
+  symbols[targetIndex] = sym
   return { symbols, targetIndex }
-}
-
-/** The jackpot symbol for a bet: rarer the bigger the payout multiple, so the
- *  winning row reflects which bet was placed. */
-function jackpotSymbol(odds: SkinState['odds']): string {
-  const mult = odds ? odds.n / (odds.target - odds.lo) : 2
-  const idx = Math.min(SYMBOLS.length - 1, Math.max(0, Math.round(mult) - 2))
-  return SYMBOLS[idx]
-}
-
-/** A losing row: 3 distinct symbols, so it's never a (3-of-3) jackpot. */
-function lossSymbols(): string[] {
-  return shuffle(SYMBOLS).slice(0, 3)
 }
 
 export default defineComponent({
@@ -70,61 +53,66 @@ export default defineComponent({
     state: { type: Object as PropType<SkinState>, required: true },
   },
   setup(props) {
-    const reels = ref<Reel[]>([
-      { symbols: shuffle(SYMBOLS).slice(0, 3), targetIndex: 0, spinning: false },
-      { symbols: shuffle(SYMBOLS).slice(0, 3), targetIndex: 0, spinning: false },
-      { symbols: shuffle(SYMBOLS).slice(0, 3), targetIndex: 0, spinning: false },
-    ])
+    const threshold = computed(() => props.state.odds?.lo ?? 0)
+    const targetSymbols = computed(() => symbolsOf(threshold.value, SLOT_REELS))
+    const tint = ref<'' | 'win' | 'loss'>('')
 
-    const phase = computed(() => props.state.phase)
+    const makeIdle = (): Reel[] => symbolsOf(threshold.value, SLOT_REELS).map((s) => ({ ...stripEndingOn(s), spinning: false }))
+    const reels = ref<Reel[]>(makeIdle())
 
-    // Payline reflects the bet's payout multiple (e.g. "MATCH 3 — 6× JACKPOT").
-    const paylineLabel = computed(() => {
-      const o = props.state.odds
-      if (!o) return 'MATCH 3 PAYS'
-      const m = o.n / (o.target - o.lo)
-      return `MATCH 3 — ${Number.isInteger(m) ? m : m.toFixed(1)}× JACKPOT`
-    })
+    watch(threshold, () => { if (props.state.phase !== 'flipping') { reels.value = makeIdle(); tint.value = '' } })
 
-    watch(phase, (newPhase, oldPhase) => {
+    watch(() => props.state.phase, (newPhase, oldPhase) => {
       if (newPhase === 'flipping') {
-        // Start all three reels spinning
-        reels.value = reels.value.map(() => ({
-          symbols: shuffle(SYMBOLS.concat(SYMBOLS).concat(SYMBOLS)),
-          targetIndex: 0,
-          spinning: true,
-        }))
+        tint.value = ''
+        reels.value = Array.from({ length: SLOT_REELS }, () => ({ ...spunStrip(), spinning: true }))
       } else if (newPhase === 'resolved' && oldPhase === 'flipping' && props.state.outcome) {
-        // Snap reels to their target symbols, staggered 250ms each. A win lands
-        // all three on the jackpot symbol; a loss lands a non-matching row.
-        const jackpot = jackpotSymbol(props.state.odds)
-        const targets = props.state.outcome.won ? [jackpot, jackpot, jackpot] : lossSymbols()
-        targets.forEach((sym, i) => {
-          setTimeout(() => {
-            const strip = buildReelStrip(sym)
-            reels.value[i] = { ...strip, spinning: false }
-          }, i * 250)
+        // Reels land on the rolled symbols (your hand); win iff they out-rank
+        // the target, which the server has already decided.
+        const roll = props.state.outcome.roll ?? threshold.value
+        const symbols = symbolsOf(roll, SLOT_REELS)
+        tint.value = props.state.outcome.won ? 'win' : 'loss'
+        symbols.forEach((sym, i) => {
+          setTimeout(() => { reels.value[i] = { ...stripEndingOn(sym), spinning: false } }, i * 240)
         })
       } else if (newPhase === 'idle') {
-        reels.value.forEach((r) => { r.spinning = false })
+        reels.value = makeIdle()
+        tint.value = ''
       }
     })
 
-    return { reels, paylineLabel }
+    const ruleLabel = computed(() => {
+      if (props.state.phase === 'resolved' && props.state.outcome) {
+        return props.state.outcome.won ? '« YOU OUT-RANKED IT »' : '« OUT-RANKED »'
+      }
+      return `« BEAT THE TARGET · ${SYMBOLS.join(' ')} »`
+    })
+
+    return { reels, targetSymbols, ruleLabel, tint, TOP }
   },
 })
 </script>
 
 <style scoped>
 .slot-machine {
-  width: 280px;
-  height: 172px;
+  width: 100%;
+  min-height: 200px;
   margin: 8px auto;
-  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
+  gap: 10px;
 }
+.slot-target {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  opacity: 0.7;
+}
+.t-label { font-size: 0.6rem; letter-spacing: 2px; font-weight: 800; color: var(--text-muted); }
+.t-sym { font-size: 1.3rem; width: 28px; text-align: center; color: var(--text); }
+
 .slot-frame {
   display: flex;
   gap: 8px;
@@ -132,11 +120,11 @@ export default defineComponent({
   background: linear-gradient(180deg, #1a1413 0%, #0d0a09 100%);
   border: 3px solid var(--gold);
   border-radius: 16px;
-  box-shadow:
-    inset 0 2px 8px rgba(0,0,0,0.6),
-    0 0 30px var(--gold-glow);
-  flex: 1;
+  box-shadow: inset 0 2px 8px rgba(0,0,0,0.6), 0 0 30px var(--gold-glow);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
 }
+.slot-frame.win { border-color: var(--green, #22c55e); box-shadow: inset 0 2px 8px rgba(0,0,0,0.6), 0 0 32px rgba(34, 197, 94, 0.5); }
+.slot-frame.loss { border-color: var(--red); }
 .reel {
   width: 64px;
   height: 96px;
@@ -151,10 +139,7 @@ export default defineComponent({
   flex-direction: column;
   transition: transform 0.55s cubic-bezier(0.25, 1.0, 0.4, 1);
 }
-.reel.spinning .reel-strip {
-  animation: reelSpin 0.18s linear infinite;
-  transition: none;
-}
+.reel.spinning .reel-strip { animation: reelSpin 0.18s linear infinite; transition: none; }
 .reel-cell {
   height: 64px;
   flex-shrink: 0;
@@ -163,19 +148,19 @@ export default defineComponent({
   justify-content: center;
   font-size: 2.6rem;
   font-weight: 800;
-  color: var(--gold);
+  color: var(--text);
   background: radial-gradient(circle at 50% 50%, #1a1413 0%, #000 100%);
-  text-shadow: 0 0 8px var(--gold-glow);
 }
+/* Highlight the top (jackpot) symbol. */
+.reel-cell.top { color: var(--gold); text-shadow: 0 0 8px var(--gold-glow); }
 .slot-base {
-  margin-top: 6px;
-  font-size: 0.62rem;
-  letter-spacing: 2px;
+  font-size: 0.6rem;
+  letter-spacing: 1.5px;
+  font-weight: 700;
   color: var(--text-muted);
 }
-.payline {
-  font-weight: 700;
-}
+.slot-base.win { color: var(--green, #22c55e); }
+.slot-base.loss { color: var(--red); }
 
 @keyframes reelSpin {
   from { transform: translateY(0); }
@@ -183,7 +168,6 @@ export default defineComponent({
 }
 
 @media (max-width: 640px) {
-  .slot-machine { width: 240px; height: 150px; }
   .reel { width: 54px; height: 82px; }
   .reel-cell { height: 54px; font-size: 2.2rem; }
 }

@@ -5,6 +5,8 @@ const BASE_URL = process.env.VUE_APP_API_URL || ''
 export interface TiersResponse {
   tiers: number[]
   maxAvailable: number
+  /** House spendable balance — the ceiling on a single payout (sizes variable-odds bets). */
+  houseBankroll?: number
   houseReady: boolean
   rakeType?: string
   rakeValue?: number

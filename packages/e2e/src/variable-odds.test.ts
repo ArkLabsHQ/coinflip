@@ -128,7 +128,9 @@ describe('variable-odds on-chain condition', () => {
     // boundary (roll==target), house with-wrap+boundary, player with-wrap.
     // [n, target, lo, dC, dP] — player wins iff lo <= (dC+dP) mod n < target.
     // Covers low-threshold, "roll 4+" ([3,6)), "exactly a 6" ([5,6)), wraparound
-    // into a shifted range, and the out-of-range (house) cases.
+    // into a shifted range, the out-of-range (house) cases, and a large-n bet
+    // (n=216, the 3-dice "beat target" top range) that exercises the >127
+    // CScriptNum push encoding on-chain.
     const cases: Array<[number, number, number, number, number]> = [
       [6, 3, 0, 0, 0], // roll 0 ∈ [0,3) → player
       [6, 6, 3, 1, 2], // roll 3 ∈ [3,6) "roll 4+" → player
@@ -136,6 +138,8 @@ describe('variable-odds on-chain condition', () => {
       [6, 6, 3, 4, 5], // sum 9 → roll 3 ∈ [3,6) → player (wraps into the range)
       [6, 6, 5, 2, 3], // roll 5 ∈ [5,6) "exactly a 6" → player
       [6, 6, 5, 0, 1], // roll 1 ∉ [5,6) → house
+      [216, 216, 213, 107, 107], // n>127: roll 214 ∈ [213,216) → player (CScriptNum push)
+      [216, 216, 213, 100, 99], // n>127: roll 199 ∉ [213,216) → house (CScriptNum push)
     ]
 
     for (const [n, target, lo, dC, dP] of cases) {

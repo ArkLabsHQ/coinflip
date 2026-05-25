@@ -1,14 +1,21 @@
 <template>
   <div class="dice-wrapper">
-    <div class="dice" :style="{ transform: diceTransform, transition: diceTransition }">
-      <div class="dice-face face-1" :class="faceTint(1)"><span class="pip" /></div>
-      <div class="dice-face face-2" :class="faceTint(2)"><span class="pip" /><span class="pip" /></div>
-      <div class="dice-face face-3" :class="faceTint(3)"><span class="pip" /><span class="pip" /><span class="pip" /></div>
-      <div class="dice-face face-4" :class="faceTint(4)"><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /></div>
-      <div class="dice-face face-5" :class="faceTint(5)"><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /></div>
-      <div class="dice-face face-6" :class="faceTint(6)"><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /></div>
+    <!-- The target to reach: you win if your roll is ≥ this, read left-to-right. -->
+    <div class="dice-target">
+      <span class="t-label">BEAT</span>
+      <div class="die small" v-for="(f, i) in targetFaces" :key="'t' + i">
+        <span class="pip" v-for="cell in 9" :key="cell" :class="{ on: PIPS[f].includes(cell) }" />
+      </div>
     </div>
-    <div class="dice-rule">{{ ruleLabel }}</div>
+
+    <!-- Your roll. -->
+    <div class="dice-roll" :class="`n${rollFaces.length}`">
+      <div class="die" v-for="(f, i) in rollFaces" :key="i" :class="[tint, { rolling }]">
+        <span class="pip" v-for="cell in 9" :key="cell" :class="{ on: PIPS[f].includes(cell) }" />
+      </div>
+    </div>
+
+    <div class="dice-rule" :class="tint">{{ ruleLabel }}</div>
   </div>
 </template>
 
@@ -16,22 +23,21 @@
 import { defineComponent, computed, ref, watch, onUnmounted, type PropType } from 'vue'
 import type { SkinState } from './types'
 
-// Steep look-down view so the TOP face dominates — you read a die from the
-// top, like one resting on a table. Front + one side stay visible for depth.
-const VIEW = 'translateZ(-60px) rotateX(-38deg) rotateY(-26deg)'
+// Which of the 9 (3×3) cells carry a pip, per face. Face 0 = blank ("not rolled").
+const PIPS: Record<number, number[]> = {
+  0: [],
+  1: [5],
+  2: [1, 9],
+  3: [1, 5, 9],
+  4: [1, 3, 7, 9],
+  5: [1, 3, 5, 7, 9],
+  6: [1, 3, 4, 6, 7, 9],
+}
 
-// Rotation that brings each face onto the visual TOP of the cube. In CSS the
-// +Y axis points DOWN the screen, so the screen-top is the -Y direction:
-// these rotations send each face's outward normal to -Y. Face layout:
-// 1 front (+Z), 2 right (+X), 3 left (-X), 4 bottom (-Y → already top),
-// 5 top-in-model (+Y), 6 back (-Z).
-const FACE_TO_TOP: Record<number, string> = {
-  1: 'rotateX(90deg)',
-  2: 'rotateZ(-90deg)',
-  3: 'rotateZ(90deg)',
-  4: '',
-  5: 'rotateX(180deg)',
-  6: 'rotateX(-90deg)',
+/** The `count` base-6 faces (1-6) of `value`, most-significant die first, so the
+ *  dice read left-to-right as one number. */
+function facesOf(value: number, count: number): number[] {
+  return Array.from({ length: count }, (_, j) => (Math.floor(value / 6 ** (count - 1 - j)) % 6) + 1)
 }
 
 export default defineComponent({
@@ -40,186 +46,171 @@ export default defineComponent({
     state: { type: Object as PropType<SkinState>, required: true },
   },
   setup(props) {
-    // Spin accumulators (only used while tumbling). The resting orientation is
-    // driven by FACE_TO_TOP once settled.
-    const rotX = ref(0)
-    const rotY = ref(0)
-    const settled = ref(true)
-    const landedFace = ref(4) // idle rests showing face-4 on top (-Y)
-    const diceTransition = ref('transform 0.85s cubic-bezier(0.18, 1.2, 0.35, 1)')
-
-    // While tumbling: VIEW + accumulating spin. Once settled: VIEW + the
-    // result face rotated onto the top. The view tilt is the constant prefix
-    // so the camera angle never changes.
-    const diceTransform = computed(() => {
-      if (settled.value) return `${VIEW} ${FACE_TO_TOP[landedFace.value]}`.trim()
-      return `${VIEW} rotateX(${rotX.value}deg) rotateY(${rotY.value}deg)`
-    })
-
-    // Tint only the landed (top) face — green on win, red on loss.
-    function faceTint(n: number): string {
-      if (props.state.phase === 'resolved' && props.state.outcome && landedFace.value === n) {
-        return props.state.outcome.won ? 'face-win' : 'face-loss'
-      }
-      return ''
-    }
-
-    // The winning rule, derived from the active range so it always matches the
-    // bet in play. Roll r ∈ [lo, target) shows as face r+1, so the winning
-    // faces are lo+1 .. target (inclusive).
-    const ruleLabel = computed(() => {
+    const diceCount = computed(() => {
       const o = props.state.odds
-      if (!o) return 'TAP TO ROLL'
-      const lo = o.lo + 1
-      const hi = o.target
-      if (hi - o.lo === 1) return `ROLL A ${lo} TO WIN`
-      if (o.target === o.n) return `ROLL ${lo}+ TO WIN`
-      if (o.lo === 0) return `ROLL ${hi} OR LESS TO WIN`
-      return `ROLL ${lo}–${hi} TO WIN`
+      return o ? Math.max(1, Math.round(Math.log(o.n) / Math.log(6))) : 2
     })
+    const threshold = computed(() => props.state.odds?.lo ?? 0)
+    // The minimum winning roll, shown as the target dice to beat (or tie).
+    const targetFaces = computed(() => facesOf(threshold.value, diceCount.value))
 
-    // Continuous tumble driven by rAF so the cube keeps spinning for the
-    // entire time the bet is resolving — it never stops early and "waits".
-    let rafId = 0
-    function spinLoop() {
-      rotX.value += 7
-      rotY.value += 11
-      rafId = requestAnimationFrame(spinLoop)
+    const rollFaces = ref<number[]>(Array(diceCount.value).fill(0)) // 0 = blank (unrolled)
+    const tint = ref<'' | 'win' | 'loss'>('')
+    const rolling = ref(false)
+
+    let tumble = 0
+    function startTumble() {
+      stopTumble()
+      rolling.value = true
+      tumble = window.setInterval(() => {
+        rollFaces.value = Array.from({ length: diceCount.value }, () => 1 + Math.floor(Math.random() * 6))
+      }, 80)
     }
-    function stopSpin() {
-      if (rafId) { cancelAnimationFrame(rafId); rafId = 0 }
+    function stopTumble() {
+      if (tumble) { clearInterval(tumble); tumble = 0 }
+      rolling.value = false
     }
+
+    // Reset to the blank/ready state when the bet changes while idle.
+    watch([threshold, diceCount], () => {
+      if (props.state.phase !== 'flipping') {
+        rollFaces.value = Array(diceCount.value).fill(0)
+        tint.value = ''
+      }
+    })
 
     watch(() => props.state.phase, (phase, old) => {
       if (phase === 'flipping') {
-        // Spin freely with no CSS transition — rAF sets each frame directly.
-        settled.value = false
-        diceTransition.value = 'none'
-        stopSpin()
-        spinLoop()
+        tint.value = ''
+        startTumble()
       } else if (phase === 'resolved' && old === 'flipping' && props.state.outcome) {
-        stopSpin()
-        // Land on the ACTUAL rolled face (roll 0..5 → face 1..6). Fall back to a
-        // win/loss-consistent random face only if no roll was reported (e.g. a
-        // cheat-penalty result, where there was no fair roll).
-        const roll = props.state.outcome.roll
-        landedFace.value = roll != null
-          ? Math.min(6, roll + 1)
-          : props.state.outcome.won
-            ? 4 + Math.floor(Math.random() * 3)
-            : 1 + Math.floor(Math.random() * 3)
-        // Settle from the current spin onto the result face (on top).
-        diceTransition.value = 'transform 0.9s cubic-bezier(0.18, 1.25, 0.35, 1)'
-        settled.value = true
+        stopTumble()
+        const roll = props.state.outcome.roll ?? threshold.value
+        rollFaces.value = facesOf(roll, diceCount.value)
+        tint.value = props.state.outcome.won ? 'win' : 'loss'
       } else {
-        // idle / error
-        stopSpin()
-        settled.value = true
+        stopTumble()
+        rollFaces.value = Array(diceCount.value).fill(0)
+        tint.value = ''
       }
     })
 
-    onUnmounted(stopSpin)
+    onUnmounted(stopTumble)
 
-    return { diceTransform, diceTransition, faceTint, ruleLabel }
+    const ruleLabel = computed(() => {
+      if (props.state.phase === 'resolved' && props.state.outcome) {
+        return props.state.outcome.won ? 'YOU BEAT THE TARGET' : 'FELL SHORT'
+      }
+      if (props.state.phase === 'flipping') return 'ROLLING…'
+      return 'ROLL ≥ TARGET TO WIN'
+    })
+
+    return { targetFaces, rollFaces, tint, rolling, ruleLabel, PIPS }
   },
 })
 </script>
 
 <style scoped>
 .dice-wrapper {
-  width: 172px;
-  height: 230px;
+  width: 100%;
+  min-height: 210px;
   margin: 8px auto;
-  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
-  /* Cube sits in the upper area; the rule label sits below it in normal flow
-     so the two never overlap. */
-  justify-content: flex-start;
-  padding-top: 24px;
-  gap: 28px;
-  /* Stronger perspective = more pronounced cube depth. */
-  perspective: 520px;
-  perspective-origin: center center;
-}
-.dice {
-  width: 120px;
-  height: 120px;
-  position: relative;
-  transform-style: preserve-3d;
-  will-change: transform;
-  /* NOTE: never put `filter`, `opacity`, `clip`, or `overflow` here — any of
-     them creates a flattening context that collapses preserve-3d, turning
-     the cube into a single flat face. The drop shadow lives on faces instead. */
+  justify-content: center;
+  gap: 14px;
 }
 
-.dice-face {
-  position: absolute;
-  width: 120px;
-  height: 120px;
-  background: linear-gradient(145deg, #ffffff 0%, #f0f0f3 55%, #d8d8de 100%);
-  border-radius: 16px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  box-shadow: inset 0 -3px 6px rgba(0, 0, 0, 0.15), inset 0 3px 6px rgba(255, 255, 255, 0.5);
+/* Target row — the dice you must beat (dimmed reference). */
+.dice-target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.65;
+}
+.t-label {
+  font-size: 0.6rem;
+  letter-spacing: 2px;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+
+.dice-roll {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: center;
+}
+
+.die {
   display: grid;
-  padding: 18px;
-  gap: 4px;
+  grid-template: repeat(3, 1fr) / repeat(3, 1fr);
+  width: 84px;
+  height: 84px;
+  padding: 10px;
+  gap: 2px;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #ffffff 0%, #f0f0f3 55%, #d8d8de 100%);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: inset 0 -3px 6px rgba(0, 0, 0, 0.15), inset 0 3px 6px rgba(255, 255, 255, 0.5), 0 6px 14px rgba(0, 0, 0, 0.35);
   transition: background 0.3s ease, border-color 0.3s ease;
 }
-/* Result tint — makes win/loss obvious at a glance. */
-.dice-face.face-win {
+.die.small {
+  width: 34px;
+  height: 34px;
+  padding: 4px;
+  border-radius: 7px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+}
+.die.rolling { animation: diceShake 0.22s ease-in-out infinite; }
+.die.win {
   background: linear-gradient(145deg, #d1fae5 0%, #6ee7b7 55%, #34d399 100%);
   border-color: rgba(5, 150, 105, 0.6);
 }
-.dice-face.face-loss {
+.die.loss {
   background: linear-gradient(145deg, #fee2e2 0%, #fca5a5 55%, #f87171 100%);
   border-color: rgba(220, 38, 38, 0.6);
 }
-.face-1 { transform: translateZ(60px); grid-template: 1fr / 1fr; place-items: center; }
-.face-2 { transform: rotateY(90deg) translateZ(60px); grid-template: 1fr 1fr / 1fr 1fr; }
-.face-2 .pip:nth-child(1) { grid-area: 1 / 1; }
-.face-2 .pip:nth-child(2) { grid-area: 2 / 2; }
-.face-3 { transform: rotateY(-90deg) translateZ(60px); grid-template: 1fr 1fr 1fr / 1fr 1fr 1fr; }
-.face-3 .pip:nth-child(1) { grid-area: 1 / 1; }
-.face-3 .pip:nth-child(2) { grid-area: 2 / 2; }
-.face-3 .pip:nth-child(3) { grid-area: 3 / 3; }
-.face-4 { transform: rotateX(90deg) translateZ(60px); grid-template: 1fr 1fr / 1fr 1fr; }
-.face-5 { transform: rotateX(-90deg) translateZ(60px); grid-template: 1fr 1fr 1fr / 1fr 1fr 1fr; }
-.face-5 .pip:nth-child(1) { grid-area: 1 / 1; }
-.face-5 .pip:nth-child(2) { grid-area: 1 / 3; }
-.face-5 .pip:nth-child(3) { grid-area: 2 / 2; }
-.face-5 .pip:nth-child(4) { grid-area: 3 / 1; }
-.face-5 .pip:nth-child(5) { grid-area: 3 / 3; }
-.face-6 { transform: rotateY(180deg) translateZ(60px); grid-template: 1fr 1fr 1fr / 1fr 1fr; }
+.n3 .die { width: 70px; height: 70px; padding: 8px; }
 
 .pip {
-  width: 20px;
-  height: 20px;
-  background: radial-gradient(circle at 35% 30%, #444 0%, #111 60%, #000 100%);
+  width: 72%;
+  height: 72%;
   border-radius: 50%;
-  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.6), 0 1px 1px rgba(255, 255, 255, 0.4);
-  align-self: center;
-  justify-self: center;
+  place-self: center;
 }
+.pip.on {
+  background: radial-gradient(circle at 35% 30%, #444 0%, #111 60%, #000 100%);
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.6), 0 1px 1px rgba(255, 255, 255, 0.4);
+}
+.pip:nth-child(1) { grid-area: 1 / 1; }
+.pip:nth-child(2) { grid-area: 1 / 2; }
+.pip:nth-child(3) { grid-area: 1 / 3; }
+.pip:nth-child(4) { grid-area: 2 / 1; }
+.pip:nth-child(5) { grid-area: 2 / 2; }
+.pip:nth-child(6) { grid-area: 2 / 3; }
+.pip:nth-child(7) { grid-area: 3 / 1; }
+.pip:nth-child(8) { grid-area: 3 / 2; }
+.pip:nth-child(9) { grid-area: 3 / 3; }
 
 .dice-rule {
-  font-size: 0.62rem;
+  font-size: 0.7rem;
   letter-spacing: 2px;
+  font-weight: 800;
   color: var(--text-muted);
-  font-weight: 700;
+  font-family: ui-monospace, monospace;
+}
+.dice-rule.win { color: var(--green, #22c55e); }
+.dice-rule.loss { color: var(--red); }
+
+@keyframes diceShake {
+  0%, 100% { transform: translateY(0) rotate(-4deg); }
+  50% { transform: translateY(-6px) rotate(4deg); }
 }
 
 @media (max-width: 640px) {
-  .dice-wrapper { width: 150px; height: 180px; }
-  .dice { width: 100px; height: 100px; }
-  .dice-face { width: 100px; height: 100px; padding: 14px; }
-  .face-1 { transform: translateZ(50px); }
-  .face-2 { transform: rotateY(90deg) translateZ(50px); }
-  .face-3 { transform: rotateY(-90deg) translateZ(50px); }
-  .face-4 { transform: rotateX(90deg) translateZ(50px); }
-  .face-5 { transform: rotateX(-90deg) translateZ(50px); }
-  .face-6 { transform: rotateY(180deg) translateZ(50px); }
-  .pip { width: 14px; height: 14px; }
+  .die { width: 70px; height: 70px; }
+  .n3 .die { width: 58px; height: 58px; padding: 6px; }
 }
 </style>

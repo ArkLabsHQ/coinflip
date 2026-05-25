@@ -56,18 +56,23 @@ export default defineComponent({
   min-height: 190px;
   margin: 8px auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 22px;
+  gap: 18px;
 }
 .coin-unit {
   position: relative;
   perspective: 900px;
 }
-/* Coin sizing by how many are in play — one big coin, or a tighter row. */
+/* Coin sizing by how many are in play — one big coin, or a tighter row that
+   wraps for the higher counts. */
 .coins-1 .coin-unit { width: 172px; height: 172px; }
 .coins-2 .coin-unit { width: 120px; height: 120px; }
 .coins-3 .coin-unit { width: 96px; height: 96px; }
+.coins-4 .coin-unit { width: 84px; height: 84px; }
+.coins-5 .coin-unit,
+.coins-6 .coin-unit { width: 76px; height: 76px; }
 
 .coin {
   width: 100%;
@@ -110,6 +115,9 @@ export default defineComponent({
 .coins-1 .coin-symbol { font-size: 4rem; }
 .coins-2 .coin-symbol { font-size: 2.8rem; }
 .coins-3 .coin-symbol { font-size: 2.2rem; }
+.coins-4 .coin-symbol { font-size: 1.9rem; }
+.coins-5 .coin-symbol,
+.coins-6 .coin-symbol { font-size: 1.7rem; }
 .tails-symbol { opacity: 0.7; }
 .coin-shadow {
   position: absolute;

@@ -29,6 +29,7 @@ export interface PlayResponse {
   /** Variable-odds echo + total pot the winner sweeps (player stake + house stake). */
   oddsN?: number
   oddsTarget?: number
+  oddsLo?: number
   pot?: number
 }
 
@@ -41,6 +42,11 @@ export interface CommitResponse {
   payout: number
   rake: number
   proof: string
+  /** Variable-odds: rolled value in [0, n) for display; null for the coin. */
+  roll?: number | null
+  oddsN?: number
+  oddsLo?: number
+  oddsTarget?: number
   txid?: string
   sweep?: {
     sweepPsbt: string
@@ -102,11 +108,14 @@ export function play(
   playerPubkey: string,
   playerHash: string,
   playerChangeAddress: string,
-  odds?: { oddsN: number; oddsTarget: number },
+  odds?: { oddsN: number; oddsTarget: number; oddsLo?: number },
 ): Promise<PlayResponse> {
   return request('/api/play', {
     method: 'POST',
-    body: JSON.stringify({ tier, playerPubkey, playerHash, playerChangeAddress, oddsN: odds?.oddsN, oddsTarget: odds?.oddsTarget }),
+    body: JSON.stringify({
+      tier, playerPubkey, playerHash, playerChangeAddress,
+      oddsN: odds?.oddsN, oddsTarget: odds?.oddsTarget, oddsLo: odds?.oddsLo,
+    }),
   })
 }
 

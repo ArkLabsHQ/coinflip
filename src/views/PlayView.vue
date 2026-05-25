@@ -67,24 +67,26 @@
         />
       </div>
 
-      <!-- Bet type: the 50/50 coin, or a variable-odds payout (lower win
-           chance, bigger multiple). Trustless either way — odds are enforced
-           on-chain. -->
+      <!-- Bet menu, phrased in the active skin's theme. Each chip shows its
+           exact win chance and payout multiple. Trustless either way — the
+           odds are enforced on-chain. -->
       <div v-if="!isAutoMode" class="odds-selector">
-        <button class="odds-chip" :class="{ selected: !selectedOdds }" @click="selectedOdds = null">Coin</button>
         <button
-          v-for="p in oddsPresets"
-          :key="p.label"
+          v-for="p in currentSkinPresets"
+          :key="p.id"
           class="odds-chip"
-          :class="{ selected: !!selectedOdds && selectedOdds.n === p.n && selectedOdds.target === p.target }"
-          :title="`Win ~1-in-${Math.round(p.n / p.target)} for a ${p.label} payout`"
-          @click="selectedOdds = p"
-        >{{ p.label }}</button>
+          :class="{ selected: selectedPreset.id === p.id }"
+          :title="`${winPct(p.bet)}% win chance · ${payoutMult(p.bet)} payout`"
+          @click="selectedPreset = p"
+        >
+          <span class="odds-label">{{ p.label }}</span>
+          <span class="odds-stats">{{ winPct(p.bet) }}% · {{ payoutMult(p.bet) }}</span>
+        </button>
       </div>
 
       <!-- Side selection only for the coin (variable-odds ignores heads/tails).
            Default RANDOM so getting started is one click; hidden during auto. -->
-      <div v-if="currentSkin.supportsSide && !isAutoMode && !selectedOdds" class="side-selector">
+      <div v-if="currentSkin.supportsSide && !isAutoMode && !selectedPreset.bet" class="side-selector">
         <button
           class="side-btn random"
           :class="{ selected: selectedSide === 'random' }"
@@ -175,7 +177,7 @@ import TierSelector from '@/components/TierSelector.vue'
 import GameHistoryList, { type GameHistoryItem } from '@/components/GameHistoryList.vue'
 import StalledBets from '@/components/StalledBets.vue'
 import { getTiers } from '@/services/api'
-import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState } from '@/skins'
+import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState, type OddsBet, type OddsPreset } from '@/skins'
 
 const AUTO_OPTIONS = [
   { label: 'OFF', value: null },
@@ -215,24 +217,33 @@ export default defineComponent({
     // one click. 'heads'/'tails' are explicit player calls (coin skin only).
     const selectedSide = ref<'heads' | 'tails' | 'random'>('random')
 
-    // Bet type: null = the 50/50 coin (uses side); a preset = variable-odds
-    // (player wins ~target/n; payout ≈ n/target× minus the house edge).
-    const oddsPresets = [
-      { n: 2, target: 1, label: '2×' },
-      { n: 3, target: 1, label: '3×' },
-      { n: 6, target: 1, label: '6×' },
-    ]
-    const selectedOdds = ref<{ n: number; target: number; label: string } | null>(null)
+    // Bet menu comes from the active skin, phrased in its own theme (dice
+    // ranges, coin counts, slot multiples). A preset's `bet` is null for the
+    // classic 50/50 coin (side-pickable) or a variable-odds range otherwise.
+    const selectedPreset = ref<OddsPreset>(findSkin(getSavedSkinId()).oddsPresets[0])
+
+    // Win probability + fair payout multiple for a bet (null = the 50/50 coin).
+    // The house edge shaves the actual payout, never the probability — so the
+    // win% shown is exact; the multiple is the fair (pre-edge) figure.
+    function winPct(bet: OddsBet | null): number {
+      if (!bet) return 50
+      return Math.round(((bet.target - bet.lo) / bet.n) * 100)
+    }
+    function payoutMult(bet: OddsBet | null): string {
+      const m = bet ? bet.n / (bet.target - bet.lo) : 2
+      return (Number.isInteger(m) ? String(m) : m.toFixed(1)) + '×'
+    }
 
     // ── Flip lifecycle state ──────────────────────────────────────────
     const phase = ref<'idle' | 'flipping' | 'resolved'>('idle')
-    const outcome = ref<{ won: boolean; side: 'heads' | 'tails' } | null>(null)
+    const outcome = ref<{ won: boolean; side: 'heads' | 'tails'; roll: number | null } | null>(null)
     const isFlipping = ref(false)
     const error = ref<string | null>(null)
 
     const skinState = computed<SkinState>(() => ({
       phase: phase.value,
       outcome: outcome.value,
+      odds: selectedPreset.value.bet,
     }))
 
     // ── Auto-flip state ───────────────────────────────────────────────
@@ -247,6 +258,7 @@ export default defineComponent({
     // ── Skin selection ────────────────────────────────────────────────
     const currentSkinId = ref(getSavedSkinId())
     const currentSkin = computed(() => findSkin(currentSkinId.value))
+    const currentSkinPresets = computed(() => currentSkin.value.oddsPresets)
     function selectSkin(id: string) {
       currentSkinId.value = id
       saveSkinId(id)
@@ -325,7 +337,7 @@ export default defineComponent({
 
     // ── Stats recording ───────────────────────────────────────────────
     let sparkKey = 0
-    function recordResult(side: 'heads' | 'tails', won: boolean, payout: number) {
+    function recordResult(side: 'heads' | 'tails', won: boolean, payout: number, roll: number | null) {
       const tier = selectedTier.value ?? 0
       const net = won ? payout - tier : -tier
 
@@ -349,8 +361,8 @@ export default defineComponent({
       sparkline.value.push({ won, key: ++sparkKey })
       if (sparkline.value.length > SPARKLINE_MAX) sparkline.value.shift()
 
-      // Outcome for the skin
-      outcome.value = { won, side }
+      // Outcome for the skin (roll = the variable-odds value, null for the coin)
+      outcome.value = { won, side, roll }
       phase.value = 'resolved'
 
       // Slab
@@ -391,15 +403,16 @@ export default defineComponent({
         // Trustless settlement: the store action escrows the player's stake,
         // reveals, and (on a win) sweeps the pot — all on-Ark. Keep animating
         // for at least MIN_FLIP_MS so a fast resolution still reads as a flip.
+        const bet = selectedPreset.value.bet
         const [result] = await Promise.all([
           store.dispatch('ark/playTrustlessGame', {
             tier: selectedTier.value, side,
-            oddsN: selectedOdds.value?.n, oddsTarget: selectedOdds.value?.target,
+            oddsN: bet?.n, oddsTarget: bet?.target, oddsLo: bet?.lo,
           }),
           new Promise((r) => setTimeout(r, MIN_FLIP_MS)),
         ])
 
-        recordResult(side, result.winner === 'player', result.payout)
+        recordResult(side, result.winner === 'player', result.payout, result.roll ?? null)
 
         const historyEntry = {
           id: `${Date.now()}`,
@@ -503,16 +516,17 @@ export default defineComponent({
       if (slabTimer) clearTimeout(slabTimer)
     })
 
-    // Reset streak silently to 0 when starting a fresh session via PnL reload —
-    // not strictly necessary, just guards against runaway counters.
+    // Switching skins swaps in that skin's own bet menu — reset the selection
+    // to the new skin's default so a stale (and now-hidden) preset can't be
+    // played. Stats carry across skins; only the bet menu is per-skin.
     watch(currentSkinId, () => {
-      // Cosmetic: skin change doesn't reset stats. Future: per-skin stats.
+      selectedPreset.value = currentSkin.value.oddsPresets[0]
     })
 
     return {
       // Game config
       tiers, maxAvailable, houseReady, selectedTier, selectedSide,
-      oddsPresets, selectedOdds,
+      selectedPreset, currentSkinPresets, winPct, payoutMult,
       // Lifecycle
       isFlipping, error, skinState, phase,
       // Auto
@@ -834,14 +848,16 @@ export default defineComponent({
 }
 .odds-chip {
   flex: 1;
-  min-width: 52px;
+  min-width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
   background: var(--bg-elevated);
   border: 1.5px solid var(--border-light);
   color: var(--text-muted);
   border-radius: 8px;
-  padding: 8px 4px;
-  font-size: 0.8rem;
-  font-weight: 700;
+  padding: 8px 6px;
   font-family: inherit;
   cursor: pointer;
   transition: all 0.15s;
@@ -851,6 +867,18 @@ export default defineComponent({
   border-color: var(--gold);
   background: rgba(247, 201, 72, 0.1);
   color: var(--gold);
+}
+.odds-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.odds-stats {
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  opacity: 0.7;
 }
 
 /* Flip button */

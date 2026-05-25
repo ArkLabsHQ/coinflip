@@ -12,11 +12,48 @@
 
 import type { Component } from 'vue'
 
+/**
+ * A variable-odds bet: `n` equally-likely outcomes, player wins iff the rolled
+ * value lands in `[lo, target)`. Win probability is `(target - lo) / n`; the
+ * fair payout multiple is its inverse. Enforced on-chain — see the lib's
+ * `buildVariableOddsConditionScript`.
+ */
+export interface OddsBet {
+  n: number
+  lo: number
+  target: number
+}
+
+/** A thematic bet option a skin offers (chip in the odds selector). */
+export interface OddsPreset {
+  /** Stable id, used for selection and as the render :key. */
+  id: string
+  /** Chip label in the skin's own language ("ROLL 4+", "EXACTLY 6", "3×"). */
+  label: string
+  /** The bet, or null for the classic 50/50 coin (heads/tails, coin path). */
+  bet: OddsBet | null
+}
+
 export interface SkinState {
   /** Lifecycle phase of the current flip. */
   phase: 'idle' | 'flipping' | 'resolved'
   /** Final outcome — populated when phase === 'resolved'. */
-  outcome: { won: boolean; side: 'heads' | 'tails' } | null
+  outcome: {
+    won: boolean
+    side: 'heads' | 'tails'
+    /**
+     * Variable-odds: the value the player actually rolled, in `[0, n)`, for the
+     * skin to show (the dice face = roll + 1, etc.). null for the 50/50 coin or
+     * a cheat-penalty result (no fair roll).
+     */
+    roll: number | null
+  } | null
+  /**
+   * The active bet — null for the classic 50/50 coin. Set from the moment a flip
+   * starts (not just on resolve) so a skin can frame the target up front, e.g.
+   * highlight the winning dice faces while the cube tumbles.
+   */
+  odds: OddsBet | null
 }
 
 export interface SkinMeta {
@@ -31,6 +68,12 @@ export interface SkinMeta {
    * randomised). When false, the side selector is hidden.
    */
   supportsSide: boolean
+  /**
+   * The bet menu shown when this skin is active, phrased in the skin's own
+   * theme. The first entry is the skin's default. A preset with `bet: null` is
+   * the classic 50/50 coin (side-pickable); any other is a variable-odds bet.
+   */
+  oddsPresets: OddsPreset[]
 }
 
 /** Props all skin components must accept. */

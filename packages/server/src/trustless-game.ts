@@ -19,6 +19,7 @@ import {
   determineWinner,
   generateVariableSecret,
   determineVariableWinner,
+  computeVariableRoll,
   getPlayerEscrowScript,
   getHouseEscrowScript,
   getPlayerEscrowAddress,
@@ -94,6 +95,17 @@ export interface TrustlessCommitResult {
   payout: number
   rake: number
   proof: string
+  /**
+   * Variable-odds: the rolled value `(digitC + digitP) mod n` in [0, n) — what
+   * the player actually rolled, for the skin to display (the dice face, etc.).
+   * null for the 50/50 coin or when a secret was out of range (cheat-penalty,
+   * not a fair roll). Echoed alongside the bet's range so the result is
+   * self-describing on idempotent replay.
+   */
+  roll?: number | null
+  oddsN?: number
+  oddsLo?: number
+  oddsTarget?: number
   /** Set when the house won and the server swept. */
   txid?: string
   /**
@@ -408,6 +420,9 @@ interface CommitContext {
   houseAddress: string
   playerPayoutAddress: string
   networkHrp: string
+  /** Variable-odds echo + rolled value for display; all undefined for the coin. */
+  odds?: { oddsN: number; oddsTarget: number; oddsLo: number }
+  roll: number | null
 }
 
 async function buildCommitContext(
@@ -425,6 +440,7 @@ async function buildCommitContext(
     ? determineVariableWinner(houseSecret, playerSecret, odds.oddsN, odds.oddsTarget, odds.oddsLo)
     : determineWinner(houseSecret, playerSecret)
   const winner: 'house' | 'player' = winnerRole === 'creator' ? 'house' : 'player'
+  const roll = odds ? computeVariableRoll(houseSecret, playerSecret, odds.oddsN) : null
 
   const houseHash = hashSecret(houseSecret)
   const game2 = await buildGame(
@@ -452,6 +468,7 @@ async function buildCommitContext(
     houseAddress: await deps.wallet.getAddress(),
     playerPayoutAddress: game.player_change_address!,
     networkHrp: networkHrpFromArkInfo(deps.arkInfo),
+    odds, roll,
   }
 }
 
@@ -473,6 +490,7 @@ function buildCommitResult(
     const result: TrustlessCommitResult = {
       winner: 'house', houseSecret: ctx.houseSecretHex, playerSecret: ctx.playerSecretHex,
       payout: ctx.pot, rake: 0, proof: ctx.proof,
+      roll: ctx.roll, oddsN: ctx.odds?.oddsN, oddsLo: ctx.odds?.oddsLo, oddsTarget: ctx.odds?.oddsTarget,
     }
     return { result, houseSweepTx }
   }
@@ -485,6 +503,7 @@ function buildCommitResult(
   const result: TrustlessCommitResult = {
     winner: 'player', houseSecret: ctx.houseSecretHex, playerSecret: ctx.playerSecretHex,
     payout: ctx.pot - ctx.rake, rake: ctx.rake, proof: ctx.proof,
+    roll: ctx.roll, oddsN: ctx.odds?.oddsN, oddsLo: ctx.odds?.oddsLo, oddsTarget: ctx.odds?.oddsTarget,
     sweep: {
       sweepPsbt: hex.encode(sweep.arkTx.toPSBT()),
       sweepCheckpoints: sweep.checkpoints.map((c) => hex.encode(c.toPSBT())),

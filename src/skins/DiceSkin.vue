@@ -8,7 +8,7 @@
       <div class="dice-face face-5" :class="faceTint(5)"><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /></div>
       <div class="dice-face face-6" :class="faceTint(6)"><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /><span class="pip" /></div>
     </div>
-    <div class="dice-rule">ROLL 4+ TO WIN</div>
+    <div class="dice-rule">{{ ruleLabel }}</div>
   </div>
 </template>
 
@@ -64,6 +64,20 @@ export default defineComponent({
       return ''
     }
 
+    // The winning rule, derived from the active range so it always matches the
+    // bet in play. Roll r ∈ [lo, target) shows as face r+1, so the winning
+    // faces are lo+1 .. target (inclusive).
+    const ruleLabel = computed(() => {
+      const o = props.state.odds
+      if (!o) return 'TAP TO ROLL'
+      const lo = o.lo + 1
+      const hi = o.target
+      if (hi - o.lo === 1) return `ROLL A ${lo} TO WIN`
+      if (o.target === o.n) return `ROLL ${lo}+ TO WIN`
+      if (o.lo === 0) return `ROLL ${hi} OR LESS TO WIN`
+      return `ROLL ${lo}–${hi} TO WIN`
+    })
+
     // Continuous tumble driven by rAF so the cube keeps spinning for the
     // entire time the bet is resolving — it never stops early and "waits".
     let rafId = 0
@@ -85,9 +99,15 @@ export default defineComponent({
         spinLoop()
       } else if (phase === 'resolved' && old === 'flipping' && props.state.outcome) {
         stopSpin()
-        landedFace.value = props.state.outcome.won
-          ? 4 + Math.floor(Math.random() * 3) // 4,5,6 → win
-          : 1 + Math.floor(Math.random() * 3) // 1,2,3 → loss
+        // Land on the ACTUAL rolled face (roll 0..5 → face 1..6). Fall back to a
+        // win/loss-consistent random face only if no roll was reported (e.g. a
+        // cheat-penalty result, where there was no fair roll).
+        const roll = props.state.outcome.roll
+        landedFace.value = roll != null
+          ? Math.min(6, roll + 1)
+          : props.state.outcome.won
+            ? 4 + Math.floor(Math.random() * 3)
+            : 1 + Math.floor(Math.random() * 3)
         // Settle from the current spin onto the result face (on top).
         diceTransition.value = 'transform 0.9s cubic-bezier(0.18, 1.25, 0.35, 1)'
         settled.value = true
@@ -100,7 +120,7 @@ export default defineComponent({
 
     onUnmounted(stopSpin)
 
-    return { diceTransform, diceTransition, faceTint }
+    return { diceTransform, diceTransition, faceTint, ruleLabel }
   },
 })
 </script>

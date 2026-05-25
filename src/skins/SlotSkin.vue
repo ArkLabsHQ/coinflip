@@ -8,7 +8,7 @@
       </div>
     </div>
     <div class="slot-base">
-      <span class="payline">&laquo; 2 OF 3 PAYS &raquo;</span>
+      <span class="payline">&laquo; {{ paylineLabel }} &raquo;</span>
     </div>
   </div>
 </template>
@@ -17,10 +17,12 @@
 import { defineComponent, computed, ref, watch, type PropType } from 'vue'
 import type { SkinState } from './types'
 
-// Slot symbols. The number of unique symbols determines the visual variety
-// but the win/loss outcome is server-driven — we just pick symbols that
-// match the outcome (2-of-3 same for win, all-different for loss).
-const SYMBOLS = ['₿', '⚡', '◆', '♦', '★'] // ₿ ⚡ ◆ ♦ ★
+// Slot symbols, ordered common → rare. The win/loss outcome is server-driven;
+// the reels just reflect it (3-of-3 jackpot for a win, a non-matching row for a
+// loss). The jackpot SYMBOL is chosen by the payout multiple — bigger bets land
+// rarer symbols — so the reels visibly reflect which bet is in play. ₿ is the
+// grand jackpot (6×+).
+const SYMBOLS = ['♦', '◆', '⚡', '★', '₿']
 
 interface Reel {
   symbols: string[]
@@ -49,23 +51,16 @@ function buildReelStrip(target: string, stripLen = 12): { symbols: string[]; tar
   return { symbols, targetIndex }
 }
 
-/**
- * Pick 3 symbols where exactly 2 match (win) or all are different (loss).
- * The slot's "payline" semantics map to the coinflip outcome — visual
- * theming, not new game logic.
- */
-function pickOutcomeSymbols(won: boolean): string[] {
-  if (won) {
-    const matching = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)]
-    const other = shuffle(SYMBOLS.filter((s) => s !== matching))[0]
-    const positions = shuffle([0, 1, 2])
-    const result = ['', '', '']
-    result[positions[0]] = matching
-    result[positions[1]] = matching
-    result[positions[2]] = other
-    return result
-  }
-  // All different
+/** The jackpot symbol for a bet: rarer the bigger the payout multiple, so the
+ *  winning row reflects which bet was placed. */
+function jackpotSymbol(odds: SkinState['odds']): string {
+  const mult = odds ? odds.n / (odds.target - odds.lo) : 2
+  const idx = Math.min(SYMBOLS.length - 1, Math.max(0, Math.round(mult) - 2))
+  return SYMBOLS[idx]
+}
+
+/** A losing row: 3 distinct symbols, so it's never a (3-of-3) jackpot. */
+function lossSymbols(): string[] {
   return shuffle(SYMBOLS).slice(0, 3)
 }
 
@@ -83,6 +78,14 @@ export default defineComponent({
 
     const phase = computed(() => props.state.phase)
 
+    // Payline reflects the bet's payout multiple (e.g. "MATCH 3 — 6× JACKPOT").
+    const paylineLabel = computed(() => {
+      const o = props.state.odds
+      if (!o) return 'MATCH 3 PAYS'
+      const m = o.n / (o.target - o.lo)
+      return `MATCH 3 — ${Number.isInteger(m) ? m : m.toFixed(1)}× JACKPOT`
+    })
+
     watch(phase, (newPhase, oldPhase) => {
       if (newPhase === 'flipping') {
         // Start all three reels spinning
@@ -92,8 +95,10 @@ export default defineComponent({
           spinning: true,
         }))
       } else if (newPhase === 'resolved' && oldPhase === 'flipping' && props.state.outcome) {
-        // Snap reels to their target symbols, staggered 250ms each.
-        const targets = pickOutcomeSymbols(props.state.outcome.won)
+        // Snap reels to their target symbols, staggered 250ms each. A win lands
+        // all three on the jackpot symbol; a loss lands a non-matching row.
+        const jackpot = jackpotSymbol(props.state.odds)
+        const targets = props.state.outcome.won ? [jackpot, jackpot, jackpot] : lossSymbols()
         targets.forEach((sym, i) => {
           setTimeout(() => {
             const strip = buildReelStrip(sym)
@@ -105,7 +110,7 @@ export default defineComponent({
       }
     })
 
-    return { reels }
+    return { reels, paylineLabel }
   },
 })
 </script>

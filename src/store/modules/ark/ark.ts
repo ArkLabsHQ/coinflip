@@ -525,7 +525,7 @@ const ark: Module<ArkState, RootState> = {
      */
     async playTrustlessGame(
       { state, rootState, dispatch },
-      { tier, side, oddsN, oddsTarget }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number },
+      { tier, side, oddsN, oddsTarget, oddsLo }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
     ) {
       if (!sdkWallet) throw new Error('Wallet not connected')
       const privateKey = rootState.wallet.privateKey
@@ -557,7 +557,7 @@ const ark: Module<ArkState, RootState> = {
 
       const playRes = await apiPlay(
         tier, playerPubkey, playerHash, playerChangeAddress,
-        isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number } : undefined,
+        isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number, oddsLo: oddsLo ?? 0 } : undefined,
       )
 
       // 2. Escrow the player's stake into the shared escrow address (single-party).

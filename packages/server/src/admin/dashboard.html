@@ -358,6 +358,12 @@
       <button class="btn btn-small" onclick="saveConfig()">Save</button>
     </div>
     <div class="config-row">
+      <label>House edge:</label>
+      <input type="number" id="oddsEdgeBps" style="width:90px" min="0" max="9999">
+      <span style="color:var(--muted)">bps (variable-odds)</span>
+      <button class="btn btn-small" onclick="saveConfig()">Save</button>
+    </div>
+    <div class="config-row">
       <label>Tiers:</label>
       <div class="tier-chips" id="tierChips"></div>
     </div>
@@ -469,6 +475,7 @@
       rakeValue: parseInt(document.getElementById('rakeValue').value) || 0,
       tiers: currentTiers,
       minHouseBalance: parseInt(document.getElementById('minBalance').value) || 0,
+      oddsEdgeBps: parseInt(document.getElementById('oddsEdgeBps').value) || 0,
     };
     await fetch('/api/config', {
       method: 'POST',
@@ -497,6 +504,7 @@
     document.getElementById('rakeValue').value = data.rakeValue;
     document.getElementById('rakeType').value = data.rakeType;
     document.getElementById('minBalance').value = data.minHouseBalance;
+    document.getElementById('oddsEdgeBps').value = data.oddsEdgeBps;
     currentTiers = data.tiers;
     renderTiers();
   }

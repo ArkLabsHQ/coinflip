@@ -259,6 +259,20 @@ export class HouseBusyError extends Error {
 }
 
 /**
+ * Thrown when a bet's required house stake exceeds the house's TOTAL spendable
+ * balance — i.e. unaffordable regardless of concurrency. Unlike HouseBusyError
+ * (transient: in-flight liability), retrying won't help, so it surfaces as a
+ * non-retryable 4xx. The client caps bet options to avoid hitting this; this is
+ * the server-side backstop.
+ */
+export class BetExceedsCapacityError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BetExceedsCapacityError'
+  }
+}
+
+/**
  * Return spendable house VTXOs that are neither expiring nor already
  * reserved by an in-flight game. Pure read — does not mutate the ledger.
  */

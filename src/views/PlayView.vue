@@ -61,7 +61,7 @@
         <TierSelector
           :tiers="tiers"
           :selected-tier="selectedTier"
-          :max-available="maxAvailable"
+          :affordable-tiers="affordableTiers"
           :player-balance="playerBalance"
           @select="selectedTier = $event"
         />
@@ -216,11 +216,27 @@ export default defineComponent({
     // with payout, so the ladder's playable window is a contiguous band:
     //   floor = first step whose stake clears dust (safe end, tiny stakes),
     //   ceiling = last step the bankroll can cover (risky end, big stakes).
-    function houseStakeOf(bet: OddsBet): number {
+    function houseStakeAt(tier: number, bet: OddsBet): number {
       const win = bet.target - bet.lo
-      const tier = selectedTier.value ?? 0
       return Math.floor((tier * (bet.n - win) * (10000 - oddsEdgeBps.value)) / (win * 10000))
     }
+    function houseStakeOf(bet: OddsBet): number {
+      return houseStakeAt(selectedTier.value ?? 0, bet)
+    }
+    // A tier is offerable only if the CURRENT skin has at least one odds step
+    // whose house stake both clears dust and fits the house bankroll. Capping on
+    // the house STAKE (not the player's tier) matters for variable odds: a
+    // high-win bet's house stake is far below the tier, so a tier-vs-bankroll
+    // check would wrongly hide affordable bets. The slider then clamps the odds
+    // range within the chosen tier; the server backstops over-cap bets.
+    const affordableTiers = computed<number[]>(() =>
+      tiers.value.filter((t) =>
+        currentSkinLadder.value.some((b) => {
+          const s = houseStakeAt(t, b)
+          return s >= dust.value && s <= houseBankroll.value
+        }),
+      ),
+    )
     const minStep = computed(() => {
       const ladder = currentSkinLadder.value
       if (!selectedTier.value) return 0
@@ -542,7 +558,7 @@ export default defineComponent({
 
     return {
       // Game config
-      tiers, maxAvailable, houseReady, selectedTier,
+      tiers, maxAvailable, affordableTiers, houseReady, selectedTier,
       // Odds slider
       sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctLabel, payoutMult,
       // Lifecycle

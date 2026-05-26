@@ -43,7 +43,7 @@ import {
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
-import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, KeyedMutex, outpointKey, pickEscrowVtxo, houseVtxoCache } from './vtxo-pool.js'
+import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, BetExceedsCapacityError, KeyedMutex, outpointKey, pickEscrowVtxo, houseVtxoCache } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import type { GameRow } from './repositories/types.js'
 
@@ -371,6 +371,13 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
       vtxos = await houseVtxoCache.refresh(deps)
       available = availableOf(vtxos)
       picked = pickEscrowVtxo(freeHouseVtxos(vtxos), houseStake, dust)
+    }
+    // Distinguish a permanently-unaffordable bet (house stake exceeds the
+    // house's TOTAL spendable balance — retrying can't help; the client should
+    // have capped it) from transient contention (in-flight liability) and pool
+    // fragmentation, which are retryable.
+    if (houseStake > available) {
+      throw new BetExceedsCapacityError(`Bet exceeds house capacity: needs ${houseStake} sats but the house bankroll is ${available}.`)
     }
     if (reservations.totalLiability() + houseStake > available) {
       throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${houseStake} > ${available}). Try again shortly.`)

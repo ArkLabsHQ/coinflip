@@ -55,12 +55,13 @@ export function createAdminRoutes(deps: AppDeps): Router {
       rakeValue: parseInt(config.rake_value || '2', 10),
       tiers: JSON.parse(config.tiers || '[1000,5000,10000,50000]'),
       minHouseBalance: parseInt(config.min_house_balance || '100000', 10),
+      oddsEdgeBps: parseInt(config.variable_odds_edge_bps || '300', 10),
     })
   })
 
   // POST /api/config — update configuration
   router.post('/api/config', async (req: Request, res: Response) => {
-    const { rakeType, rakeValue, tiers, minHouseBalance } = req.body
+    const { rakeType, rakeValue, tiers, minHouseBalance, oddsEdgeBps } = req.body
 
     if (rakeType !== undefined) {
       if (rakeType !== 'percentage' && rakeType !== 'flat') {
@@ -96,12 +97,24 @@ export function createAdminRoutes(deps: AppDeps): Router {
       await deps.repos.config.set('min_house_balance', String(val))
     }
 
+    if (oddsEdgeBps !== undefined) {
+      const val = parseInt(oddsEdgeBps, 10)
+      // basis points of house edge baked into variable-odds stakes; must stay
+      // below 100% (10000bps) since computeHouseStake scales by (10000 - edge).
+      if (isNaN(val) || val < 0 || val >= 10000) {
+        res.status(400).json({ error: 'oddsEdgeBps must be between 0 and 9999 (basis points)' })
+        return
+      }
+      await deps.repos.config.set('variable_odds_edge_bps', String(val))
+    }
+
     const config = await deps.repos.config.all()
     res.json({
       rakeType: config.rake_type,
       rakeValue: parseInt(config.rake_value || '2', 10),
       tiers: JSON.parse(config.tiers || '[]'),
       minHouseBalance: parseInt(config.min_house_balance || '100000', 10),
+      oddsEdgeBps: parseInt(config.variable_odds_edge_bps || '300', 10),
     })
   })
 

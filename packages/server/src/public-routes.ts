@@ -7,7 +7,7 @@ import {
   type TrustlessCommitRequest,
   type TrustlessRefundRequest,
 } from './trustless-game.js'
-import { HouseBusyError } from './vtxo-pool.js'
+import { HouseBusyError, BetExceedsCapacityError } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 
 export function createPublicRoutes(deps: AppDeps): Router {
@@ -71,7 +71,9 @@ export function createPublicRoutes(deps: AppDeps): Router {
       res.json(result)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
-      if (err instanceof HouseBusyError) {
+      if (err instanceof BetExceedsCapacityError) {
+        res.status(400).json({ error: message })
+      } else if (err instanceof HouseBusyError) {
         res.status(503).set('Retry-After', '3').json({ error: message })
       } else if (message.includes('Too many pending')) {
         res.status(429).json({ error: message })

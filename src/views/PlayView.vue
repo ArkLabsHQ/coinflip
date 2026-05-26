@@ -82,7 +82,7 @@
         <input
           class="odds-range"
           type="range"
-          min="0"
+          :min="minStep"
           :max="maxStep"
           step="1"
           v-model.number="sliderIndex"
@@ -194,6 +194,11 @@ export default defineComponent({
     const maxAvailable = ref(50000)
     // House spendable — the real ceiling on a payout (sizes the odds slider).
     const houseBankroll = ref(0)
+    // arkd dust limit + variable-odds house edge — used to clamp the slider's
+    // SAFE end (a high-win bet's house stake must clear dust, or the server
+    // rejects it). Defaults mirror the server.
+    const dust = ref(546)
+    const oddsEdgeBps = ref(300)
     const houseReady = ref(false)
     const selectedTier = ref<number | null>(null)
 
@@ -206,23 +211,33 @@ export default defineComponent({
     // rate — more coins / reels / dice). `sliderIndex` is the position.
     const sliderIndex = ref(currentSkin.value.defaultStep)
     const currentSkinLadder = computed(() => currentSkin.value.oddsLadder)
-    // House bankroll clamp: the fair (edge-free) house stake tier·(n−win)/win is
-    // an upper bound on the real escrow, so clamp the slider to the last step
-    // the house can actually cover for this stake.
-    const maxStep = computed(() => {
-      const tier = selectedTier.value
+    // The house escrow for a bet, mirroring the server's computeHouseStake
+    // (house-edged): tier·(n−win)/win, trimmed by the edge. House stake RISES
+    // with payout, so the ladder's playable window is a contiguous band:
+    //   floor = first step whose stake clears dust (safe end, tiny stakes),
+    //   ceiling = last step the bankroll can cover (risky end, big stakes).
+    function houseStakeOf(bet: OddsBet): number {
+      const win = bet.target - bet.lo
+      const tier = selectedTier.value ?? 0
+      return Math.floor((tier * (bet.n - win) * (10000 - oddsEdgeBps.value)) / (win * 10000))
+    }
+    const minStep = computed(() => {
       const ladder = currentSkinLadder.value
-      if (!tier) return ladder.length - 1
-      let max = 0
+      if (!selectedTier.value) return 0
+      for (let i = 0; i < ladder.length; i++) if (houseStakeOf(ladder[i]) >= dust.value) return i
+      return ladder.length - 1 // nothing clears dust at this tier → pin to the riskiest
+    })
+    const maxStep = computed(() => {
+      const ladder = currentSkinLadder.value
+      if (!selectedTier.value) return ladder.length - 1
+      let max = minStep.value
       for (let i = 0; i < ladder.length; i++) {
-        const b = ladder[i]
-        const win = b.target - b.lo
-        if (Math.floor((tier * (b.n - win)) / win) <= houseBankroll.value) max = i
+        if (houseStakeOf(ladder[i]) <= houseBankroll.value) max = i
         else break
       }
-      return max
+      return Math.max(max, minStep.value)
     })
-    const safeStep = computed(() => Math.min(sliderIndex.value, maxStep.value))
+    const safeStep = computed(() => Math.min(Math.max(sliderIndex.value, minStep.value), maxStep.value))
     const selectedBet = computed<OddsBet>(() => currentSkinLadder.value[safeStep.value])
     const stepLabel = computed(() => currentSkin.value.stepLabel(selectedBet.value, safeStep.value))
     const winPctLabel = computed(() => {
@@ -320,6 +335,8 @@ export default defineComponent({
         tiers.value = data.tiers
         maxAvailable.value = data.maxAvailable
         houseBankroll.value = data.houseBankroll ?? data.maxAvailable
+        if (data.dust) dust.value = data.dust
+        if (data.oddsEdgeBps !== undefined) oddsEdgeBps.value = data.oddsEdgeBps
         houseReady.value = data.houseReady
         // Pre-select the cheapest affordable tier so getting started is one
         // click. Only set on first load (don't override a manual pick).
@@ -513,19 +530,21 @@ export default defineComponent({
     })
 
     // Switching skins swaps in that skin's own ladder — reset the slider to the
-    // new skin's default step. Stats carry across skins; only the bet is per-skin.
+    // new skin's default step, clamped into the playable [dust, bankroll] window.
     watch(currentSkinId, () => {
-      sliderIndex.value = Math.min(currentSkin.value.defaultStep, maxStep.value)
+      sliderIndex.value = Math.min(Math.max(currentSkin.value.defaultStep, minStep.value), maxStep.value)
     })
-    // Keep the thumb within what the bankroll can cover (e.g. when the stake is
-    // raised, the affordable ceiling drops).
-    watch(maxStep, (m) => { if (sliderIndex.value > m) sliderIndex.value = m })
+    // Keep the thumb inside the playable window when the stake changes — the
+    // bankroll ceiling drops and the dust floor rises as the tier moves.
+    watch([minStep, maxStep], ([lo, hi]) => {
+      sliderIndex.value = Math.min(Math.max(sliderIndex.value, lo), hi)
+    })
 
     return {
       // Game config
       tiers, maxAvailable, houseReady, selectedTier,
       // Odds slider
-      sliderIndex, maxStep, selectedBet, stepLabel, winPctLabel, payoutMult,
+      sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctLabel, payoutMult,
       // Lifecycle
       isFlipping, error, skinState, phase,
       // Auto

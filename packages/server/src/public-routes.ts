@@ -43,6 +43,11 @@ export function createPublicRoutes(deps: AppDeps): Router {
         // so the client can size variable-odds bets (a 6× bet escrows ~5× the
         // stake). Distinct from maxAvailable, which is the largest playable tier.
         houseBankroll: available,
+        // Dust limit + variable-odds house edge so the client can size the SAFE
+        // end of the odds slider: a high-win bet makes the house stake tiny, and
+        // below dust the server rejects it. The client mirrors computeHouseStake.
+        dust: Number(deps.arkInfo.dust ?? 546n),
+        oddsEdgeBps: parseInt((await deps.repos.config.get('variable_odds_edge_bps')) || '300', 10),
         houseReady: available >= minBalance,
         rakeType,
         rakeValue,

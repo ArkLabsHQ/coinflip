@@ -7,6 +7,10 @@ export interface TiersResponse {
   maxAvailable: number
   /** House spendable balance — the ceiling on a single payout (sizes variable-odds bets). */
   houseBankroll?: number
+  /** arkd dust limit + the variable-odds house edge — used to clamp the slider's
+   *  SAFE end (a high-win bet's house stake must clear dust). */
+  dust?: number
+  oddsEdgeBps?: number
   houseReady: boolean
   rakeType?: string
   rakeValue?: number

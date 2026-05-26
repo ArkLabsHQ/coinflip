@@ -214,6 +214,19 @@ export class HouseVtxoCache {
     this.fetchedAt = 0
   }
 
+  /**
+   * Drop a just-spent outpoint from the snapshot so no later selection can
+   * re-pick a VTXO that's already been escrowed — the SDK would reject the
+   * spend with VTXO_ALREADY_SPENT once the game's reservation is released.
+   * Replaces (doesn't mutate) the array so a concurrent caller still iterating
+   * the previous snapshot is unaffected. The change output minted by the spend
+   * reappears on the next refresh.
+   */
+  removeOutpoint(txid: string, vout: number): void {
+    if (!this.snapshot) return
+    this.snapshot = this.snapshot.filter((v) => !(v.txid === txid && v.vout === vout))
+  }
+
   /** Age of the current snapshot in ms (introspection/tests); Infinity if none. */
   ageMs(): number {
     return this.snapshot ? Date.now() - this.fetchedAt : Infinity

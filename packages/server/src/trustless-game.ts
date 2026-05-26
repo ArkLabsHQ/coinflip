@@ -381,6 +381,11 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     candidate = picked
     reservations.reserve(gameId, [outpointKey(picked.txid, picked.vout)], houseStake)
   })
+  // Committed to spending `candidate`: drop it from the cached snapshot now so a
+  // later play can't re-select it once this game's reservation is released (the
+  // reservation only guards it while the game is in flight). Without this the
+  // cached snapshot would keep handing out an escrowed VTXO → VTXO_ALREADY_SPENT.
+  houseVtxoCache.removeOutpoint(candidate.txid, candidate.vout)
   try {
     houseEscrow = await escrowHouseStakeFrom(deps, candidate, houseEscrowScript.pkScript, houseStake)
   } catch (err) {

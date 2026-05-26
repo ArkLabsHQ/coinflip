@@ -92,11 +92,12 @@ const wallet: Module<WalletState, RootState> = {
     },
 
     async clearWallet({ commit, dispatch }) {
-      // Purge the SDK's persisted IndexedDB store BEFORE dropping the key, while
-      // the wallet is still connected — clearing only these localStorage keys
-      // left the VTXO store behind, so a deleted wallet kept showing its old
-      // balance (and survived a regtest wipe). See ark/purgeLocalData.
-      await dispatch('purgeLocalData')
+      // Purge the SDK's persisted IndexedDB store BEFORE dropping the key, else
+      // a restored same-key wallet keeps showing the old balance (the VTXO store
+      // outlives the localStorage keys). `purgeLocalData` lives in the
+      // namespaced `ark` module, so it must be dispatched with the `ark/` prefix
+      // and `{ root: true }` from this (non-namespaced) wallet module.
+      await dispatch('ark/purgeLocalData', null, { root: true })
       localStorage.removeItem('wallet_privkey')
       localStorage.removeItem('wallet_pubkey')
 

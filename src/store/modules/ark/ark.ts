@@ -432,23 +432,56 @@ const ark: Module<ArkState, RootState> = {
 
     /**
      * Wipe the SDK's persisted local wallet data (the IndexedDB VTXO / UTXO /
-     * tx / wallet-state stores) so a stale balance from a previous chain or
-     * wallet can't survive a reset. `clearSyncCursor` + reconnect don't suffice:
-     * the cursor reset doesn't delete rows, and the SDK keeps VTXOs the indexer
-     * no longer reports (e.g. after a regtest wipe). `clear()` empties the stores
-     * in place on the open connection — no teardown / deleteDatabase needed.
-     * (A first-class SDK reset API is requested upstream: arkade-os/ts-sdk#522.)
+     * tx / wallet-state / contract stores) so a stale balance from a previous
+     * chain or wallet can't survive a reset. `clearSyncCursor` + reconnect don't
+     * suffice: the cursor reset doesn't delete rows, and the SDK keeps VTXOs the
+     * indexer no longer reports (e.g. after a regtest wipe).
+     *
+     * We clear the IndexedDB stores DIRECTLY (raw transaction) rather than via
+     * `wallet.walletRepository.clear()` so the reset is self-contained and works
+     * even when no wallet is connected (a disconnected wallet showing a stale
+     * cache). NOTE: this action is namespaced (`ark/purgeLocalData`) — callers
+     * outside this module must dispatch it with the `ark/` prefix, or it
+     * silently no-ops in a production build.
+     * (First-class SDK reset API requested upstream: arkade-os/ts-sdk#522.)
      */
     async purgeLocalData() {
       localStorage.removeItem('ark_last_sync_ctx')
       localStorage.removeItem('ark_server_info')
-      if (!sdkWallet) return
+      // The SDK's default IndexedDB store name (no `storage` is passed to
+      // Wallet.create, so it uses this default).
+      const DB_NAME = 'arkade-service-worker'
       try {
-        await sdkWallet.walletRepository.clear()
-        await sdkWallet.contractRepository.clear()
+        await new Promise<void>((resolve) => {
+          const req = indexedDB.open(DB_NAME)
+          req.onerror = () => resolve()
+          req.onsuccess = () => {
+            const db = req.result
+            const names = Array.from(db.objectStoreNames)
+            if (names.length === 0) { db.close(); resolve(); return }
+            const tx = db.transaction(names, 'readwrite')
+            const finish = () => { db.close(); resolve() }
+            tx.oncomplete = finish
+            tx.onerror = finish
+            tx.onabort = finish
+            for (const n of names) tx.objectStore(n).clear()
+          }
+        })
       } catch (e) {
         console.warn('purgeLocalData: failed to clear local wallet store:', e)
       }
+    },
+
+    /**
+     * Resync the wallet against the current chain WITHOUT deleting the key:
+     * purge the SDK's stale local store (ghost VTXOs from a previous chain
+     * survive a regtest/chain wipe — see purgeLocalData), then reconnect so a
+     * fresh sync rebuilds the balance from reality. Surfaced as the "Resync
+     * wallet data" action.
+     */
+    async resyncWallet({ dispatch }) {
+      await dispatch('purgeLocalData')
+      await dispatch('checkConnection')
     },
 
     async refreshBalance({ commit, state, dispatch }) {

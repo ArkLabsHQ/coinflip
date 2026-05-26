@@ -430,6 +430,27 @@ const ark: Module<ArkState, RootState> = {
       }
     },
 
+    /**
+     * Wipe the SDK's persisted local wallet data (the IndexedDB VTXO / UTXO /
+     * tx / wallet-state stores) so a stale balance from a previous chain or
+     * wallet can't survive a reset. `clearSyncCursor` + reconnect don't suffice:
+     * the cursor reset doesn't delete rows, and the SDK keeps VTXOs the indexer
+     * no longer reports (e.g. after a regtest wipe). `clear()` empties the stores
+     * in place on the open connection — no teardown / deleteDatabase needed.
+     * (A first-class SDK reset API is requested upstream: arkade-os/ts-sdk#522.)
+     */
+    async purgeLocalData() {
+      localStorage.removeItem('ark_last_sync_ctx')
+      localStorage.removeItem('ark_server_info')
+      if (!sdkWallet) return
+      try {
+        await sdkWallet.walletRepository.clear()
+        await sdkWallet.contractRepository.clear()
+      } catch (e) {
+        console.warn('purgeLocalData: failed to clear local wallet store:', e)
+      }
+    },
+
     async refreshBalance({ commit, state, dispatch }) {
       if (!sdkWallet || state.status !== 'connected') return
 

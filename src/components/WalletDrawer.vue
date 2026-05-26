@@ -516,8 +516,8 @@ export default defineComponent({
     const showDeleteConfirm = ref(false)
     const deleteConfirmText = ref('')
 
-    function deleteWallet() {
-      store.dispatch('clearWallet')
+    async function deleteWallet() {
+      await store.dispatch('clearWallet')
       emit('update:open', false)
       router.push('/setup')
     }

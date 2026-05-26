@@ -486,8 +486,8 @@ export default {
       }
     }
 
-    function deleteWallet() {
-      store.dispatch('clearWallet')
+    async function deleteWallet() {
+      await store.dispatch('clearWallet')
       router.push('/setup')
     }
 

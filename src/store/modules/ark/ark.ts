@@ -203,6 +203,11 @@ let sdkWallet: Wallet | null = null
 // Guards the manual boarding settle so concurrent refreshBalance calls don't
 // fire overlapping settlement rounds (settlementConfig is false — see Wallet.create).
 let settling = false
+// Auto-reconnect backoff: a failed connect (slow load, arkd blip, reconnect
+// after a redeploy) schedules a retry with capped exponential backoff so the
+// client heals itself instead of stranding the user on "not connected".
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let reconnectAttempts = 0
 
 export function getSDKWallet(): Wallet | null {
   return sdkWallet
@@ -324,6 +329,9 @@ const ark: Module<ArkState, RootState> = {
     },
 
     async checkConnection({ commit, state, rootState, dispatch }) {
+      // A fresh attempt (manual Retry, network change, or a scheduled retry)
+      // supersedes any pending auto-retry.
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
       try {
         commit('SET_STATUS', 'connecting')
 
@@ -363,7 +371,7 @@ const ark: Module<ArkState, RootState> = {
 
         // Get server info via REST for display
         const response = await fetch(`${state.server}/v1/info`, {
-          signal: AbortSignal.timeout(5000)
+          signal: AbortSignal.timeout(12000)
         })
         if (!response.ok) {
           throw new Error(`Server returned ${response.status}`)
@@ -388,6 +396,7 @@ const ark: Module<ArkState, RootState> = {
 
         commit('SET_STATUS', 'connected')
         commit('SET_ERROR', null)
+        reconnectAttempts = 0 // connected — reset the backoff
 
         // Initialize swap service (Lightning + chain swaps via Boltz)
         try {
@@ -409,6 +418,14 @@ const ark: Module<ArkState, RootState> = {
         commit('SET_INFO', null)
         commit('SET_ARK_ADDRESS', null)
         commit('SET_BOARDING_ADDRESS', null)
+        // Auto-retry with capped exponential backoff (2s, 4s, … 30s) as long as
+        // a wallet key exists, so a transient failure or a slow page-load
+        // connect heals itself without the user having to hit Retry.
+        if (rootState.wallet.privateKey) {
+          reconnectAttempts = Math.min(reconnectAttempts + 1, 6)
+          const delay = Math.min(2000 * 2 ** (reconnectAttempts - 1), 30000)
+          reconnectTimer = setTimeout(() => { dispatch('checkConnection') }, delay)
+        }
         return null
       }
     },

@@ -15,7 +15,7 @@ import {
   type Game,
   type VtxoInput,
 } from 'arkade-coinflip'
-import { isVtxoExpiringSoon, VtxoScript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { isVtxoExpiringSoon, isExpired, isSpendable, VtxoScript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
 import { createGameContracts, markGameContractsInactive } from './contract-manager.js'
 import {
@@ -154,10 +154,17 @@ function vtxoToInput(vtxo: ExtendedVirtualCoin): VtxoInput {
 export const VTXO_LIFETIME_BUFFER_MS = 30 * 60_000
 
 /**
- * Drop VTXOs that would expire before the fallback's final tx window has
- * a chance to settle. The wallet's auto-renewal loop *should* keep these
- * out of `getVtxos()` already, but we filter explicitly so a broken
- * renewal config can't silently poison a game.
+ * Partition house VTXOs into those usable for a fresh escrow (`selectable`) and
+ * those that must NOT be escrowed and should be renewed (`dropped`).
+ *
+ * A VTXO is dropped when it is expiring within `bufferMs` OR already
+ * expired/swept. The latter is the critical case on regtest: once a batch is
+ * swept the VTXO becomes "recoverable", and arkd rejects spending it in a normal
+ * offchain tx with VTXO_RECOVERABLE — so it must never leak into `/play`
+ * selection. `isExpired` is timestamp-based (and also true for the "swept"
+ * state), so it catches a swept VTXO even when the SDK's cached state still
+ * reads "preconfirmed". The `dropped` set is what the renewal path re-settles to
+ * reclaim those funds.
  *
  * Exported for unit testing.
  */
@@ -168,7 +175,7 @@ export function selectableHouseVtxos(
   const selectable: ExtendedVirtualCoin[] = []
   const dropped: ExtendedVirtualCoin[] = []
   for (const v of vtxos) {
-    if (isVtxoExpiringSoon(v, bufferMs)) {
+    if (isVtxoExpiringSoon(v, bufferMs) || (isSpendable(v) && isExpired(v))) {
       dropped.push(v)
     } else {
       selectable.push(v)
@@ -605,10 +612,11 @@ export function shouldRenew(expiringVtxoCount: number, boardingTotalSats: number
  * batch expiry and confirming boarding deposits, without the per-poll fee drain.
  * A `renewing` guard prevents overlapping settles if one runs long.
  *
- * Note: on regtest `batchExpiry` is a block height (not a timestamp), so
- * `isVtxoExpiringSoon` always reports false — the expiry-driven path only
- * exercises on a real time-based network. The boarding-driven path and the
- * gating decision (`shouldRenew`) work everywhere.
+ * `selectableHouseVtxos` flags VTXOs expiring within the buffer OR already
+ * expired/swept (recoverable), so the renewal re-settles them before `/play`
+ * could pick one — arkd rejects spending a swept VTXO with VTXO_RECOVERABLE.
+ * This works on regtest too (where batches are swept by block height), via the
+ * timestamp/`swept`-state checks in `isExpired`.
  */
 export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.Timeout {
   let renewing = false

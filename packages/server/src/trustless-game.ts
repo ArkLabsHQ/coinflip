@@ -43,7 +43,7 @@ import {
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
-import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, KeyedMutex, outpointKey, pickEscrowVtxo } from './vtxo-pool.js'
+import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, KeyedMutex, outpointKey, pickEscrowVtxo, houseVtxoCache } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import type { GameRow } from './repositories/types.js'
 
@@ -344,17 +344,37 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   // concurrent plays run in parallel, each on its own reserved VTXO.
   let houseEscrow!: Outpoint
   let candidate!: ExtendedVirtualCoin
+  // `available` = settled + preconfirmed, exactly what wallet.getBalance()
+  // returns, derived from the VTXO list so one snapshot serves both the
+  // liability check and the escrow selection.
+  const availableOf = (vs: ExtendedVirtualCoin[]): number =>
+    vs
+      .filter((v) => v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed')
+      .reduce((sum, v) => sum + v.value, 0)
+  // Read the house VTXOs from the cache (kept warm by pool maintenance) so the
+  // hot path skips a full-history wallet sync — each getVtxos() re-syncs and
+  // re-annotates thousands of long-spent outputs, costing seconds. Fetched
+  // before the mutex so a cache-miss refresh can't serialize concurrent plays.
+  let vtxos = await houseVtxoCache.get(deps)
   await selectionMutex.runExclusive(async () => {
-    const balance = await deps.wallet.getBalance()
-    if (reservations.totalLiability() + houseStake > balance.available) {
-      throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${houseStake} > ${balance.available}). Try again shortly.`)
-    }
     // Pick a FREE, dust-safe VTXO and reserve ITS OUTPOINT (not just liability):
     // the reservation excludes it from every other play's selection even before
     // this spend propagates to getVtxos(), so two plays can never escrow from
     // the same VTXO. No fallback to a reserved VTXO — pool exhaustion surfaces a
     // retryable "busy" rather than risking a double-spend.
-    const picked = pickEscrowVtxo(freeHouseVtxos(await deps.wallet.getVtxos()), houseStake, dust)
+    let available = availableOf(vtxos)
+    let picked = pickEscrowVtxo(freeHouseVtxos(vtxos), houseStake, dust)
+    // A stale snapshot can understate the balance or hide free VTXOs (e.g. right
+    // after a settlement). On a liability or selection miss, refresh once and
+    // retry before declaring the house busy.
+    if (!picked || reservations.totalLiability() + houseStake > available) {
+      vtxos = await houseVtxoCache.refresh(deps)
+      available = availableOf(vtxos)
+      picked = pickEscrowVtxo(freeHouseVtxos(vtxos), houseStake, dust)
+    }
+    if (reservations.totalLiability() + houseStake > available) {
+      throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${houseStake} > ${available}). Try again shortly.`)
+    }
     if (!picked) {
       throw new HouseBusyError(`House has no free dust-safe VTXO covering ${houseStake} sats (pool may need refragmenting). Try again shortly.`)
     }

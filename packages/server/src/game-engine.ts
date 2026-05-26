@@ -25,6 +25,7 @@ import {
   outpointKey,
   maxLiabilityForTier,
   HouseBusyError,
+  houseVtxoCache,
 } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 
@@ -188,6 +189,7 @@ export async function renewExpiringHouseVtxos(deps: AppDeps): Promise<boolean> {
   if (dropped.length === 0) return false
   console.log(`[house wallet] renewing ${dropped.length} expiring VTXOs via settle()`)
   await deps.wallet.settle()
+  houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
   return true
 }
 
@@ -619,6 +621,7 @@ export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.T
       if (!shouldRenew(dropped.length, balance.boarding.total)) return
       console.log(`[renewal] settling: ${dropped.length} expiring VTXO(s), boarding ${balance.boarding.total} sats`)
       await deps.wallet.settle()
+      houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
     } catch (err) {
       console.warn('[renewal] tick failed:', err instanceof Error ? err.message : err)
     } finally {

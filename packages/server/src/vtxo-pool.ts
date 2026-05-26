@@ -157,6 +157,77 @@ export class VtxoReservations {
 export const reservations = new VtxoReservations()
 export const selectionMutex = new Mutex()
 
+/**
+ * Cached snapshot of the house wallet's VTXOs.
+ *
+ * `wallet.getVtxos()` forces the SDK to re-sync AND re-annotate the wallet's
+ * FULL VTXO history on every call — including thousands of long-spent outputs
+ * on the house's receive address — which costs seconds for a long-lived house.
+ * /play needs the VTXO set on its hot path (to size the liability check and
+ * pick an escrow VTXO), so it reads this snapshot — kept warm in the background
+ * by pool maintenance — instead of paying for a full sync per request.
+ *
+ * Staleness is safe by construction:
+ *  - Selection excludes already-reserved outpoints (`freeHouseVtxos`), so a
+ *    stale snapshot can never hand the same VTXO to two concurrent games.
+ *  - A VTXO spent by a settlement between refreshes that lingers in the
+ *    snapshot only makes the escrow submit fail — caught by the caller and
+ *    surfaced as a retryable "busy", never a double-spend or fund loss.
+ *  - The liability check stays conservative: each in-flight game adds its
+ *    worst-case pot to `reservations.totalLiability()` immediately, which grows
+ *    at least as fast as a stale `available` can over-count, so the check never
+ *    over-accepts.
+ * Callers force-refresh on a selection/liability miss, so a stale snapshot
+ * self-corrects within one request.
+ */
+export class HouseVtxoCache {
+  private snapshot: ExtendedVirtualCoin[] | null = null
+  private fetchedAt = 0
+  private inflight: Promise<ExtendedVirtualCoin[]> | null = null
+
+  constructor(private readonly ttlMs: number) {}
+
+  /** Snapshot if younger than the TTL, else a fresh (de-duped) fetch. */
+  async get(deps: AppDeps): Promise<ExtendedVirtualCoin[]> {
+    if (this.snapshot && Date.now() - this.fetchedAt < this.ttlMs) return this.snapshot
+    return this.refresh(deps)
+  }
+
+  /** Force a live fetch, collapsing concurrent refreshes onto one getVtxos(). */
+  async refresh(deps: AppDeps): Promise<ExtendedVirtualCoin[]> {
+    if (this.inflight) return this.inflight
+    this.inflight = deps.wallet
+      .getVtxos()
+      .then((vtxos) => {
+        this.snapshot = vtxos
+        this.fetchedAt = Date.now()
+        return vtxos
+      })
+      .finally(() => {
+        this.inflight = null
+      })
+    return this.inflight
+  }
+
+  /** Mark the snapshot stale so the next get() fetches live. */
+  invalidate(): void {
+    this.fetchedAt = 0
+  }
+
+  /** Age of the current snapshot in ms (introspection/tests); Infinity if none. */
+  ageMs(): number {
+    return this.snapshot ? Date.now() - this.fetchedAt : Infinity
+  }
+}
+
+/**
+ * Hot-path VTXO snapshot TTL. Defaults to the pool-maintenance interval so the
+ * background tick refreshes the snapshot before it expires and /play almost
+ * never pays for a live sync.
+ */
+export const HOUSE_VTXO_CACHE_TTL_MS = Number(process.env.HOUSE_VTXO_CACHE_TTL_MS || 120_000)
+export const houseVtxoCache = new HouseVtxoCache(HOUSE_VTXO_CACHE_TTL_MS)
+
 export interface SelectedHouseVtxos {
   vtxos: ExtendedVirtualCoin[]
   outpoints: string[]
@@ -228,7 +299,9 @@ export async function ensureHouseVtxoPool(
   const targetCount = opts.targetCount ?? POOL_TARGET_COUNT
   const pieceSize = opts.pieceSize
 
-  const all = await deps.wallet.getVtxos()
+  // Refresh through the cache so the background tick doubles as the hot path's
+  // snapshot warmer (a fresh, full getVtxos() either way).
+  const all = await houseVtxoCache.refresh(deps)
   const free = freeHouseVtxos(all)
   if (free.length >= targetCount) return 0
 
@@ -247,6 +320,9 @@ export async function ensureHouseVtxoPool(
 
   try {
     await deps.wallet.send(...(recipients as [{ address: string; amount: number }]))
+    // The split spent + created house VTXOs; drop the stale snapshot so the
+    // next access re-syncs and sees the new pieces.
+    houseVtxoCache.invalidate()
     console.log(`[house pool] split into ${piecesToCreate} new ${pieceSize}-sat VTXO(s)`)
     return piecesToCreate
   } catch (err) {

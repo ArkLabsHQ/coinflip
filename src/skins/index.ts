@@ -43,15 +43,15 @@ function slotLadder(): OddsBet[] {
   return out
 }
 
-// Dice: D dice read as one base-6 number; win iff roll ≥ lo ("beat the target
-// dice"). Two dice give a fine ~85%→2.8% sweep; a third die extends the rare
-// tail.
+// Dice: a single readable polyhedral die — "roll N+". A d20 gives 5% steps
+// across 95%→5%; for longer odds a d100 (dice-box renders it as a readable
+// tens+ones percentile pair) extends to 1% steps. One die shows one number, so
+// there's no place-value ambiguity (the flaw of a base-N number on scattered
+// physics dice). n = the die's side count; roll ∈ [0, n); win iff roll ≥ lo.
 function diceLadder(): OddsBet[] {
   const out: OddsBet[] = []
-  const n2 = 36
-  for (let lo = Math.round(0.15 * n2); lo <= n2 - 1; lo++) out.push({ n: n2, lo, target: n2 })
-  const n3 = 216
-  for (let lo = n3 - 5; lo <= n3 - 1; lo++) out.push({ n: n3, lo, target: n3 })
+  for (let lo = 1; lo <= 19; lo++) out.push({ n: 20, lo, target: 20 })    // d20: 95% → 5%
+  for (let lo = 96; lo <= 99; lo++) out.push({ n: 100, lo, target: 100 }) // d100: 4% → 1%
   return out
 }
 
@@ -73,7 +73,7 @@ export const SKINS: SkinMeta[] = [
   {
     id: 'dice', name: 'Dice', icon: '⚅', component: DiceSkin,
     oddsLadder: diceBets, defaultStep: nearHalf(diceBets),
-    stepLabel: () => 'BEAT THE DICE',
+    stepLabel: (b) => `ROLL ${b.lo + 1}+`,
   },
 ]
 

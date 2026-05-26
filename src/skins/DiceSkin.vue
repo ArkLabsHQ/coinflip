@@ -1,17 +1,12 @@
 <template>
   <div class="dice3d-wrapper">
-    <!-- The target to reach (read left-to-right); you win if your roll is ≥ it. -->
-    <div class="dice-target">
-      <span class="t-label">BEAT</span>
-      <span class="t-face" v-for="(f, i) in targetFaces" :key="i">{{ f }}</span>
-    </div>
-
-    <!-- 3D physics dice (dice-box-threejs) land on the server-determined roll. -->
+    <!-- A single polyhedral die (d20, or a d100 percentile pair for long odds)
+         physics-lands on the server's roll. One die = one number, so it reads
+         unambiguously (no place value). -->
     <div class="dice-stage" :class="tint">
       <div :id="canvasId" class="dice-canvas" />
       <div v-if="!ready" class="dice-loading">loading dice…</div>
     </div>
-
     <div class="dice-rule" :class="tint">{{ ruleLabel }}</div>
   </div>
 </template>
@@ -19,11 +14,6 @@
 <script lang="ts">
 import { defineComponent, computed, ref, watch, onMounted, onBeforeUnmount, type PropType } from 'vue'
 import type { SkinState } from './types'
-
-/** The `count` base-6 dice faces (1-6) of `value`, most-significant die first. */
-function facesOf(value: number, count: number): number[] {
-  return Array.from({ length: count }, (_, j) => (Math.floor(value / 6 ** (count - 1 - j)) % 6) + 1)
-}
 
 let uid = 0
 
@@ -34,29 +24,25 @@ export default defineComponent({
   },
   setup(props) {
     const canvasId = `dice-canvas-${++uid}`
-    const diceCount = computed(() => {
-      const o = props.state.odds
-      return o ? Math.max(1, Math.round(Math.log(o.n) / Math.log(6))) : 2
-    })
-    const threshold = computed(() => props.state.odds?.lo ?? 0)
-    const targetFaces = computed(() => facesOf(threshold.value, diceCount.value))
+    // The bet's `n` IS the die's side count (20 → d20, 100 → d100). The roll is
+    // a single value in [0, n); win iff roll ≥ lo, i.e. "roll (lo+1)+".
+    const sides = computed(() => props.state.odds?.n ?? 20)
+    const dieType = computed(() => `d${sides.value}`)
+    const targetValue = computed(() => (props.state.odds?.lo ?? 0) + 1)
     const tint = ref<'' | 'win' | 'loss'>('')
     const ready = ref(false)
 
-    // The DiceBox is a WebGL/physics instance; lazy-loaded so three.js stays out
-    // of the main bundle (only the Dice skin pulls it in).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let box: any = null
     let disposed = false
 
-    // Force the 3D dice onto specific faces (the @ notation makes the physics
-    // land there → provably fair). dice-box only runs its render loop while dice
-    // are in motion, so this is also what puts anything on the (otherwise black)
-    // canvas in the first place.
-    function showDice(faces: number[]) {
+    // Force the die onto `value` (1..sides) via the @ notation (provably fair).
+    // Also the only thing that draws to the canvas — dice-box renders solely
+    // while dice are in motion.
+    function showDie(value: number) {
       try {
         box?.clearDice?.()
-        box?.roll(`${faces.length}d6@${faces.join(',')}`)
+        box?.roll(`1${dieType.value}@${value}`)
       } catch (e) {
         console.warn('[dice] roll failed:', e)
       }
@@ -73,16 +59,16 @@ export default defineComponent({
           theme_material: 'plastic', // 'glass' needs an envmap.jpg we don't ship → renders dark
           gravity_multiplier: 400,
           light_intensity: 0.9,
-          baseScale: 90,
+          baseScale: 100,
           sounds: false,
         })
         if (typeof box.initialize === 'function') await box.initialize()
         if (disposed) return
         ready.value = true
-        // Populate the felt at rest with the target dice (otherwise the canvas
-        // stays black until the first roll). A short delay lets assets finish.
+        // Populate the felt at rest (otherwise the canvas stays black until the
+        // first roll). Show the target value as a reference.
         if (props.state.phase !== 'resolved') {
-          setTimeout(() => { if (!disposed) showDice(targetFaces.value) }, 400)
+          setTimeout(() => { if (!disposed) showDie(targetValue.value) }, 400)
         }
       } catch (e) {
         console.warn('[dice] dice-box init failed:', e)
@@ -95,27 +81,33 @@ export default defineComponent({
       box = null
     })
 
-    // On resolve, re-roll the 3D dice onto the server's actual roll. The dice
-    // stay on the felt afterwards (no clear on idle), so the stage is never blank.
+    // Re-roll the resting die when the DIE TYPE changes (e.g. d20 → d100 as the
+    // slider crosses into long odds). Threshold-only changes just update the
+    // text, so dragging the slider doesn't re-tumble every step.
+    watch(sides, () => {
+      if (props.state.phase !== 'flipping' && ready.value) { tint.value = ''; showDie(targetValue.value) }
+    })
+
+    // On resolve, roll the die onto the server's actual value (roll + 1).
     watch(() => props.state.phase, (phase, old) => {
       if (phase === 'resolved' && old === 'flipping' && props.state.outcome) {
-        const roll = props.state.outcome.roll ?? threshold.value
+        const roll = props.state.outcome.roll ?? 0
         tint.value = props.state.outcome.won ? 'win' : 'loss'
-        showDice(facesOf(roll, diceCount.value))
+        showDie(roll + 1)
       } else if (phase === 'flipping') {
         tint.value = ''
       }
     })
 
     const ruleLabel = computed(() => {
-      if (props.state.phase === 'resolved' && props.state.outcome) {
-        return props.state.outcome.won ? 'YOU BEAT THE TARGET' : 'FELL SHORT'
+      const o = props.state.outcome
+      if (props.state.phase === 'resolved' && o && o.roll != null) {
+        return `${o.won ? 'WIN' : 'LOSE'} — rolled ${o.roll + 1}, needed ${targetValue.value}+`
       }
-      if (props.state.phase === 'flipping') return 'ROLLING…'
-      return 'ROLL ≥ TARGET TO WIN'
+      return `ROLL ${targetValue.value}+ TO WIN`
     })
 
-    return { canvasId, targetFaces, tint, ready, ruleLabel }
+    return { canvasId, tint, ready, ruleLabel }
   },
 })
 </script>
@@ -129,33 +121,6 @@ export default defineComponent({
   align-items: center;
   gap: 10px;
 }
-
-.dice-target {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.t-label {
-  font-size: 0.6rem;
-  letter-spacing: 2px;
-  font-weight: 800;
-  color: var(--text-muted);
-}
-.t-face {
-  min-width: 26px;
-  height: 26px;
-  padding: 0 4px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-  background: #f0f0f3;
-  color: #111;
-  font-weight: 800;
-  font-size: 0.95rem;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
-}
-
 .dice-stage {
   position: relative;
   width: 100%;
@@ -194,10 +159,9 @@ export default defineComponent({
   letter-spacing: 2px;
   color: var(--text-muted);
 }
-
 .dice-rule {
   font-size: 0.72rem;
-  letter-spacing: 2px;
+  letter-spacing: 1.5px;
   font-weight: 800;
   color: var(--text-muted);
   font-family: ui-monospace, monospace;

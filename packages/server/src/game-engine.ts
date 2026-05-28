@@ -5,6 +5,8 @@ import {
   generateSecret,
   determineWinner,
   buildGameTransactions,
+  buildClaimTransaction,
+  getFinalOutpoint,
   coinSelect,
   getSetupScript,
   getFinalScript,
@@ -13,7 +15,7 @@ import {
   type Game,
   type VtxoInput,
 } from 'arkade-coinflip'
-import { isVtxoExpiringSoon, VtxoScript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { isVtxoExpiringSoon, isExpired, isSpendable, VtxoScript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
 import { createGameContracts, markGameContractsInactive } from './contract-manager.js'
 import {
@@ -23,6 +25,7 @@ import {
   outpointKey,
   maxLiabilityForTier,
   HouseBusyError,
+  houseVtxoCache,
 } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 
@@ -47,6 +50,12 @@ export interface PlayResult {
   finalCheckpointsHex: string[]
   houseSetupSignatures: string[]
   houseFinalSignature: string
+  /**
+   * PSBT of the player-win claim template (coinflip-final[0] → player, pot−rake)
+   * for the client to verify and pre-sign. The server rebuilds the same tx
+   * deterministically at /commit, so only the signature is round-tripped.
+   */
+  playerWinClaimPsbt: string
 }
 
 export interface SignRequest {
@@ -145,10 +154,17 @@ function vtxoToInput(vtxo: ExtendedVirtualCoin): VtxoInput {
 export const VTXO_LIFETIME_BUFFER_MS = 30 * 60_000
 
 /**
- * Drop VTXOs that would expire before the fallback's final tx window has
- * a chance to settle. The wallet's auto-renewal loop *should* keep these
- * out of `getVtxos()` already, but we filter explicitly so a broken
- * renewal config can't silently poison a game.
+ * Partition house VTXOs into those usable for a fresh escrow (`selectable`) and
+ * those that must NOT be escrowed and should be renewed (`dropped`).
+ *
+ * A VTXO is dropped when it is expiring within `bufferMs` OR already
+ * expired/swept. The latter is the critical case on regtest: once a batch is
+ * swept the VTXO becomes "recoverable", and arkd rejects spending it in a normal
+ * offchain tx with VTXO_RECOVERABLE — so it must never leak into `/play`
+ * selection. `isExpired` is timestamp-based (and also true for the "swept"
+ * state), so it catches a swept VTXO even when the SDK's cached state still
+ * reads "preconfirmed". The `dropped` set is what the renewal path re-settles to
+ * reclaim those funds.
  *
  * Exported for unit testing.
  */
@@ -159,7 +175,7 @@ export function selectableHouseVtxos(
   const selectable: ExtendedVirtualCoin[] = []
   const dropped: ExtendedVirtualCoin[] = []
   for (const v of vtxos) {
-    if (isVtxoExpiringSoon(v, bufferMs)) {
+    if (isVtxoExpiringSoon(v, bufferMs) || (isSpendable(v) && isExpired(v))) {
       dropped.push(v)
     } else {
       selectable.push(v)
@@ -180,6 +196,7 @@ export async function renewExpiringHouseVtxos(deps: AppDeps): Promise<boolean> {
   if (dropped.length === 0) return false
   console.log(`[house wallet] renewing ${dropped.length} expiring VTXOs via settle()`)
   await deps.wallet.settle()
+  houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
   return true
 }
 
@@ -460,6 +477,19 @@ async function finalizeGame(req: PlayRequest, deps: AppDeps, ctx: FinalizeContex
     console.warn(`[game ${gameId}] createGameContracts failed: ${err instanceof Error ? err.message : err}`)
   }
 
+  // Build the player-win claim template (final[0] → player, pot−rake) for the
+  // client to verify + pre-sign. Witness-independent txids make the final
+  // outpoint addressable now (proven by the deterministic-txid gate test).
+  const rake = await calculateRake(req.tier * 2, deps)
+  const playerClaim = buildClaimTransaction(game, deps.arkInfo, networkHrp, {
+    winner: 'player',
+    finalOutpoint: getFinalOutpoint(built.final.arkTx),
+    payoutAddress: req.playerChangeAddress,
+    houseAddress: houseChangeAddress,
+    rake,
+  })
+  const playerWinClaimPsbt = hex.encode(playerClaim.arkTx.toPSBT())
+
   return {
     gameId,
     housePubkey,
@@ -470,6 +500,7 @@ async function finalizeGame(req: PlayRequest, deps: AppDeps, ctx: FinalizeContex
     finalCheckpointsHex,
     houseSetupSignatures,
     houseFinalSignature: houseFinalSig,
+    playerWinClaimPsbt,
   }
 }
 
@@ -562,6 +593,51 @@ export async function handleSign(gameId: string, req: SignRequest, deps: AppDeps
     proof,
     txid,
   }
+}
+
+/**
+ * Renew iff there's something to do: expiring house VTXOs to re-anchor, or
+ * boarding deposits to confirm into Ark. Gating this (vs. settling every poll)
+ * is the whole point — a blind poll-loop finalizes preconfirmed game VTXOs into
+ * batch rounds and pays the per-intent fee each cycle (~5k sats/flip drain).
+ */
+export function shouldRenew(expiringVtxoCount: number, boardingTotalSats: number): boolean {
+  return expiringVtxoCount > 0 || boardingTotalSats > 0
+}
+
+/**
+ * Production VTXO-renewal timer. The SDK settlement poll-loop is disabled
+ * (settlementConfig:false); this replaces it with a long-cadence settle that
+ * fires ONLY when `shouldRenew` says so — renewing house VTXOs before their
+ * batch expiry and confirming boarding deposits, without the per-poll fee drain.
+ * A `renewing` guard prevents overlapping settles if one runs long.
+ *
+ * `selectableHouseVtxos` flags VTXOs expiring within the buffer OR already
+ * expired/swept (recoverable), so the renewal re-settles them before `/play`
+ * could pick one — arkd rejects spending a swept VTXO with VTXO_RECOVERABLE.
+ * This works on regtest too (where batches are swept by block height), via the
+ * timestamp/`swept`-state checks in `isExpired`.
+ */
+export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.Timeout {
+  let renewing = false
+  const tick = async () => {
+    if (renewing) return
+    renewing = true
+    try {
+      const [balance, all] = await Promise.all([deps.wallet.getBalance(), deps.wallet.getVtxos()])
+      const { dropped } = selectableHouseVtxos(all) // VTXOs expiring within the buffer
+      if (!shouldRenew(dropped.length, balance.boarding.total)) return
+      console.log(`[renewal] settling: ${dropped.length} expiring VTXO(s), boarding ${balance.boarding.total} sats`)
+      await deps.wallet.settle()
+      houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
+    } catch (err) {
+      console.warn('[renewal] tick failed:', err instanceof Error ? err.message : err)
+    } finally {
+      renewing = false
+    }
+  }
+  setTimeout(tick, 15_000) // initial pass shortly after boot
+  return setInterval(tick, intervalMs)
 }
 
 // Cleanup expired pending games every 60 seconds

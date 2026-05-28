@@ -65,6 +65,9 @@ export interface GameUpdate {
   rakeAmount?: number
   payoutAmount?: number
   status?: string
+  /** Rewritten at resolve to persist idempotent-replay data (player escrow
+   * outpoint + house-win sweep txid) alongside the existing escrow state. */
+  houseVtxosJson?: string
 }
 
 export interface GameFilter {

@@ -8,6 +8,13 @@
       <span class="balance-unit">sats</span>
     </button>
 
+    <!-- Game-mode switch, top-left. Only the two game routes are modes; the
+         active link is highlighted so Crash is discoverable from Flip and back. -->
+    <nav v-if="isInitialized && isGameRoute" class="mode-switch">
+      <router-link to="/" class="mode-link" exact-active-class="active">Flip</router-link>
+      <router-link to="/crash" class="mode-link" active-class="active">Crash</router-link>
+    </nav>
+
     <router-view v-slot="{ Component }">
       <transition name="fade" mode="out-in">
         <component :is="Component" @open-wallet="walletOpen = true" />
@@ -38,6 +45,7 @@ export default defineComponent({
     const route = useRoute()
     const router = useRouter()
     const isInitialized = computed(() => store.state.wallet?.isInitialized)
+    const isGameRoute = computed(() => route.path === '/' || route.path === '/crash')
     const walletBalance = computed(() => {
       const settled = store.getters['ark/balance']
       return settled !== undefined ? Number(settled) : (store.state.walletBalance || 0)
@@ -70,7 +78,7 @@ export default defineComponent({
 
     function formatSats(n: number): string { return n.toLocaleString() }
 
-    return { isInitialized, walletBalance, formatSats, walletOpen, arkStatus, connTitle }
+    return { isInitialized, isGameRoute, walletBalance, formatSats, walletOpen, arkStatus, connTitle }
   },
 })
 </script>
@@ -104,6 +112,37 @@ export default defineComponent({
   &:hover { border-color: var(--gold); box-shadow: 0 0 12px var(--gold-glow); }
   .balance-num { color: var(--gold); }
   .balance-unit { color: var(--text-muted); font-size: 0.72rem; }
+}
+
+.mode-switch {
+  position: fixed;
+  top: 18px;
+  left: 18px;
+  z-index: 50;
+  display: flex;
+  gap: 2px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 3px;
+  backdrop-filter: blur(10px);
+
+  .mode-link {
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 5px 14px;
+    border-radius: 999px;
+    transition: all 0.18s ease;
+    &:hover { color: var(--text); }
+    &.active {
+      background: rgba(247, 201, 72, 0.14);
+      color: var(--gold);
+      box-shadow: 0 0 8px var(--gold-glow);
+    }
+  }
 }
 
 .conn-dot {

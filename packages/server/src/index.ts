@@ -20,7 +20,8 @@ import { getSqlExecutor, initDb } from './db.js'
 import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
 import { attachContractEventHandler, initContractManager } from './contract-manager.js'
-import { startExpiryTimer } from './game-engine.js'
+import { startExpiryTimer, startRenewalTimer } from './game-engine.js'
+import { startEscrowRecoveryTimer, reconcilePendingSweeps } from './trustless-game.js'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
 import { createAdminRoutes } from './admin/routes.js'
@@ -34,7 +35,22 @@ export { getSqlExecutor, initDb } from './db.js'
 export { makeRepos } from './repositories/index.js'
 export { initHouseWallet } from './house-wallet.js'
 export { attachContractEventHandler, initContractManager } from './contract-manager.js'
-export { startExpiryTimer } from './game-engine.js'
+export { startExpiryTimer, startRenewalTimer, shouldRenew } from './game-engine.js'
+export {
+  handleTrustlessPlay,
+  handleTrustlessCommit,
+  handleTrustlessRefund,
+  recoverOrphanedHouseEscrows,
+  reconcilePendingSweeps,
+  startEscrowRecoveryTimer,
+  type TrustlessPlayRequest,
+  type TrustlessPlayResult,
+  type TrustlessCommitRequest,
+  type TrustlessCommitResult,
+  type TrustlessRefundRequest,
+  type TrustlessRefundResult,
+  type Outpoint,
+} from './trustless-game.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'
 export { createAdminRoutes } from './admin/routes.js'
@@ -62,8 +78,13 @@ export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<App
   registerCoinflipContracts(contractHandlers)
   await initDb()
   const repos = makeRepos(getSqlExecutor())
+  // Default the SDK's auto-renewal loop OFF (settlementConfig:false). It fires a
+  // settle every ~30s that arkd rejects with INTENT_INSUFFICIENT_FEE, churning
+  // and slowly degrading the house VTXO pool. Renewal is instead driven by the
+  // gated `startRenewalTimer` (long cadence, only when VTXOs are expiring or
+  // boarding needs confirming). Callers (tests) may override.
   const { wallet, identity, arkInfo } = await initHouseWallet(repos, {
-    settlementConfig: options.walletSettlementConfig,
+    settlementConfig: options.walletSettlementConfig ?? false,
   })
   const contractManager = await initContractManager(wallet, { repos })
   const deps: AppDeps = { repos, wallet, identity, arkInfo, contractManager }
@@ -78,10 +99,25 @@ async function main() {
   // Rebuild VTXO reservations from any pending games that survived a restart,
   // then keep a healthy pool of distinct house VTXOs for concurrent play.
   await rebuildReservations(deps)
+
+  // Resolve any games left `pending` by a crash mid house-win sweep (their
+  // escrow is already spent) before the expiry timer can flip them to expired.
+  await reconcilePendingSweeps(deps).catch((e) =>
+    console.error('[reconcile] boot pass failed:', e instanceof Error ? e.message : e),
+  )
+
   startPoolMaintenance(deps)
 
   // Start game expiry timer
   startExpiryTimer(deps)
+
+  // Reclaim orphaned house escrows from stalled games once their refund CLTV
+  // matures, so abandoned games don't slowly lock up house funds.
+  startEscrowRecoveryTimer(deps)
+
+  // Renew expiring VTXOs + confirm boarding deposits on a long cadence (only
+  // when there's something to do — no per-poll batch-fee drain).
+  startRenewalTimer(deps)
 
   // Public API server
   const publicApp = express()

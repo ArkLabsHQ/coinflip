@@ -22,7 +22,7 @@ import {
 // package.json `exports` map requires the `.js` suffix); without the
 // suffix Node's runtime resolver returns ERR_PACKAGE_PATH_NOT_EXPORTED.
 import { TAP_LEAF_VERSION, tapLeafHash } from '@scure/btc-signer/payment.js'
-import { CoinflipSetupScript, CoinflipFinalScript } from './script'
+import { CoinflipSetupScript, CoinflipFinalScript, CoinflipEscrowScript, VARIABLE_ODDS_BASE_LEN } from './script'
 import { Game, VtxoInput } from './types'
 
 function assertDefined<T>(value: T | undefined | null, name: string): asserts value is T {
@@ -83,6 +83,54 @@ export function getFinalAddress(game: Game, networkHrp: string): ArkAddress {
   assertDefined(game.serverPubkey, 'serverPubkey')
   const script = getFinalScript(game)
   return script.address(networkHrp, game.serverPubkey)
+}
+
+/**
+ * Per-party escrow scripts. Both share the win leaves but differ in an
+ * owner-scoped refund leaf, so each party can only reclaim its OWN escrow on a
+ * stall — the house cannot sweep the player's stake (abort-theft fix).
+ */
+function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScript {
+  assertDefined(game.creator, 'creator')
+  assertDefined(game.player, 'player')
+  assertDefined(game.serverPubkey, 'serverPubkey')
+  assertDefined(game.creator.hash, 'creator.hash')
+  assertDefined(game.creator.pubkey, 'creator.pubkey')
+  assertDefined(game.player.pubkey, 'player.pubkey')
+  assertDefined(game.player.hash, 'player.hash')
+  assertDefined(game.finalExpiration, 'finalExpiration')
+  assertDefined(game.penaltyTimelockSeconds, 'penaltyTimelockSeconds')
+  return new CoinflipEscrowScript({
+    creatorPubkey: game.creator.pubkey,
+    playerPubkey: game.player.pubkey,
+    serverPubkey: game.serverPubkey,
+    creatorHash: game.creator.hash,
+    playerHash: game.player.hash,
+    finalExpiration: BigInt(game.finalExpiration),
+    penaltyTimelockSeconds: BigInt(game.penaltyTimelockSeconds),
+    refundPubkey,
+    oddsN: game.oddsN,
+    oddsTarget: game.oddsTarget,
+    oddsLo: game.oddsLo,
+  })
+}
+
+/** Escrow the player funds; refundable only by the player after timeout. */
+export function getPlayerEscrowScript(game: Game): CoinflipEscrowScript {
+  return escrowScript(game, game.player!.pubkey!)
+}
+
+/** Escrow the house funds; refundable only by the house after timeout. */
+export function getHouseEscrowScript(game: Game): CoinflipEscrowScript {
+  return escrowScript(game, game.creator!.pubkey!)
+}
+
+export function getPlayerEscrowAddress(game: Game, networkHrp: string): ArkAddress {
+  return getPlayerEscrowScript(game).address(networkHrp, game.serverPubkey!)
+}
+
+export function getHouseEscrowAddress(game: Game, networkHrp: string): ArkAddress {
+  return getHouseEscrowScript(game).address(networkHrp, game.serverPubkey!)
 }
 
 /** Get the pot amount (2x bet) */
@@ -218,6 +266,210 @@ export function buildGameTransactions(
   }
 }
 
+/**
+ * The outpoint of the coinflip-final VTXO, addressable before the final tx is
+ * broadcast. The ark tx id excludes witness data, so it is stable across
+ * signing — this is what lets the player pre-sign the winner-claim (validated
+ * by the deterministic-txid gate test).
+ */
+export function getFinalOutpoint(finalArkTx: Transaction): { txid: string; vout: number } {
+  return { txid: finalArkTx.id!, vout: 0 }
+}
+
+export interface ClaimArgs {
+  winner: 'player' | 'house'
+  /** Outpoint of the coinflip-final VTXO (see getFinalOutpoint). */
+  finalOutpoint: { txid: string; vout: number }
+  /** Ark address the winner is paid to. */
+  payoutAddress: string
+  /** Ark address the rake goes to (player-win only). */
+  houseAddress: string
+  /** Rake in sats, deducted from the pot on a player win; 0 otherwise. */
+  rake: number
+}
+
+/**
+ * Build the winner-claim tx spending the coinflip-final VTXO via the winner's
+ * leaf. Player win → two outputs (pot−rake to player, rake to house); house win
+ * → single pot output to the house. The condition witness (both secrets) is
+ * attached by the broadcaster, not here — the signature does not cover it.
+ */
+export function buildClaimTransaction(
+  game: Game,
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: ClaimArgs,
+): BuiltOffchainTx {
+  void networkHrp // reserved for symmetry with the other builders
+  const pot = Number(getPotAmount(game))
+  const finalScript = getFinalScript(game)
+  const leaf = args.winner === 'player' ? finalScript.playerWin() : finalScript.creatorWin()
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const input: ArkTxInput = {
+    txid: args.finalOutpoint.txid,
+    vout: args.finalOutpoint.vout,
+    value: pot,
+    tapLeafScript: leaf,
+    tapTree: finalScript.encode(),
+  }
+
+  const winnerAddr = ArkAddress.decode(args.payoutAddress)
+  const outputs: { script: Uint8Array; amount: bigint }[] = []
+  if (args.winner === 'player' && args.rake > 0) {
+    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot - args.rake) })
+    outputs.push({ script: ArkAddress.decode(args.houseAddress).pkScript, amount: BigInt(args.rake) })
+  } else {
+    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot) })
+  }
+
+  const { arkTx, checkpoints } = buildOffchainTx([input], outputs, serverUnrollScript)
+  return { arkTx, checkpoints }
+}
+
+/** One escrow VTXO plus the per-party script it sits behind. */
+export interface SweepEscrow {
+  script: CoinflipEscrowScript
+  txid: string
+  vout: number
+  value: number
+}
+
+export interface SweepArgs {
+  winner: 'player' | 'house'
+  /** The escrow VTXOs to sweep — each at its own per-party escrow address. */
+  escrows: SweepEscrow[]
+  payoutAddress: string
+  houseAddress: string
+  rake: number
+}
+
+/**
+ * Sweep the per-party escrow VTXOs through the winner's leaf into one payout.
+ * Each input is spent via ITS OWN escrow script's win leaf (the win leaves are
+ * identical across player/house escrows, but the taptrees differ, so each input
+ * carries its own leaf + tree). Single-party: only the winner + Ark server sign.
+ * Player win → two outputs (pot−rake to player, rake to house); house win →
+ * single pot output. The condition witness (both secrets) is attached by the
+ * broadcaster.
+ */
+export function buildSweepTransaction(
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: SweepArgs,
+): BuiltOffchainTx {
+  void networkHrp
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const inputs: ArkTxInput[] = args.escrows.map((e) => ({
+    txid: e.txid,
+    vout: e.vout,
+    value: e.value,
+    tapLeafScript: args.winner === 'player' ? e.script.playerWin() : e.script.creatorWin(),
+    tapTree: e.script.encode(),
+  }))
+  const pot = args.escrows.reduce((a, e) => a + e.value, 0)
+
+  const winnerAddr = ArkAddress.decode(args.payoutAddress)
+  const outputs: { script: Uint8Array; amount: bigint }[] = []
+  if (args.winner === 'player' && args.rake > 0) {
+    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot - args.rake) })
+    outputs.push({ script: ArkAddress.decode(args.houseAddress).pkScript, amount: BigInt(args.rake) })
+  } else {
+    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot) })
+  }
+
+  const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
+  return { arkTx, checkpoints }
+}
+
+export interface PenaltyArgs {
+  escrows: SweepEscrow[]
+  /** Player's Ark address — receives the entire pot via the playerPenalty leaf. */
+  payoutAddress: string
+}
+
+/**
+ * Build the player's penalty-claim spending BOTH escrow VTXOs via the
+ * `playerPenalty` leaf (hash-check + CSV(penaltyTimelockSeconds) + 2-of-2[player,
+ * server]). Single output = the whole pot to the player. The condition witness
+ * is just [playerSecret], attached by the broadcaster (not covered by the
+ * signature, as with the sweep). The CSV is enforced by arkd at the VTXO layer
+ * via per-input nSequence — no explicit nLockTime, mirroring buildRefundTransaction.
+ */
+export function buildPenaltyTransaction(
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: PenaltyArgs,
+): BuiltOffchainTx {
+  void networkHrp // reserved for symmetry with the other builders
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const inputs: ArkTxInput[] = args.escrows.map((e) => ({
+    txid: e.txid,
+    vout: e.vout,
+    value: e.value,
+    tapLeafScript: e.script.playerPenalty(),
+    tapTree: e.script.encode(),
+  }))
+  const pot = args.escrows.reduce((a, e) => a + e.value, 0)
+  const payoutAddr = ArkAddress.decode(args.payoutAddress)
+  const { arkTx, checkpoints } = buildOffchainTx(
+    inputs,
+    [{ script: payoutAddr.pkScript, amount: BigInt(pot) }],
+    serverUnrollScript,
+  )
+  return { arkTx, checkpoints }
+}
+
+export interface RefundArgs {
+  escrowScript: CoinflipEscrowScript
+  txid: string
+  vout: number
+  value: number
+  /** Address the funder reclaims to. */
+  refundAddress: string
+}
+
+/**
+ * Refund a single escrow VTXO to its funder via the `refund` leaf after the
+ * timeout. Only the funder (+ server) can sign this leaf, so a stalled game
+ * lets each side reclaim its own stake — and only its own. The CLTV timelock is
+ * baked into the leaf and enforced by arkd at the VTXO layer (mirrors how
+ * auto-claim.ts spends the CLTV abort leaf via buildOffchainTx).
+ */
+export function buildRefundTransaction(
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: RefundArgs,
+): BuiltOffchainTx {
+  void networkHrp
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const input: ArkTxInput = {
+    txid: args.txid,
+    vout: args.vout,
+    value: args.value,
+    tapLeafScript: args.escrowScript.refund(),
+    tapTree: args.escrowScript.encode(),
+  }
+  const refundAddr = ArkAddress.decode(args.refundAddress)
+  const { arkTx, checkpoints } = buildOffchainTx(
+    [input],
+    [{ script: refundAddr.pkScript, amount: BigInt(args.value) }],
+    serverUnrollScript,
+  )
+  return { arkTx, checkpoints }
+}
+
 function getLeafHash(leaf: TapLeafScript): Uint8Array {
   const scriptWithVersion = leaf[1]
   const script = scriptWithVersion.slice(0, -1)
@@ -300,6 +552,54 @@ export function determineWinner(
 export function generateSecret(choice: 'heads' | 'tails'): Uint8Array {
   const length = choice === 'heads' ? 15 : 16
   return randomBytes(length)
+}
+
+/**
+ * Off-chain mirror of the variable-odds on-chain condition (must match its
+ * branch order exactly): an out-of-range secret makes its submitter lose, else
+ * the player wins iff `lo <= (digitC + digitP) mod n < target`. `digit = length
+ * - base`; `lo` defaults to 0.
+ */
+export function determineVariableWinner(
+  creatorSecret: Uint8Array,
+  playerSecret: Uint8Array,
+  n: number,
+  target: number,
+  lo = 0,
+): 'creator' | 'player' {
+  const base = VARIABLE_ODDS_BASE_LEN
+  const digitP = playerSecret.length - base
+  const digitC = creatorSecret.length - base
+  if (digitP < 0 || digitP >= n) return 'creator' // player out of range → loses
+  if (digitC < 0 || digitC >= n) return 'player' // creator out of range → loses
+  const roll = (digitC + digitP) % n
+  return roll >= lo && roll < target ? 'player' : 'creator'
+}
+
+/**
+ * The roll `(digitC + digitP) mod n` for display (e.g. the dice face the player
+ * rolled), or null if either secret's length is out of [base, base+n) — in which
+ * case the outcome was decided by the cheat-penalty, not a fair roll.
+ */
+export function computeVariableRoll(
+  creatorSecret: Uint8Array,
+  playerSecret: Uint8Array,
+  n: number,
+): number | null {
+  const base = VARIABLE_ODDS_BASE_LEN
+  const digitP = playerSecret.length - base
+  const digitC = creatorSecret.length - base
+  if (digitP < 0 || digitP >= n || digitC < 0 || digitC >= n) return null
+  return (digitC + digitP) % n
+}
+
+/**
+ * Random variable-odds secret: a uniformly chosen digit in [0, n) encoded as the
+ * byte length (`base + digit`). Choosing uniformly makes the summed roll uniform.
+ */
+export function generateVariableSecret(n: number): Uint8Array {
+  const digit = Math.floor(Math.random() * n)
+  return randomBytes(VARIABLE_ODDS_BASE_LEN + digit)
 }
 
 /**

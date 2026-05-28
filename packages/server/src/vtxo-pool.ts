@@ -63,6 +63,39 @@ export class Mutex {
   }
 }
 
+/**
+ * Per-key FIFO mutex. Serializes async sections that share a key (e.g. all
+ * `/commit` calls for one game) while letting different keys run concurrently.
+ *
+ * Each key's lock entry is reference-counted and dropped once idle, so the map
+ * doesn't grow without bound across many distinct keys (thousands of games).
+ * The ref bump and the entry lookup are synchronous (no `await` between them),
+ * so concurrent callers for the same key always share one entry and the last
+ * one out deletes it — a new caller never reuses a half-deleted entry.
+ */
+export class KeyedMutex {
+  private readonly entries = new Map<string, { mutex: Mutex; refs: number }>()
+
+  async runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    let entry = this.entries.get(key)
+    if (!entry) {
+      entry = { mutex: new Mutex(), refs: 0 }
+      this.entries.set(key, entry)
+    }
+    entry.refs++
+    try {
+      return await entry.mutex.runExclusive(fn)
+    } finally {
+      if (--entry.refs === 0) this.entries.delete(key)
+    }
+  }
+
+  /** Number of live key entries (introspection / tests). */
+  get size(): number {
+    return this.entries.size
+  }
+}
+
 interface Reservation {
   outpoints: Set<string>
   liability: number
@@ -109,11 +142,104 @@ export class VtxoReservations {
   activeGames(): number {
     return this.byGame.size
   }
+
+  /** Point-in-time view of the ledger for admin introspection (read-only). */
+  snapshot(): Array<{ gameId: string; outpoints: string[]; liability: number }> {
+    return [...this.byGame.entries()].map(([gameId, r]) => ({
+      gameId,
+      outpoints: [...r.outpoints],
+      liability: r.liability,
+    }))
+  }
 }
 
 /** Process-wide singletons. Game-engine selection serializes through these. */
 export const reservations = new VtxoReservations()
 export const selectionMutex = new Mutex()
+
+/**
+ * Cached snapshot of the house wallet's VTXOs.
+ *
+ * `wallet.getVtxos()` forces the SDK to re-sync AND re-annotate the wallet's
+ * FULL VTXO history on every call — including thousands of long-spent outputs
+ * on the house's receive address — which costs seconds for a long-lived house.
+ * /play needs the VTXO set on its hot path (to size the liability check and
+ * pick an escrow VTXO), so it reads this snapshot — kept warm in the background
+ * by pool maintenance — instead of paying for a full sync per request.
+ *
+ * Staleness is safe by construction:
+ *  - Selection excludes already-reserved outpoints (`freeHouseVtxos`), so a
+ *    stale snapshot can never hand the same VTXO to two concurrent games.
+ *  - A VTXO spent by a settlement between refreshes that lingers in the
+ *    snapshot only makes the escrow submit fail — caught by the caller and
+ *    surfaced as a retryable "busy", never a double-spend or fund loss.
+ *  - The liability check stays conservative: each in-flight game adds its
+ *    worst-case pot to `reservations.totalLiability()` immediately, which grows
+ *    at least as fast as a stale `available` can over-count, so the check never
+ *    over-accepts.
+ * Callers force-refresh on a selection/liability miss, so a stale snapshot
+ * self-corrects within one request.
+ */
+export class HouseVtxoCache {
+  private snapshot: ExtendedVirtualCoin[] | null = null
+  private fetchedAt = 0
+  private inflight: Promise<ExtendedVirtualCoin[]> | null = null
+
+  constructor(private readonly ttlMs: number) {}
+
+  /** Snapshot if younger than the TTL, else a fresh (de-duped) fetch. */
+  async get(deps: AppDeps): Promise<ExtendedVirtualCoin[]> {
+    if (this.snapshot && Date.now() - this.fetchedAt < this.ttlMs) return this.snapshot
+    return this.refresh(deps)
+  }
+
+  /** Force a live fetch, collapsing concurrent refreshes onto one getVtxos(). */
+  async refresh(deps: AppDeps): Promise<ExtendedVirtualCoin[]> {
+    if (this.inflight) return this.inflight
+    this.inflight = deps.wallet
+      .getVtxos()
+      .then((vtxos) => {
+        this.snapshot = vtxos
+        this.fetchedAt = Date.now()
+        return vtxos
+      })
+      .finally(() => {
+        this.inflight = null
+      })
+    return this.inflight
+  }
+
+  /** Mark the snapshot stale so the next get() fetches live. */
+  invalidate(): void {
+    this.fetchedAt = 0
+  }
+
+  /**
+   * Drop a just-spent outpoint from the snapshot so no later selection can
+   * re-pick a VTXO that's already been escrowed — the SDK would reject the
+   * spend with VTXO_ALREADY_SPENT once the game's reservation is released.
+   * Replaces (doesn't mutate) the array so a concurrent caller still iterating
+   * the previous snapshot is unaffected. The change output minted by the spend
+   * reappears on the next refresh.
+   */
+  removeOutpoint(txid: string, vout: number): void {
+    if (!this.snapshot) return
+    this.snapshot = this.snapshot.filter((v) => !(v.txid === txid && v.vout === vout))
+  }
+
+  /** Age of the current snapshot in ms (introspection/tests); Infinity if none. */
+  ageMs(): number {
+    return this.snapshot ? Date.now() - this.fetchedAt : Infinity
+  }
+}
+
+/**
+ * Hot-path VTXO snapshot TTL. Defaults to the pool-maintenance interval so the
+ * background tick refreshes the snapshot before it expires and /play almost
+ * never pays for a live sync.
+ */
+export const HOUSE_VTXO_CACHE_TTL_MS = Number(process.env.HOUSE_VTXO_CACHE_TTL_MS || 120_000)
+export const houseVtxoCache = new HouseVtxoCache(HOUSE_VTXO_CACHE_TTL_MS)
 
 export interface SelectedHouseVtxos {
   vtxos: ExtendedVirtualCoin[]
@@ -133,6 +259,20 @@ export class HouseBusyError extends Error {
 }
 
 /**
+ * Thrown when a bet's required house stake exceeds the house's TOTAL spendable
+ * balance — i.e. unaffordable regardless of concurrency. Unlike HouseBusyError
+ * (transient: in-flight liability), retrying won't help, so it surfaces as a
+ * non-retryable 4xx. The client caps bet options to avoid hitting this; this is
+ * the server-side backstop.
+ */
+export class BetExceedsCapacityError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BetExceedsCapacityError'
+  }
+}
+
+/**
  * Return spendable house VTXOs that are neither expiring nor already
  * reserved by an in-flight game. Pure read — does not mutate the ledger.
  */
@@ -140,6 +280,29 @@ export function freeHouseVtxos(all: ExtendedVirtualCoin[]): ExtendedVirtualCoin[
   const { selectable } = selectableHouseVtxos(all)
   const reserved = reservations.reservedOutpoints()
   return selectable.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
+}
+
+/**
+ * Pick a house VTXO to escrow `amount` from, avoiding a sub-dust change output.
+ * Offchain Ark txs are feeless (outputs = inputs + a zero-value anchor), but
+ * every VTXO output must clear the dust threshold or the server rejects the tx.
+ * So a valid VTXO covers the amount AND leaves either no change or >= `dust`
+ * change; we take the smallest such VTXO (best-fit) to keep larger ones free for
+ * bigger bets. Returns undefined if none qualify (caller surfaces "busy").
+ */
+export function pickEscrowVtxo<T extends { value: number }>(
+  candidates: T[],
+  amount: number,
+  dust: number,
+): T | undefined {
+  let best: T | undefined
+  for (const v of candidates) {
+    if (v.value < amount) continue
+    const change = v.value - amount
+    if (change !== 0 && change < dust) continue // would create a sub-dust change output
+    if (!best || v.value < best.value) best = v
+  }
+  return best
 }
 
 /**
@@ -163,7 +326,9 @@ export async function ensureHouseVtxoPool(
   const targetCount = opts.targetCount ?? POOL_TARGET_COUNT
   const pieceSize = opts.pieceSize
 
-  const all = await deps.wallet.getVtxos()
+  // Refresh through the cache so the background tick doubles as the hot path's
+  // snapshot warmer (a fresh, full getVtxos() either way).
+  const all = await houseVtxoCache.refresh(deps)
   const free = freeHouseVtxos(all)
   if (free.length >= targetCount) return 0
 
@@ -182,6 +347,9 @@ export async function ensureHouseVtxoPool(
 
   try {
     await deps.wallet.send(...(recipients as [{ address: string; amount: number }]))
+    // The split spent + created house VTXOs; drop the stale snapshot so the
+    // next access re-syncs and sees the new pieces.
+    houseVtxoCache.invalidate()
     console.log(`[house pool] split into ${piecesToCreate} new ${pieceSize}-sat VTXO(s)`)
     return piecesToCreate
   } catch (err) {
@@ -231,14 +399,30 @@ export async function rebuildReservations(deps: AppDeps): Promise<number> {
   let restored = 0
   for (const g of pending) {
     if (!g.house_vtxos_json) continue
+    let parsed: unknown
     try {
-      const outpoints = JSON.parse(g.house_vtxos_json) as string[]
-      if (Array.isArray(outpoints) && outpoints.length > 0) {
-        reservations.reserve(g.id, outpoints, maxLiabilityForTier(g.tier))
+      parsed = JSON.parse(g.house_vtxos_json)
+    } catch {
+      continue // malformed — skip
+    }
+    if (Array.isArray(parsed)) {
+      // Legacy setup/final flow: the JSON is a list of "txid:vout" house VTXOs
+      // baked into the game's fallback tx. Re-reserve those outpoints so a
+      // post-restart play can't pick a VTXO still committed to a live game.
+      if (parsed.length > 0) {
+        reservations.reserve(g.id, parsed as string[], maxLiabilityForTier(g.tier))
         restored++
       }
-    } catch {
-      /* malformed — skip */
+    } else if (parsed && typeof parsed === 'object' && 'houseEscrow' in parsed) {
+      // Trustless per-party flow: the house already spent its stake into the
+      // escrow address, so there's no live house VTXO to protect — but the
+      // in-flight liability MUST be restored, or concurrent post-restart plays
+      // would over-commit the house (the bug: this branch used to be skipped
+      // because TrustlessState is an object, not an array). Mirror
+      // handleTrustlessPlay's reservation: liability = the escrowed stake (tier),
+      // no outpoints.
+      reservations.reserve(g.id, [], g.tier)
+      restored++
     }
   }
   if (restored > 0) console.log(`[house pool] rebuilt ${restored} reservation(s) from pending games`)

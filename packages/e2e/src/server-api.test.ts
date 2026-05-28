@@ -23,14 +23,11 @@ import {
   SingleKey,
   InMemoryWalletRepository,
   InMemoryContractRepository,
-  type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
-import { type VtxoInput } from 'arkade-coinflip'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
 const HOUSE_FUND_BTC = 0.005 // 500_000 sats — covers tiers + change + fees
-const PLAYER_FUND_BTC = 0.002 // 200_000 sats — covers bet + change
 const BET_AMOUNT = 1000
 
 function sleep(ms: number): Promise<void> {
@@ -68,21 +65,6 @@ async function waitForSettled(wallet: Wallet, minSats: number, timeoutMs = 90_00
     await sleep(2000)
   }
   throw new Error('Timeout waiting for settled balance')
-}
-
-function vtxoToInput(vtxo: ExtendedVirtualCoin): VtxoInput {
-  // Strip the trailing Taproot leaf-version byte (0xc0) so VtxoScript's
-  // constructor in the lib doesn't double-append it. See game-engine.ts.
-  const rawScript = vtxo.intentTapLeafScript[1].slice(0, -1)
-  const leafHex = hex.encode(rawScript)
-  return {
-    vtxo: {
-      outpoint: { txid: vtxo.txid, vout: vtxo.vout },
-      amount: vtxo.value.toString(),
-      tapscripts: [leafHex],
-    },
-    leaf: leafHex,
-  }
 }
 
 let arkAvailable = false
@@ -150,11 +132,11 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
     expect(resp.body.maxAvailable).toBeGreaterThanOrEqual(BET_AMOUNT)
   })
 
-  it('POST /api/play + POST /api/game/:id/sign runs a full game and pays out', async () => {
+  it('POST /api/play starts a trustless game and escrows the house stake', async () => {
     if (!arkAvailable) return
 
-    // Create + fund a player wallet via the SDK directly so we can sign the
-    // server's request shape without going through any Vue layer.
+    // A funded player wallet, used only to commit a hash + change address.
+    // The full play→escrow→commit→sweep flow is covered by trustless-api.test.ts.
     const playerIdentity = SingleKey.fromRandomBytes()
     const playerWallet = await Wallet.create({
       identity: playerIdentity,
@@ -166,108 +148,28 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
       },
       settlementConfig: false,
     })
-    const playerBoarding = await playerWallet.getBoardingAddress()
-    await faucet(playerBoarding, PLAYER_FUND_BTC)
-    await waitForBoarding(playerWallet, PLAYER_FUND_BTC * 1e8 * 0.9)
-    await playerWallet.settle()
-    await waitForSettled(playerWallet, BET_AMOUNT)
-
-    const playerVtxos = await playerWallet.getVtxos()
-    expect(playerVtxos.length).toBeGreaterThan(0)
-    const playerPub = toXOnly(await playerIdentity.compressedPublicKey())
     const playerChangeAddress = await playerWallet.getAddress()
-
-    // Player commits to a secret choice
-    const playerSecret = new Uint8Array(16) // length = 16 => 'tails'
+    const playerPub = toXOnly(await playerIdentity.compressedPublicKey())
+    const playerSecret = new Uint8Array(16)
     crypto.getRandomValues(playerSecret)
     const playerHash = createHash('sha256').update(playerSecret).digest('hex')
 
     const playRes = await request(app)
       .post('/api/play')
-      .send({
-        tier: BET_AMOUNT,
-        choice: 'tails',
-        playerPubkey: hex.encode(playerPub),
-        playerHash,
-        playerVtxos: playerVtxos.map(vtxoToInput),
-        playerChangeAddress,
-      })
+      .send({ tier: BET_AMOUNT, playerPubkey: hex.encode(playerPub), playerHash, playerChangeAddress })
 
     if (playRes.status !== 200) {
       console.error('POST /api/play unexpected response:', playRes.status, playRes.body)
     }
     expect(playRes.status).toBe(200)
     expect(playRes.body.gameId).toBeTruthy()
-    expect(playRes.body.setupTxHex).toBeTruthy()
-    expect(playRes.body.finalTxHex).toBeTruthy()
-    expect(playRes.body.houseSetupSignatures.length).toBeGreaterThan(0)
-    expect(playRes.body.houseFinalSignature).toBeTruthy()
+    expect(playRes.body.escrowAddress).toBeTruthy()
+    expect(playRes.body.houseEscrow?.value).toBe(BET_AMOUNT)
     expect(playRes.body.houseHash).toMatch(/^[0-9a-f]{64}$/i)
 
-    const gameId: string = playRes.body.gameId
-
-    // Mid-flight invariants: the game row should be pending and both
-    // coinflip-setup + coinflip-final contracts should be active.
-    const gameMidflight = await serverDeps!.repos.games.get(gameId)
-    expect(gameMidflight?.status).toBe('pending')
-    expect(gameMidflight?.setup_script_hex).toBeTruthy()
-    expect(gameMidflight?.final_script_hex).toBeTruthy()
-
-    const setupContract = (await serverDeps!.contractManager.getContracts({ script: gameMidflight!.setup_script_hex! }))[0]
-    const finalContract = (await serverDeps!.contractManager.getContracts({ script: gameMidflight!.final_script_hex! }))[0]
-    expect(setupContract?.state).toBe('active')
-    expect(finalContract?.state).toBe('active')
-    expect(setupContract?.type).toBe('coinflip-setup')
-    expect(finalContract?.type).toBe('coinflip-final')
-
-    // Player reveals their secret. The server settles the pot via
-    // wallet.sendBitcoin and resolves the game in DB.
-    const signRes = await request(app)
-      .post(`/api/game/${gameId}/sign`)
-      .send({
-        playerSecretHex: hex.encode(playerSecret),
-        playerSetupSignatures: [],
-        playerFinalSignature: '',
-      })
-
-    expect(signRes.status).toBe(200)
-    expect(['house', 'player']).toContain(signRes.body.winner)
-    expect(signRes.body.proof).toContain('bytes')
-    expect(typeof signRes.body.payout).toBe('number')
-    expect(signRes.body.txid).toBeTruthy()
-
-    // Post-resolve: game row is resolved + both contracts inactivated.
-    const gameAfter = await serverDeps!.repos.games.get(gameId)
-    expect(gameAfter?.status).toBe('resolved')
-    expect(gameAfter?.winner).toBe(signRes.body.winner)
-    expect(gameAfter?.player_secret_hex).toBe(hex.encode(playerSecret))
-
-    const setupAfter = (await serverDeps!.contractManager.getContracts({ script: gameMidflight!.setup_script_hex! }))[0]
-    const finalAfter = (await serverDeps!.contractManager.getContracts({ script: gameMidflight!.final_script_hex! }))[0]
-    expect(setupAfter?.state).toBe('inactive')
-    expect(finalAfter?.state).toBe('inactive')
-
-    // If the player won, their wallet should reflect the payout. The server
-    // sent it via wallet.sendBitcoin which is an offchain Ark tx.
-    if (signRes.body.winner === 'player') {
-      // Best-effort: poll briefly for the incoming VTXO; the wallet's
-      // ContractManager picks it up async.
-      const start = Date.now()
-      let saw = false
-      while (Date.now() - start < 30_000) {
-        const vtxos = await playerWallet.getVtxos()
-        if (vtxos.some((v) => v.txid === signRes.body.txid)) {
-          saw = true
-          break
-        }
-        await sleep(2000)
-      }
-      expect(saw).toBe(true)
-    } else {
-      // House won — payout txid is the sentinel. Game row still recorded.
-      expect(signRes.body.txid).toBe('house-win-no-transfer')
-    }
-  }, 240_000)
+    const row = await serverDeps!.repos.games.get(playRes.body.gameId)
+    expect(row?.status).toBe('pending')
+  }, 180_000)
 
   it('GET /api/tiers rejects bets above maxAvailable', async () => {
     if (!arkAvailable) return
@@ -285,11 +187,11 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
     expect(resp.body.error).toMatch(/Missing required fields/i)
   })
 
-  it('POST /api/game/:id/sign 404 on unknown game', async () => {
+  it('POST /api/game/:id/commit 404 on unknown game', async () => {
     if (!arkAvailable) return
     const resp = await request(app)
-      .post('/api/game/nonexistent-id/sign')
-      .send({ playerSecretHex: '00'.repeat(15) })
+      .post('/api/game/nonexistent-id/commit')
+      .send({ playerSecretHex: '00'.repeat(16), playerEscrow: { txid: 'a'.repeat(64), vout: 0, value: 1000 } })
     expect(resp.status).toBe(404)
   })
 })

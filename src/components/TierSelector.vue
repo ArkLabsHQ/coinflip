@@ -4,11 +4,9 @@
       v-for="tier in tiers"
       :key="tier"
       class="tier-chip"
-      :class="{
-        selected: tier === selectedTier,
-        disabled: tier > maxAvailable || tier > playerBalance,
-      }"
-      :disabled="tier > maxAvailable || tier > playerBalance"
+      :class="{ selected: tier === selectedTier, disabled: isDisabled(tier) }"
+      :disabled="isDisabled(tier)"
+      :title="disabledReason(tier)"
       @click="$emit('select', tier)"
     >
       <span class="tier-amount">{{ formatTier(tier) }}</span>
@@ -25,7 +23,9 @@ export default defineComponent({
   props: {
     tiers: { type: Array as PropType<number[]>, required: true },
     selectedTier: { type: Number, default: null },
-    maxAvailable: { type: Number, default: Infinity },
+    // Tiers the house can currently cover (some odds step fits the bankroll).
+    // Empty array = nothing affordable; defaults to "all affordable".
+    affordableTiers: { type: Array as PropType<number[]>, default: null },
     playerBalance: { type: Number, default: Infinity },
   },
   emits: ['select'],
@@ -34,6 +34,18 @@ export default defineComponent({
       if (n >= 1_000_000) return (n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1) + 'M'
       if (n >= 1_000) return (n / 1_000).toFixed(n % 1_000 === 0 ? 0 : 1) + 'K'
       return String(n)
+    },
+    affordableByHouse(tier: number): boolean {
+      // null = caller hasn't computed affordability yet → don't block.
+      return this.affordableTiers === null || this.affordableTiers.includes(tier)
+    },
+    isDisabled(tier: number): boolean {
+      return !this.affordableByHouse(tier) || tier > this.playerBalance
+    },
+    disabledReason(tier: number): string {
+      if (tier > this.playerBalance) return 'More than your wallet balance'
+      if (!this.affordableByHouse(tier)) return "House can't cover a bet this size right now"
+      return ''
     },
   },
 })

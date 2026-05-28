@@ -9,6 +9,12 @@
  *   - creatorWin: condition(secrets same size = false) + creator + server
  *   - playerWin: condition(secrets same size = true) + player + server
  *   - abort: CLTV timeout + creator + server (if player doesn't reveal)
+ *
+ * Escrow output (`CoinflipEscrowScript`) has 4 leaves: creatorWin, playerWin,
+ * refund (owner-scoped CLTV self-refund), and playerPenalty (audit R1 forfeit
+ * — ConditionCSVMultisigTapscript leaf: hash-check on the player's revealed
+ * secret + relative CSV timelock + 2-of-2[player, server]; the player sweeps
+ * both escrows after a stall using only their own secret).
  */
 
 import { OP } from '@scure/btc-signer'
@@ -16,6 +22,7 @@ import { hex } from '@scure/base'
 import {
   VtxoScript,
   ConditionMultisigTapscript,
+  ConditionCSVMultisigTapscript,
   CLTVMultisigTapscript,
   TapLeafScript,
 } from '@arkade-os/sdk'
@@ -122,6 +129,108 @@ function buildCoinflipConditionScript(
 }
 
 /**
+ * Base secret length for variable-odds games. Each party's "digit" is encoded
+ * as `secretLength - VARIABLE_ODDS_BASE_LEN`, so a valid secret is
+ * `BASE_LEN .. BASE_LEN + n - 1` bytes. 16 bytes keeps the SHA256 commit
+ * brute-force-resistant (≥128 bits) at the smallest digit.
+ */
+export const VARIABLE_ODDS_BASE_LEN = 16
+
+/**
+ * Minimal numeric push: OP_0 / OP_1..OP_16 / a minimally-encoded CScriptNum.
+ * For v ≤ 127 this is the original `[0x01, v]` 1-byte form (unchanged); for
+ * larger v it emits little-endian bytes with a 0x00 pad when the MSB's high bit
+ * is set, so the value stays positive. Lets variable-odds use n ≥ 128 (e.g. a
+ * 3-dice "beat target" bet, n = 216, threshold up to 215).
+ */
+function pushNum(v: number): number[] {
+  if (!Number.isInteger(v) || v < 0) throw new Error(`pushNum: ${v} must be a non-negative integer`)
+  if (v === 0) return [0x00]
+  if (v >= 1 && v <= 16) return [0x50 + v] // OP_1..OP_16
+  const bytes: number[] = []
+  let n = v
+  while (n > 0) { bytes.push(n & 0xff); n >>= 8 }
+  if (bytes[bytes.length - 1] & 0x80) bytes.push(0x00) // keep positive
+  return [bytes.length, ...bytes]
+}
+
+/** value ∈ [lo, hi) → leaves one bool on the stack (consumes the value). */
+function inRangeOps(lo: number, hi: number): number[] {
+  return [
+    OP.DUP, ...pushNum(lo), OP.GREATERTHANOREQUAL, // v (v>=lo)
+    OP.SWAP, ...pushNum(hi), OP.LESSTHAN,           // (v>=lo) (v<hi)
+    OP.BOOLAND,                                     // inRange
+  ]
+}
+
+/** size ∈ [base, base+n) → leaves one bool on the stack (consumes the size). */
+function rangeCheckOps(base: number, n: number): number[] {
+  return inRangeOps(base, base + n)
+}
+
+/**
+ * Variable-odds win condition (generalizes the coin's same/different-size check).
+ *
+ * Stack expects: <creatorSecret> <playerSecret>. Result: pushes 1 if the PLAYER
+ * wins, 0 if the creator (house) wins. The creatorWin leaf wraps this in OP_NOT.
+ *
+ * Fairness: each party commits a secret hash whose LENGTH encodes a digit in
+ * [0, n) — chosen before seeing the opponent's digit (commit-reveal). The roll
+ * is `(digitC + digitP) mod n`; the player wins iff `lo <= roll < target`, i.e.
+ * with probability `(target - lo)/n`. This arbitrary range lets a skin express
+ * "roll a 1" ([0,1)), "roll 4+" ([3,6)), "exactly a 6" ([5,6)), etc. OP_MOD is
+ * disabled in Script, so the mod is a single conditional subtraction (sum ∈
+ * [0, 2n-2] ⇒ one `-n` suffices).
+ *
+ * An out-of-range secret makes its submitter LOSE (not void the game), so a
+ * sure-loser can't grief a refund by revealing a bad length — exactly the
+ * coin's invalid-size handling, generalized.
+ */
+function buildVariableOddsConditionScript(
+  creatorHash: Uint8Array,
+  playerHash: Uint8Array,
+  n: number,
+  target: number,
+  lo = 0,
+): Uint8Array {
+  const base = VARIABLE_ODDS_BASE_LEN
+  // The secret LENGTH encodes the digit (base + digit), so the largest valid
+  // secret is `base + n - 1` bytes; cap it at the 520-byte push limit. arkd
+  // handles the resulting >127 OP_SIZE / pushNum values as ordinary CScriptNums.
+  if (!Number.isInteger(n) || n < 2 || base + n - 1 > 520) throw new Error(`invalid n: ${n}`)
+  if (!Number.isInteger(lo) || !Number.isInteger(target) || lo < 0 || target <= lo || target > n) {
+    throw new Error(`invalid odds range: need 0<=lo<target<=n (got lo=${lo}, target=${target}, n=${n})`)
+  }
+
+  return new Uint8Array([
+    // Validate both hashes; leaves: cS pS
+    OP['2DUP'],
+    OP.SHA256, 0x20, ...playerHash, OP.EQUALVERIFY,
+    OP.SHA256, 0x20, ...creatorHash, OP.EQUALVERIFY,
+    // Validate player secret length ∈ [base, base+n)
+    OP.SIZE, ...rangeCheckOps(base, n),  // cS pS isValidP
+    OP.NOTIF,
+      OP['2DROP'], 0x00,                  // player out of range → house wins (0)
+    OP.ELSE,
+      OP.SWAP,                            // pS cS
+      OP.SIZE, ...rangeCheckOps(base, n), // pS cS isValidC
+      OP.NOTIF,
+        OP['2DROP'], 0x51,                // creator out of range → player wins (1)
+      OP.ELSE,
+        // both valid; stack: pS cS. roll = (digitC + digitP) mod n
+        OP.SIZE, OP.NIP, ...pushNum(base), OP.SUB,  // pS digitC
+        OP.SWAP,                                     // digitC pS
+        OP.SIZE, OP.NIP, ...pushNum(base), OP.SUB,  // digitC digitP
+        OP.ADD,                                      // sum ∈ [0, 2n-2]
+        OP.DUP, ...pushNum(n), OP.GREATERTHANOREQUAL,
+        OP.IF, ...pushNum(n), OP.SUB, OP.ENDIF,      // roll = sum mod n
+        ...inRangeOps(lo, target),                   // lo <= roll < target → player wins
+      OP.ENDIF,
+    OP.ENDIF,
+  ])
+}
+
+/**
  * Setup output VtxoScript.
  * Two leaves:
  *   1. Reveal: condition(SHA256 check) + creator + player + server
@@ -215,5 +324,145 @@ export class CoinflipFinalScript extends VtxoScript {
 
   abort(): TapLeafScript {
     return this.findLeaf(this.abortScriptHex)
+  }
+}
+
+export interface CoinflipEscrowOptions {
+  creatorPubkey: Uint8Array
+  playerPubkey: Uint8Array
+  serverPubkey: Uint8Array
+  creatorHash: Uint8Array
+  playerHash: Uint8Array
+  finalExpiration: bigint
+  /**
+   * Relative timelock (in seconds, BIP68) after the escrow VTXO is confirmed,
+   * after which the player can sweep BOTH escrows via the playerPenalty leaf
+   * with only its own secret — the forfeit a withholding house suffers (R1).
+   * MUST be less than the time-to-`finalExpiration` so the player's penalty
+   * beats the house's self-refund. BIP68 grants 512-second granularity for
+   * seconds-type timelocks, so values rounded to multiples of 512 avoid
+   * surprises. The default in production callers is 1024n (~17 min, with
+   * 30-min refund leaving a ~13-min margin for the house to claim wins).
+   *
+   * **BIP68 silent-floor warning.** Seconds-type timelocks are encoded in
+   * 512-second units; the SDK encoder silently floors non-multiples of 512n
+   * down to the nearest lower multiple. A value below 512n encodes as 0n —
+   * producing an **immediately-spendable** leaf, which **nullifies the R1
+   * forfeit entirely**. Callers MUST pass a value that is `>= 512n` and a
+   * multiple of 512n. The documented default is `1024n` (2 × 512s ≈ 17 min).
+   */
+  penaltyTimelockSeconds: bigint
+  /**
+   * The FUNDER's pubkey: only this party (+ server) may refund after the
+   * timeout. Set to `playerPubkey` for the player's escrow and `creatorPubkey`
+   * for the house's. This is the abort-theft fix — because the player's escrow
+   * refund leaf requires the PLAYER's key, the house can never sweep the
+   * player's stake on a stall.
+   */
+  refundPubkey: Uint8Array
+  /**
+   * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the win
+   * condition becomes `oddsLo <= roll < oddsTarget` over `oddsN` outcomes
+   * (probability `(oddsTarget - oddsLo)/oddsN`) instead of the 50/50 coin.
+   * `oddsLo` defaults to 0 (a low-threshold bet); an arbitrary range expresses
+   * "roll 4+", "exactly a 6", etc. Escrow structure is otherwise identical.
+   */
+  oddsN?: number
+  oddsTarget?: number
+  oddsLo?: number
+}
+
+/**
+ * Per-party escrow output. Both parties fund a (different) escrow address that
+ * shares the win leaves but differs only in the owner-scoped refund leaf:
+ *   1. creatorWin:    condition(sizes differ → house wins) + creator + server
+ *   2. playerWin:     condition(sizes equal → player wins) + player + server
+ *   3. refund:        CLTV(finalExpiration) + refundPubkey(funder) + server
+ *   4. playerPenalty: ConditionCSVMultisigTapscript leaf —
+ *                     condition(hash-check on player) + relative CSV timelock
+ *                     + 2-of-2[player, server] (audit R1: house-withholding
+ *                     forfeit). A recognized SDK tapscript type, so the
+ *                     standard `buildOffchainTx` helper handles it.
+ *
+ * The winner sweeps BOTH escrow VTXOs through `creatorWin`/`playerWin` (same
+ * leaf script in either escrow); on a stall each side reclaims ONLY its own
+ * escrow via `refund`. If the player revealed and the house withholds, after
+ * `penaltyTimelockSeconds` has elapsed (relative to the escrow VTXO's
+ * confirmation), the player sweeps BOTH escrows via `playerPenalty` with just
+ * its own secret — forfeiting the house's stake. No cross-party theft is
+ * expressible: penalty requires the player's revealed secret, refund requires
+ * the funder's key.
+ */
+export class CoinflipEscrowScript extends VtxoScript {
+  readonly creatorWinScriptHex: string
+  readonly playerWinScriptHex: string
+  readonly refundScriptHex: string
+  readonly playerPenaltyScriptHex: string
+
+  constructor(readonly options: CoinflipEscrowOptions) {
+    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, penaltyTimelockSeconds, refundPubkey, oddsN, oddsTarget, oddsLo } = options
+
+    // Variable-odds when both params are set; otherwise the 50/50 coin.
+    const conditionScript =
+      oddsN !== undefined && oddsTarget !== undefined
+        ? buildVariableOddsConditionScript(creatorHash, playerHash, oddsN, oddsTarget, oddsLo ?? 0)
+        : buildCoinflipConditionScript(creatorHash, playerHash)
+
+    const creatorWinCondition = new Uint8Array([...conditionScript, OP.NOT])
+    const creatorWinTapscript = ConditionMultisigTapscript.encode({
+      conditionScript: creatorWinCondition,
+      pubkeys: [creatorPubkey, serverPubkey],
+    })
+
+    const playerWinTapscript = ConditionMultisigTapscript.encode({
+      conditionScript,
+      pubkeys: [playerPubkey, serverPubkey],
+    })
+
+    // Owner-scoped refund: only the funder (+ server) can reclaim after timeout.
+    const refundTapscript = CLTVMultisigTapscript.encode({
+      absoluteTimelock: finalExpiration,
+      pubkeys: [refundPubkey, serverPubkey],
+    })
+
+    // Player-forfeit penalty: a recognized ConditionCSVMultisigTapscript leaf
+    // — `<hashCheck(playerHash)> VERIFY <sequence> CSV DROP <player> CSVSIG
+    // <server> CSIG`. Because this is one of `decodeTapscript`'s known types,
+    // the standard `buildOffchainTx` helper handles spends through this leaf;
+    // the CSV is enforced by arkd at the VTXO layer via per-input nSequence
+    // (no explicit nLockTime, mirroring the refund leaf).
+    const playerPenaltyTapscript = ConditionCSVMultisigTapscript.encode({
+      conditionScript: buildHashCheckScript(playerHash),
+      timelock: { value: penaltyTimelockSeconds, type: 'seconds' },
+      pubkeys: [playerPubkey, serverPubkey],
+    })
+
+    super([
+      creatorWinTapscript.script,
+      playerWinTapscript.script,
+      refundTapscript.script,
+      playerPenaltyTapscript.script,
+    ])
+
+    this.creatorWinScriptHex = hex.encode(creatorWinTapscript.script)
+    this.playerWinScriptHex = hex.encode(playerWinTapscript.script)
+    this.refundScriptHex = hex.encode(refundTapscript.script)
+    this.playerPenaltyScriptHex = hex.encode(playerPenaltyTapscript.script)
+  }
+
+  creatorWin(): TapLeafScript {
+    return this.findLeaf(this.creatorWinScriptHex)
+  }
+
+  playerWin(): TapLeafScript {
+    return this.findLeaf(this.playerWinScriptHex)
+  }
+
+  refund(): TapLeafScript {
+    return this.findLeaf(this.refundScriptHex)
+  }
+
+  playerPenalty(): TapLeafScript {
+    return this.findLeaf(this.playerPenaltyScriptHex)
   }
 }

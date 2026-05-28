@@ -12,11 +12,38 @@
 
 import type { Component } from 'vue'
 
+/**
+ * A variable-odds bet: `n` equally-likely outcomes, player wins iff the rolled
+ * value lands in `[lo, target)`. Win probability is `(target - lo) / n`; the
+ * fair payout multiple is its inverse. Enforced on-chain — see the lib's
+ * `buildVariableOddsConditionScript`.
+ */
+export interface OddsBet {
+  n: number
+  lo: number
+  target: number
+}
+
 export interface SkinState {
   /** Lifecycle phase of the current flip. */
   phase: 'idle' | 'flipping' | 'resolved'
   /** Final outcome — populated when phase === 'resolved'. */
-  outcome: { won: boolean; side: 'heads' | 'tails' } | null
+  outcome: {
+    won: boolean
+    side: 'heads' | 'tails'
+    /**
+     * Variable-odds: the value the player actually rolled, in `[0, n)`, for the
+     * skin to show (the dice face = roll + 1, etc.). null for the 50/50 coin or
+     * a cheat-penalty result (no fair roll).
+     */
+    roll: number | null
+  } | null
+  /**
+   * The active bet — never null now (every bet is a variable-odds range). Set
+   * from the moment a flip starts (not just on resolve) so a skin can frame the
+   * target up front (the dice count, the number of coins/reels, etc.).
+   */
+  odds: OddsBet | null
 }
 
 export interface SkinMeta {
@@ -26,11 +53,15 @@ export interface SkinMeta {
   icon: string
   component: Component
   /**
-   * Whether picking heads/tails is meaningful for this skin. Coin → yes;
-   * slot/dice → no (the visual has no "side", so the outcome is always
-   * randomised). When false, the side selector is hidden.
+   * The skin's bet ladder — the ordered set of slider positions, with strictly
+   * decreasing win rate. Each step is a variable-odds range; the skin scales its
+   * visual with the bet (more coins / reels / dice). The slider indexes into it.
    */
-  supportsSide: boolean
+  oddsLadder: OddsBet[]
+  /** Initial slider index when the skin is selected. */
+  defaultStep: number
+  /** Themed label for a ladder step ("3 COINS", "LINE UP 2 ₿", "ROLL 4+"). */
+  stepLabel: (bet: OddsBet, index: number) => string
 }
 
 /** Props all skin components must accept. */

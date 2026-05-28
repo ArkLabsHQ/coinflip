@@ -46,6 +46,7 @@ export class SQLiteGameRepository implements GameRepository {
     if (updates.winner !== undefined) { sets.push('winner = ?'); values.push(updates.winner) }
     if (updates.rakeAmount !== undefined) { sets.push('rake_amount = ?'); values.push(updates.rakeAmount) }
     if (updates.payoutAmount !== undefined) { sets.push('payout_amount = ?'); values.push(updates.payoutAmount) }
+    if (updates.houseVtxosJson !== undefined) { sets.push('house_vtxos_json = ?'); values.push(updates.houseVtxosJson) }
     if (updates.status !== undefined) {
       sets.push('status = ?')
       values.push(updates.status)

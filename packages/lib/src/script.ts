@@ -25,7 +25,9 @@ import {
   ConditionCSVMultisigTapscript,
   CLTVMultisigTapscript,
   TapLeafScript,
+  arkade,
 } from '@arkade-os/sdk'
+import { buildForfeitArkadeScript } from './arkade-forfeit'
 
 export interface CoinflipSetupOptions {
   creatorPubkey: Uint8Array
@@ -327,6 +329,41 @@ export class CoinflipFinalScript extends VtxoScript {
   }
 }
 
+/**
+ * Optional arkade-script forfeit configuration for `CoinflipEscrowScript`.
+ *
+ * When supplied, the escrow grows a 5th `playerForfeit` leaf gated by
+ * `CLTVMultisigTapscript(finalExpiration, [player, server, emulator_tweaked])`
+ * wrapping an arkade-script covenant that enforces the spending tx pays
+ * `forfeitDestPkScript` exactly `forfeitDestValue` sats to one of its
+ * outputs (output index is supplied by the spender as a witness arg).
+ *
+ * This is the **execution-bucket** (CLTV) replacement for the legacy
+ * `playerPenalty` CSV leaf. Old clients without emulator wiring stay on
+ * the CSV path; clients that trust the operator's emulator get the cleaner
+ * forfeit path that lives alongside the win-resolution closures rather
+ * than forcing unilateral exit.
+ *
+ * Adding the leaf changes the escrow's taptree → **new address**. Game
+ * setup must decide upfront whether the new layout is used (off by default).
+ */
+export interface ArkadeForfeitConfig {
+  /** 32-byte x-only OR 33-byte compressed emulator pubkey. */
+  emulatorPubkey: Uint8Array
+  /**
+   * On-chain P2TR pkScript (`0x51 0x20 <32-byte witness program>`) of the
+   * player's payout address. The arkade-script covenant pins this script
+   * exactly — the spending tx MUST produce an output matching it.
+   */
+  forfeitDestPkScript: Uint8Array
+  /**
+   * Amount the spending tx MUST pay to `forfeitDestPkScript` (in sats).
+   * For the player's escrow this is `betAmount`; for the house's escrow
+   * it's the house stake. Caller picks per-escrow.
+   */
+  forfeitDestValue: bigint
+}
+
 export interface CoinflipEscrowOptions {
   creatorPubkey: Uint8Array
   playerPubkey: Uint8Array
@@ -370,6 +407,11 @@ export interface CoinflipEscrowOptions {
   oddsN?: number
   oddsTarget?: number
   oddsLo?: number
+  /**
+   * Opt-in arkade-script forfeit leaf. When set, a 5th leaf is added.
+   * See {@link ArkadeForfeitConfig}.
+   */
+  arkadeForfeit?: ArkadeForfeitConfig
 }
 
 /**
@@ -393,14 +435,26 @@ export interface CoinflipEscrowOptions {
  * expressible: penalty requires the player's revealed secret, refund requires
  * the funder's key.
  */
-export class CoinflipEscrowScript extends VtxoScript {
+export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
   readonly creatorWinScriptHex: string
   readonly playerWinScriptHex: string
   readonly refundScriptHex: string
   readonly playerPenaltyScriptHex: string
+  /**
+   * Hex of the 5th `playerForfeit` arkade-script leaf script (post-tweak),
+   * or `undefined` when `arkadeForfeit` was not supplied. Use
+   * `playerForfeit()` to get the `TapLeafScript` for spending.
+   */
+  readonly playerForfeitScriptHex?: string
+  /**
+   * Raw arkade-script bytecode for the forfeit leaf, or `undefined`. Needed
+   * at spend time to add the EmulatorPacket entry that reveals the script
+   * the emulator must execute before signing.
+   */
+  readonly forfeitArkadeScript?: Uint8Array
 
   constructor(readonly options: CoinflipEscrowOptions) {
-    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, penaltyTimelockSeconds, refundPubkey, oddsN, oddsTarget, oddsLo } = options
+    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, penaltyTimelockSeconds, refundPubkey, oddsN, oddsTarget, oddsLo, arkadeForfeit } = options
 
     // Variable-odds when both params are set; otherwise the 50/50 coin.
     const conditionScript =
@@ -425,29 +479,80 @@ export class CoinflipEscrowScript extends VtxoScript {
       pubkeys: [refundPubkey, serverPubkey],
     })
 
-    // Player-forfeit penalty: a recognized ConditionCSVMultisigTapscript leaf
-    // — `<hashCheck(playerHash)> VERIFY <sequence> CSV DROP <player> CSVSIG
-    // <server> CSIG`. Because this is one of `decodeTapscript`'s known types,
-    // the standard `buildOffchainTx` helper handles spends through this leaf;
-    // the CSV is enforced by arkd at the VTXO layer via per-input nSequence
-    // (no explicit nLockTime, mirroring the refund leaf).
+    // Legacy player-forfeit penalty (CSV, exit-bucket). Kept as the fallback
+    // forfeit path for clients that don't trust an emulator. See the class
+    // docstring for the architectural bucket trade-off and
+    // `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`
+    // for the rationale behind preferring the arkade-script leaf when an
+    // emulator is wired in.
     const playerPenaltyTapscript = ConditionCSVMultisigTapscript.encode({
       conditionScript: buildHashCheckScript(playerHash),
       timelock: { value: penaltyTimelockSeconds, type: 'seconds' },
       pubkeys: [playerPubkey, serverPubkey],
     })
 
-    super([
+    // 5th leaf (optional) — arkade-script forfeit (execution-bucket CLTV +
+    // covenant). The CLTV uses `finalExpiration` (same gate as `refund`) so
+    // the forfeit window opens exactly when the game window closes; if the
+    // house signed the win or refunded earlier the escrow is spent already
+    // so this leaf never fires.
+    //
+    // The covenant pins `(forfeitDestPkScript, forfeitDestValue)` — the
+    // spend MUST produce one output matching exactly. The output_index
+    // the covenant inspects is supplied as a witness arg by the spender.
+    //
+    // Multisig is [player, server, emulator_tweaked]: player gates "who is
+    // spending", server cosigns the CLTV satisfaction, emulator only
+    // cosigns when the arkade-script runs to true.
+    const forfeitArkadeScript = arkadeForfeit
+      ? buildForfeitArkadeScript(
+          arkadeForfeit.forfeitDestPkScript,
+          arkadeForfeit.forfeitDestValue,
+        )
+      : undefined
+    const forfeitLeaf: arkade.ArkadeLeaf | undefined =
+      arkadeForfeit && forfeitArkadeScript
+        ? {
+            arkadeScript: forfeitArkadeScript,
+            emulators: [arkadeForfeit.emulatorPubkey],
+            tapscript: CLTVMultisigTapscript.encode({
+              absoluteTimelock: finalExpiration,
+              pubkeys: [playerPubkey, serverPubkey],
+            }),
+          }
+        : undefined
+    // ArkadeVtxoScript appends the emulator-tweaked key to the leaf's
+    // pubkey list before encoding. Mirror that to compute the post-tweak
+    // script bytes (so we can locate the leaf via findLeaf).
+    const forfeitLeafScript = arkadeForfeit && forfeitArkadeScript
+      ? CLTVMultisigTapscript.encode({
+          absoluteTimelock: finalExpiration,
+          pubkeys: [
+            playerPubkey,
+            serverPubkey,
+            arkade.computeArkadeScriptPublicKey(
+              arkadeForfeit.emulatorPubkey,
+              forfeitArkadeScript,
+            ),
+          ],
+        }).script
+      : undefined
+
+    const leaves: arkade.ArkadeVtxoInput[] = [
       creatorWinTapscript.script,
       playerWinTapscript.script,
       refundTapscript.script,
       playerPenaltyTapscript.script,
-    ])
+    ]
+    if (forfeitLeaf) leaves.push(forfeitLeaf)
+    super(leaves)
 
     this.creatorWinScriptHex = hex.encode(creatorWinTapscript.script)
     this.playerWinScriptHex = hex.encode(playerWinTapscript.script)
     this.refundScriptHex = hex.encode(refundTapscript.script)
     this.playerPenaltyScriptHex = hex.encode(playerPenaltyTapscript.script)
+    this.playerForfeitScriptHex = forfeitLeafScript ? hex.encode(forfeitLeafScript) : undefined
+    this.forfeitArkadeScript = forfeitArkadeScript
   }
 
   creatorWin(): TapLeafScript {
@@ -464,5 +569,19 @@ export class CoinflipEscrowScript extends VtxoScript {
 
   playerPenalty(): TapLeafScript {
     return this.findLeaf(this.playerPenaltyScriptHex)
+  }
+
+  /**
+   * Arkade-script playerForfeit leaf — only present when the constructor
+   * received an `arkadeForfeit` config. Throws if you call it on an escrow
+   * that wasn't built with one.
+   */
+  playerForfeit(): TapLeafScript {
+    if (!this.playerForfeitScriptHex) {
+      throw new Error(
+        'CoinflipEscrowScript: playerForfeit() called but no arkadeForfeit config was supplied',
+      )
+    }
+    return this.findLeaf(this.playerForfeitScriptHex)
   }
 }

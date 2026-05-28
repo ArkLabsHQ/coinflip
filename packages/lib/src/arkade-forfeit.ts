@@ -114,70 +114,58 @@ export function computeArkadeScriptPublicKey(
 }
 
 /**
- * Build the **forfeit arkade script**: enforces
+ * Build the **forfeit arkade script** — a covenant enforcing that the
+ * spending transaction pays `payAmount` sats to `recipientPkScript` at a
+ * specific output. Layout mirrors the canonical `enforcePayTo` helper in
+ * the arkade-script-final HTLC test:
  *
- *   1. The transaction has exactly `numOutputs` outputs (matches the sweep
- *      shape we expect — pot to player, optional change/anchor handled by
- *      caller's `numOutputs`).
- *   2. Output 0 pays `playerPkScript` with at least `potAmount` sats.
+ *   ```
+ *   DUP INSPECTOUTPUTSCRIPTPUBKEY 1 EQUALVERIFY <wp> EQUALVERIFY
+ *   INSPECTOUTPUTVALUE <amount> EQUAL
+ *   ```
  *
- * Witness expected at spend time: empty (the script reads everything from
- * the transaction itself via introspection).
+ * **Witness stack at spend time:** `[output_index]` — the spender chooses
+ * which output of the tx the covenant inspects. `DUP` duplicates the index
+ * so it can drive both `INSPECTOUTPUTSCRIPTPUBKEY` and `INSPECTOUTPUTVALUE`.
  *
- * The **preimage check** (player must reveal a secret matching `playerHash`)
- * is **not** in the arkade script — it lives in the surrounding tapscript
- * closure as a `ConditionMultisig` condition, because that's already enforced
- * by arkd at the consensus layer and gives the player an unambiguous "I'm
- * spending this" signal in the witness.
+ * Notes:
+ * - No `INSPECTNUMOUTPUTS` constraint: Ark transactions carry an anchor
+ *   (P2A) and OP_RETURN extension outputs that the player can't suppress,
+ *   so pinning the output count would refuse all valid spends.
+ * - `EQUAL` (not `GREATERTHANOREQUAL`): matches the canonical helper. Ark
+ *   intent fees are charged out-of-band against the operator's fee budget,
+ *   so the full `payAmount` reaches the player.
+ * - The **preimage check** (player must reveal a secret matching
+ *   `playerHash`) is **not** in the arkade script — it lives in the
+ *   surrounding tapscript closure as a `ConditionMultisig` condition, where
+ *   arkd enforces it at the consensus layer.
  *
- * Layout choice rationale: covenant lives in arkade (emulator enforces),
- * preimage lives in tapscript condition (arkd enforces). Two enforcement
+ * Layout rationale: covenant lives in arkade (emulator enforces); preimage
+ * + CLTV live in the tapscript closure (arkd enforces). Two enforcement
  * surfaces, each carrying the rule it's best suited to enforce.
  */
 export function buildForfeitArkadeScript(
-  playerPkScript: Uint8Array,
-  potAmount: bigint,
-  numOutputs: number,
+  recipientPkScript: Uint8Array,
+  payAmount: bigint,
 ): Uint8Array {
-  if (playerPkScript[0] !== 0x51 || playerPkScript[1] !== 0x20) {
+  if (recipientPkScript[0] !== 0x51 || recipientPkScript[1] !== 0x20) {
     throw new Error('buildForfeitArkadeScript: expected P2TR (v1 witness) pkScript')
   }
-  if (potAmount <= 0n) throw new Error('buildForfeitArkadeScript: potAmount must be positive')
-  if (!Number.isInteger(numOutputs) || numOutputs < 1 || numOutputs > 16) {
-    throw new Error('buildForfeitArkadeScript: numOutputs must be in [1, 16]')
-  }
-  const witnessProgram = playerPkScript.slice(2)
+  if (payAmount <= 0n) throw new Error('buildForfeitArkadeScript: payAmount must be positive')
+  const witnessProgram = recipientPkScript.slice(2)
+  const amountBytes = encodeMinimalBigInt(payAmount)
 
-  // Encode bigint potAmount as a minimal-LE byte string (Arkade BigNum).
-  // For amounts <= 2^31-1 a 4-byte LE encoding is conservative and matches
-  // the wire format CScriptNum-compatible encoders produce.
-  const amountBytes = encodeMinimalBigInt(potAmount)
-
-  // Encode opcode sequence: [push N, NUMOUTPUTS, EQUALVERIFY, push 0,
-  //   INSPECTOUTPUTSCRIPTPUBKEY, push 1, EQUALVERIFY, push wp, EQUALVERIFY,
-  //   push 0, INSPECTOUTPUTVALUE, push amount, GREATERTHANOREQUAL]
   const ops: number[] = []
-
-  // 1) NUMOUTPUTS == numOutputs
-  ops.push(OP.OP_1 - 1 + numOutputs) // OP_<numOutputs>
-  ops.push(ARKADE_OP.INSPECTNUMOUTPUTS)
-  ops.push(OP.EQUALVERIFY)
-
-  // 2) output[0].scriptPubKey is P2TR(witnessProgram)
-  ops.push(OP.OP_0) // output index 0
-  ops.push(ARKADE_OP.INSPECTOUTPUTSCRIPTPUBKEY) // pushes (program, version)
-  ops.push(OP.OP_1) // segwit version 1 (P2TR)
-  ops.push(OP.EQUALVERIFY)
-  // Now top of stack is the 32-byte witness program. Push our expected one:
-  ops.push(witnessProgram.length, ...witnessProgram)
-  ops.push(OP.EQUALVERIFY)
-
-  // 3) output[0].value >= potAmount
-  ops.push(OP.OP_0) // output index 0
-  ops.push(ARKADE_OP.INSPECTOUTPUTVALUE)
-  ops.push(amountBytes.length, ...amountBytes)
-  ops.push(OP.GREATERTHANOREQUAL)
-
+  // Stack: <output_index>
+  ops.push(OP.DUP)                                  // <idx> <idx>
+  ops.push(ARKADE_OP.INSPECTOUTPUTSCRIPTPUBKEY)     // <idx> <program> <version>
+  ops.push(OP.OP_1)                                  // <idx> <program> <version> 1
+  ops.push(OP.EQUALVERIFY)                           // <idx> <program>   (asserts version==1)
+  ops.push(witnessProgram.length, ...witnessProgram) // <idx> <program> <expected>
+  ops.push(OP.EQUALVERIFY)                           // <idx>             (asserts program match)
+  ops.push(ARKADE_OP.INSPECTOUTPUTVALUE)              // <value>           (consumes idx)
+  ops.push(amountBytes.length, ...amountBytes)        // <value> <expected>
+  ops.push(OP.EQUAL)                                  // bool
   return new Uint8Array(ops)
 }
 
@@ -216,16 +204,11 @@ export interface ForfeitLeafSpec {
 }
 
 export function buildForfeitLeafSpec(args: {
-  playerPkScript: Uint8Array
-  potAmount: bigint
-  numOutputs: number
+  recipientPkScript: Uint8Array
+  payAmount: bigint
   emulatorPubkey: Uint8Array
 }): ForfeitLeafSpec {
-  const arkadeScript = buildForfeitArkadeScript(
-    args.playerPkScript,
-    args.potAmount,
-    args.numOutputs,
-  )
+  const arkadeScript = buildForfeitArkadeScript(args.recipientPkScript, args.payAmount)
   return {
     arkadeScript,
     arkadeScriptHash: arkadeScriptHash(arkadeScript),

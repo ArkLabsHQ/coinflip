@@ -74,6 +74,24 @@ export interface Game {
   oddsN?: number
   oddsTarget?: number
   oddsLo?: number
+  /**
+   * Compressed (33-byte) emulator pubkey. When set, `CoinflipEscrowScript`
+   * adds a 5th `playerForfeit` leaf — a `CLTVMultisigTapscript` closure
+   * (execution-bucket, arkd-recognized) wrapping an arkade-script covenant
+   * that enforces "output 0 pays the player ≥ pot". The CLTV gate uses the
+   * same `finalExpiration` value as the abort/refund leaves, so once the
+   * game window has passed and the house hasn't revealed, the player can
+   * trustlessly sweep BOTH escrows via this leaf — **without** the
+   * unilateral-exit downgrade today's CSV `playerPenalty` forces.
+   *
+   * Optional/additive: when undefined, the escrow keeps the 4-leaf layout
+   * (creatorWin/playerWin/refund/playerPenalty) and the CSV penalty remains
+   * the only forfeit path. Clients that don't trust the operator's emulator
+   * stay on the CSV path; clients that do get the cleaner execution-path
+   * forfeit. See `arkade-forfeit.ts` and the design doc in
+   * `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`.
+   */
+  emulatorPubkey?: Uint8Array
 }
 
 // -- Game Events --

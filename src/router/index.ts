@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
 import PlayView from '../views/PlayView.vue'
+import CrashView from '../views/CrashView.vue'
 import WalletView from '../views/WalletView.vue'
 import SetupView from '../views/SetupView.vue'
 import HistoryView from '../views/HistoryView.vue'
@@ -10,6 +11,12 @@ const routes: Array<RouteRecordRaw> = [
     path: '/',
     name: 'play',
     component: PlayView,
+    meta: { requiresWallet: true }
+  },
+  {
+    path: '/crash',
+    name: 'crash',
+    component: CrashView,
     meta: { requiresWallet: true }
   },
   {

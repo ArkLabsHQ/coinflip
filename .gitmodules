@@ -1,4 +1,6 @@
 [submodule "arkade-regtest"]
 	path = arkade-regtest
 	url = https://github.com/ArkLabsHQ/arkade-regtest.git
-	branch = master
+	# Tracking the emulator-overlay branch (ArkLabsHQ/arkade-regtest#26) until
+	# it merges to master. Switch back to `branch = master` afterwards.
+	branch = feat/emulator-service

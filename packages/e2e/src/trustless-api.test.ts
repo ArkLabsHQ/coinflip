@@ -208,6 +208,20 @@ describe('trustless coin flow (server handlers)', () => {
     )
     expect(play.escrowAddress.startsWith(HRP)).toBe(true)
     expect(play.houseEscrow.value).toBe(BET)
+    // R1 forfeit: the play response must echo the BIP68 penalty timelock so the
+    // client can prebuild the penalty PSBT. Documented default is 1024 sec
+    // (2 × 512s ≈ 17 min); MUST be >= 512 and a multiple of 512 to avoid the
+    // BIP68 silent-floor (sub-512 floors to 0 → leaf is immediately spendable).
+    expect(typeof play.penaltyTimelockSeconds).toBe('number')
+    expect(play.penaltyTimelockSeconds).toBeGreaterThanOrEqual(512)
+    expect(play.penaltyTimelockSeconds % 512).toBe(0)
+    expect(play.penaltyTimelockSeconds).toBe(1024)
+    // The persisted state must carry the same value so /commit, /refund, and
+    // recovery rebuild the IDENTICAL escrow script (the taproot address is
+    // hashed from the leaf bytes — any drift here would break the spend).
+    const persistedRow = await deps.repos.games.get(play.gameId)
+    const persistedState = JSON.parse(persistedRow.house_vtxos_json as string)
+    expect(persistedState.penaltyTimelockSeconds).toBe(play.penaltyTimelockSeconds)
 
     // 2) Player escrows its stake to the SAME address (single-party).
     const escrowPk = ArkAddress.decode(play.escrowAddress).pkScript
@@ -381,6 +395,48 @@ describe('trustless coin flow (server handlers)', () => {
     const { gameId, playerEscrow, playerSecretHex } = await playAndEscrow()
     await server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps)
     await expect(server.handleTrustlessRefund(gameId, { playerEscrow }, deps)).rejects.toThrow(/resolved/)
+  }, 120_000)
+
+  it('builds a player penalty PSBT for a stalled game (R1 forfeit, CSV-locked, pays the player)', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    const { gameId, playerEscrow, play } = await playAndEscrow()
+
+    // The player can claim BOTH escrows via the penalty leaf once the CSV
+    // timelock matures — no house cooperation needed for the R1 forfeit.
+    const penalty = await server.handleTrustlessPenalty(gameId, { playerEscrow }, deps)
+
+    // Response shape checks.
+    expect(typeof penalty.penaltyPsbt).toBe('string')
+    expect(penalty.penaltyPsbt.length).toBeGreaterThan(0)
+    expect(Array.isArray(penalty.penaltyCheckpoints)).toBe(true)
+    expect(typeof penalty.penaltyTimelockSeconds).toBe('number')
+    expect(typeof penalty.payoutAddress).toBe('string')
+
+    // penaltyTimelockSeconds must equal what was persisted at /play time.
+    expect(penalty.penaltyTimelockSeconds).toBe(play.penaltyTimelockSeconds)
+
+    // payoutAddress must be the player's own change address.
+    const persistedRow = await deps.repos.games.get(gameId)
+    expect(penalty.payoutAddress).toBe(persistedRow.player_change_address)
+
+    // The PSBT must parse as a valid offchain tx with 2 inputs (both escrows).
+    const tx = Transaction.fromPSBT(hex.decode(penalty.penaltyPsbt))
+    expect(tx.inputsLength).toBe(2) // house escrow + player escrow
+    // Single output: the full pot to the player's change address.
+    expect(tx.outputsLength).toBeGreaterThanOrEqual(1)
+    const out0 = tx.getOutput(0)
+    const expectedPot = play.houseEscrow.value + playerEscrow.value
+    expect(Number(out0.amount)).toBe(expectedPot)
+    expect(hex.encode(out0.script!)).toBe(hex.encode(ArkAddress.decode(penalty.payoutAddress).pkScript))
+
+    console.log(`[trustless-api] penalty PSBT ok — ${expectedPot} sats claimable after CSV(${penalty.penaltyTimelockSeconds}s), payout=${penalty.payoutAddress}`)
+  }, 120_000)
+
+  it('refuses to build a penalty tx for a resolved game (escrows already swept)', async () => {
+    if (!arkAvailable) return
+    const { gameId, playerEscrow, playerSecretHex } = await playAndEscrow()
+    await server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps)
+    await expect(server.handleTrustlessPenalty(gameId, { playerEscrow }, deps)).rejects.toThrow(/resolved/)
   }, 120_000)
 
   it('plays a variable-odds game end-to-end (asymmetric house-edged stakes, winner takes the pot)', async () => {

@@ -116,7 +116,8 @@ describe('crash-mid-sweep reconciliation', () => {
     const escrowScript = new CoinflipEscrowScript({
       creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey: serverPub,
       creatorHash: sha(houseSecret), playerHash: sha(playerSecret),
-      finalExpiration: BigInt(now + 1200), refundPubkey: housePub,
+      finalExpiration: BigInt(now + 1200), penaltyTimelockSeconds: 1024n,
+      refundPubkey: housePub,
     })
     const pk = escrowScript.address('tark', serverPub).pkScript
 

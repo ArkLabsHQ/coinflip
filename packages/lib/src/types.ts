@@ -46,6 +46,26 @@ export interface Game {
   setupExpiration?: number
   finalExpiration?: number
   /**
+   * Relative timelock (in seconds, BIP68) after the escrow VTXO is confirmed,
+   * after which the player can sweep BOTH escrows via the `playerPenalty`
+   * leaf on `CoinflipEscrowScript` with only its own secret — the forfeit a
+   * withholding house suffers (R1). MUST be less than the time-to-
+   * `finalExpiration` so the player's penalty beats the house's self-refund.
+   * BIP68 grants 512-second granularity for seconds-type timelocks; values
+   * rounded to multiples of 512 avoid surprises. Optional here to match the
+   * rest of `Game`'s builder-state pattern (events.ts assembles a Game
+   * incrementally), but `CoinflipEscrowOptions` requires it so the script-
+   * bytes API cannot silently default — `escrowScript()` asserts it.
+   *
+   * **BIP68 silent-floor warning.** Seconds-type timelocks are encoded in
+   * 512-second units; the SDK encoder silently floors non-multiples of 512
+   * down to the nearest lower multiple. A value below 512 encodes as 0 —
+   * producing an **immediately-spendable** leaf, which **nullifies the R1
+   * forfeit entirely**. Callers MUST pass a value that is `>= 512` and a
+   * multiple of 512. The documented default is `1024` (2 × 512s ≈ 17 min).
+   */
+  penaltyTimelockSeconds?: number
+  /**
    * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the escrow win
    * condition is `(oddsLo ?? 0) <= roll < oddsTarget` over `oddsN` outcomes
    * (probability `(oddsTarget - (oddsLo ?? 0))/oddsN`); unset → the 50/50 coin.

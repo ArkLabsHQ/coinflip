@@ -7,7 +7,10 @@ import {
   type WalletBalance, type ExtendedVirtualCoin, type ArkTxInput, type ArkProvider, type Identity,
 } from '@arkade-os/sdk'
 import { initSwaps, destroySwaps } from '@/services/boltz'
-import { getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund, type Outpoint } from '@/services/api'
+import {
+  getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund, penalty as apiPenalty,
+  type Outpoint,
+} from '@/services/api'
 import { createHash } from '@/utils/crypto'
 
 /** VtxoInput shape expected by the server's /api/play endpoint. */
@@ -56,6 +59,21 @@ export interface StashedRefund {
   refundCheckpoints: string[]
   finalExpiration: number
   createdAt: number
+  /** Penalty-claim spending BOTH escrows for the whole pot (R1 forfeit). Only
+   * usable when the player has REVEALED (sent /commit). Optional because old
+   * stashed rows or pre-reveal stalls may not have it set. */
+  penaltyPsbt?: string
+  penaltyCheckpoints?: string[]
+  /** Relative BIP68 CSV timelock (seconds). Penalty matures `penaltyTimelockSeconds`
+   * after the player escrow VTXO is confirmed. */
+  penaltyTimelockSeconds?: number
+  /** Set true once the player has actually called /commit (revealed their
+   * secret). Gates penalty (revealer-takes-all) vs self-refund (own stake).
+   * If the player never revealed, only the self-refund applies. */
+  revealed?: boolean
+  /** Player's secret in hex — required as the condition witness when claiming
+   * the penalty. Stored ONLY in the stash, never sent off-device. */
+  playerSecretHex?: string
 }
 
 function loadRefunds(): StashedRefund[] {
@@ -77,6 +95,15 @@ function stashRefund(r: StashedRefund): void {
 
 function clearRefund(gameId: string): void {
   saveRefunds(loadRefunds().filter((x) => x.gameId !== gameId))
+}
+
+/** Merge `patch` fields into an existing stash entry (no-op if entry not found). */
+function updateRefundStash(gameId: string, patch: Partial<StashedRefund>): void {
+  const list = loadRefunds()
+  const idx = list.findIndex((x) => x.gameId === gameId)
+  if (idx === -1) return
+  list[idx] = { ...list[idx], ...patch }
+  saveRefunds(list)
 }
 
 export interface ArkServerInfo {
@@ -211,6 +238,24 @@ let reconnectAttempts = 0
 
 export function getSDKWallet(): Wallet | null {
   return sdkWallet
+}
+
+/**
+ * The chain's block time — BIP113 median-time-past of the tip block, exactly
+ * what arkd enforces CLTV timelocks (escrow refunds) against. This LAGS the
+ * user's wall-clock whenever blocks are sparse (idle regtest, slow networks),
+ * so refund-readiness must gate on THIS, not `Date.now()`, or the UI invites a
+ * reclaim arkd then rejects with FORFEIT_CLOSURE_LOCKED. Returns null when
+ * unavailable (not connected / explorer unreachable) so callers can fall back.
+ */
+async function chainTipTime(): Promise<number | null> {
+  if (!sdkWallet) return null
+  try {
+    const tip = await sdkWallet.onchainProvider.getChainTip()
+    return tip.time
+  } catch {
+    return null
+  }
 }
 
 const getCachedServerInfo = (): ArkServerInfo | null => {
@@ -661,19 +706,61 @@ const ark: Module<ArkState, RootState> = {
         console.warn('[trustless] could not stash refund (continuing):', e instanceof Error ? e.message : e)
       }
 
+      // 2c. Stash the penalty tx (spends BOTH escrows, full pot to player) so that
+      // if the server withholds after the player reveals, the player can claim the
+      // whole pot after penaltyTimelockSeconds. Stashed BEFORE /commit so the
+      // penalty is available regardless of whether /commit hangs or errors.
+      // VERIFY before stashing: payoutAddress must equal our own change address.
+      try {
+        const p = await apiPenalty(playRes.gameId, playerEscrow)
+        if (p.payoutAddress !== playerChangeAddress) {
+          console.warn('[trustless] penalty payoutAddress mismatch — refusing to stash')
+        } else {
+          updateRefundStash(playRes.gameId, {
+            penaltyPsbt: p.penaltyPsbt,
+            penaltyCheckpoints: p.penaltyCheckpoints,
+            penaltyTimelockSeconds: p.penaltyTimelockSeconds,
+            playerSecretHex,
+          })
+        }
+      } catch (e) {
+        console.warn('[trustless] could not stash penalty (continuing):', e instanceof Error ? e.message : e)
+      }
+
       // 3. Reveal + resolve. On ANY failure the stash is kept so the player can
       // reclaim after the timelock; on success the escrow is swept, so we clear
       // it. Player win → the server built the playerWin sweep; we sign + submit.
       let result: Awaited<ReturnType<typeof apiCommit>>
       try {
+        // Mark revealed BEFORE the network call — even if /commit hangs/fails, the
+        // client has revealed playerSecret to the server and a withholding server
+        // would now be in the R1 forfeit scenario. The stash records this so the
+        // UI surfaces "Claim full pot" (penalty), not "Reclaim" (self-refund only).
+        updateRefundStash(playRes.gameId, { revealed: true })
         result = await apiCommit(playRes.gameId, playerSecretHex, playerEscrow)
         if (result.winner === 'player' && result.sweep) {
           const s = result.sweep
-          const sweepArk = Transaction.fromPSBT(hex.decode(s.sweepPsbt))
-          const sweepCps = s.sweepCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
           const witness = s.witnessHex.map((w) => hex.decode(w))
           const inputs = Array.from({ length: s.inputCount }, (_, i) => i)
-          await submitOffchain(arkProvider, identity, sweepArk, sweepCps, inputs, witness)
+          // The sweep spends the player escrow we finalized moments ago. arkd
+          // indexes a freshly-finalized VTXO asynchronously, so this submit can
+          // race ahead of indexing and 404 with VTXO_NOT_FOUND. The bet is
+          // already resolved server-side (commit is idempotent) and the failed
+          // submit registers nothing, so re-submitting the SAME sweep once the
+          // escrow is visible is safe. Retry briefly (escrow appears within ~1s);
+          // exhausting retries falls through to the catch + refund-stash net.
+          for (let attempt = 0; ; attempt++) {
+            try {
+              const sweepArk = Transaction.fromPSBT(hex.decode(s.sweepPsbt))
+              const sweepCps = s.sweepCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+              await submitOffchain(arkProvider, identity, sweepArk, sweepCps, inputs, witness)
+              break
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e)
+              if (attempt >= 6 || !/VTXO_NOT_FOUND|not found/i.test(msg)) throw e
+              await new Promise((r) => setTimeout(r, 600))
+            }
+          }
         }
       } catch (e) {
         const when = new Date(playRes.finalExpiration * 1000).toLocaleString()
@@ -693,6 +780,15 @@ const ark: Module<ArkState, RootState> = {
     },
 
     /**
+     * Chain block time (BIP113 MTP) so the UI can gate refund-readiness on what
+     * arkd actually enforces rather than the user's wall-clock. null if the
+     * chain tip can't be read (caller should fall back to a wall-clock estimate).
+     */
+    async getChainTipTime(): Promise<number | null> {
+      return chainTipTime()
+    },
+
+    /**
      * Reclaim a stalled bet by signing + submitting its stashed refund. arkd
      * enforces the CLTV, so this only succeeds at/after finalExpiration; before
      * that we surface a clear "not yet" message. Clears the stash on success.
@@ -703,15 +799,79 @@ const ark: Module<ArkState, RootState> = {
       if (!privateKey) throw new Error('No wallet key available')
       const stash = loadRefunds().find((x) => x.gameId === gameId)
       if (!stash) throw new Error('No stashed refund for this game')
-      if (Math.floor(Date.now() / 1000) < stash.finalExpiration) {
-        throw new Error(`Not reclaimable yet — the timelock lifts at ${new Date(stash.finalExpiration * 1000).toLocaleString()}.`)
+      // arkd enforces the refund CLTV against the chain's block time (BIP113
+      // MTP), which trails wall-clock when blocks are sparse. Gate on chain time
+      // — not Date.now() — so we don't submit a refund arkd rejects. Fall back to
+      // wall-clock only if the chain tip is unreadable (the catch below backstops).
+      const chainTime = await chainTipTime()
+      const refClock = chainTime ?? Math.floor(Date.now() / 1000)
+      if (refClock < stash.finalExpiration) {
+        const lifts = new Date(stash.finalExpiration * 1000).toLocaleString()
+        throw new Error(
+          chainTime !== null
+            ? `Not reclaimable yet — the chain's block time is ${new Date(chainTime * 1000).toLocaleString()}; the timelock lifts at ${lifts} (chain time), as new blocks are mined.`
+            : `Not reclaimable yet — the timelock lifts at ${lifts}.`,
+        )
       }
       const identity = SingleKey.fromHex(privateKey)
       const refundArk = Transaction.fromPSBT(hex.decode(stash.refundPsbt))
       const refundCps = stash.refundCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
-      await submitOffchain(sdkWallet.arkProvider, identity, refundArk, refundCps, [0])
+      try {
+        await submitOffchain(sdkWallet.arkProvider, identity, refundArk, refundCps, [0])
+      } catch (e) {
+        // Race: our chain-time read passed the CLTV but arkd's tip MTP still
+        // trails it. Surface a clear "wait for the next block" instead of the
+        // raw FORFEIT_CLOSURE_LOCKED — the stash is kept so a retry still works.
+        const msg = e instanceof Error ? e.message : String(e)
+        if (/FORFEIT_CLOSURE_LOCKED|is locked|locked/i.test(msg)) {
+          throw new Error("Not reclaimable yet — the chain hasn't mined a block past the timelock. Try again shortly.")
+        }
+        throw e
+      }
       clearRefund(gameId)
       await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
+    },
+
+    /**
+     * Submit the stashed penalty claim — sweeps BOTH escrows to the player using
+     * only the player's secret (R1 forfeit). Block-time-gated: arkd enforces the
+     * CSV(penaltyTimelockSeconds) timelock against the chain's median-time-past
+     * (BIP68 + BIP113), so the readiness check uses `chainTipTime()` to mirror
+     * what arkd checks. Clears the stash on success.
+     */
+    async claimPenalty({ rootState, dispatch }, gameId: string) {
+      if (!sdkWallet) throw new Error('Wallet not connected')
+      const privateKey = rootState.wallet.privateKey
+      if (!privateKey) throw new Error('No wallet key available')
+      const stash = loadRefunds().find((x) => x.gameId === gameId)
+      if (!stash || !stash.penaltyPsbt || !stash.penaltyCheckpoints || !stash.playerSecretHex || stash.penaltyTimelockSeconds === undefined) {
+        throw new Error('No penalty claim stashed for this game (it may need self-refund instead).')
+      }
+      if (!stash.revealed) {
+        throw new Error("Can't penalty-claim a game that wasn't revealed — use refund instead.")
+      }
+      // The penalty matures `penaltyTimelockSeconds` after the player ESCROW VTXO
+      // was confirmed. We don't know the exact escrow-confirmation timestamp
+      // locally, but `createdAt` (stash creation, right after escrow finalize) is
+      // a close upper bound — and the chain-time gate is the authoritative check:
+      // arkd will reject early submits with FORFEIT_CLOSURE_LOCKED, which we
+      // catch below and re-surface as a friendly "wait for the next block."
+      const identity = SingleKey.fromHex(privateKey)
+      const arkTx = Transaction.fromPSBT(hex.decode(stash.penaltyPsbt))
+      const cps = stash.penaltyCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+      const witness = [hex.decode(stash.playerSecretHex)]
+      const inputs = [0, 1] // both escrow inputs
+      try {
+        await submitOffchain(sdkWallet.arkProvider, identity, arkTx, cps, inputs, witness)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (/FORFEIT_CLOSURE_LOCKED|locked/i.test(msg)) {
+          throw new Error("Not claimable yet — the chain's block time hasn't reached the penalty timelock. Try again shortly.")
+        }
+        throw e
+      }
+      clearRefund(gameId)
+      await dispatch('refreshBalance').catch(() => { /* indexer lag */ })
     },
   },
 

@@ -229,7 +229,8 @@ describe('spike: per-party escrow + winner sweep', () => {
     const playerEscrowScript = new CoinflipEscrowScript({
       creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey,
       creatorHash: sha(generateSecret('heads')), playerHash: sha(generateSecret('tails')),
-      finalExpiration: BigInt(past), refundPubkey: playerPub, // player-only refund
+      finalExpiration: BigInt(past), penaltyTimelockSeconds: 1024n,
+      refundPubkey: playerPub, // player-only refund
     })
     const escrowAddr = playerEscrowScript.address(NETWORK_HRP, serverPubkey)
 

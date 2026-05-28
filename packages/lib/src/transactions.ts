@@ -99,6 +99,7 @@ function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScrip
   assertDefined(game.player.pubkey, 'player.pubkey')
   assertDefined(game.player.hash, 'player.hash')
   assertDefined(game.finalExpiration, 'finalExpiration')
+  assertDefined(game.penaltyTimelockSeconds, 'penaltyTimelockSeconds')
   return new CoinflipEscrowScript({
     creatorPubkey: game.creator.pubkey,
     playerPubkey: game.player.pubkey,
@@ -106,6 +107,7 @@ function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScrip
     creatorHash: game.creator.hash,
     playerHash: game.player.hash,
     finalExpiration: BigInt(game.finalExpiration),
+    penaltyTimelockSeconds: BigInt(game.penaltyTimelockSeconds),
     refundPubkey,
     oddsN: game.oddsN,
     oddsTarget: game.oddsTarget,
@@ -382,6 +384,47 @@ export function buildSweepTransaction(
   }
 
   const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
+  return { arkTx, checkpoints }
+}
+
+export interface PenaltyArgs {
+  escrows: SweepEscrow[]
+  /** Player's Ark address — receives the entire pot via the playerPenalty leaf. */
+  payoutAddress: string
+}
+
+/**
+ * Build the player's penalty-claim spending BOTH escrow VTXOs via the
+ * `playerPenalty` leaf (hash-check + CSV(penaltyTimelockSeconds) + 2-of-2[player,
+ * server]). Single output = the whole pot to the player. The condition witness
+ * is just [playerSecret], attached by the broadcaster (not covered by the
+ * signature, as with the sweep). The CSV is enforced by arkd at the VTXO layer
+ * via per-input nSequence — no explicit nLockTime, mirroring buildRefundTransaction.
+ */
+export function buildPenaltyTransaction(
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: PenaltyArgs,
+): BuiltOffchainTx {
+  void networkHrp // reserved for symmetry with the other builders
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const inputs: ArkTxInput[] = args.escrows.map((e) => ({
+    txid: e.txid,
+    vout: e.vout,
+    value: e.value,
+    tapLeafScript: e.script.playerPenalty(),
+    tapTree: e.script.encode(),
+  }))
+  const pot = args.escrows.reduce((a, e) => a + e.value, 0)
+  const payoutAddr = ArkAddress.decode(args.payoutAddress)
+  const { arkTx, checkpoints } = buildOffchainTx(
+    inputs,
+    [{ script: payoutAddr.pkScript, amount: BigInt(pot) }],
+    serverUnrollScript,
+  )
   return { arkTx, checkpoints }
 }
 

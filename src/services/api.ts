@@ -37,6 +37,9 @@ export interface PlayResponse {
   oddsTarget?: number
   oddsLo?: number
   pot?: number
+  /** R1 penalty timelock (seconds). After this many seconds past the player escrow
+   *  confirmation, the player can claim the whole pot via the penalty leaf. */
+  penaltyTimelockSeconds?: number
 }
 
 /** /api/game/:id/commit — resolved. House win → server swept (txid). Player win
@@ -69,6 +72,17 @@ export interface RefundResponse {
   refundCheckpoints: string[]
   finalExpiration: number
   refundAddress: string
+}
+
+/** /api/game/:id/penalty — unsigned penalty tx spending BOTH escrows via the
+ *  `playerPenalty` leaf. Pays the whole pot to the player after the
+ *  CSV(`penaltyTimelockSeconds`) timelock matures. The leaf is [player, arkd]
+ *  so no house cooperation is needed at claim time. */
+export interface PenaltyResponse {
+  penaltyPsbt: string
+  penaltyCheckpoints: string[]
+  penaltyTimelockSeconds: number
+  payoutAddress: string
 }
 
 export interface GameResponse {
@@ -143,6 +157,20 @@ export function getGame(gameId: string): Promise<GameResponse> {
 /** Fetch the unsigned refund tx for a (possibly stalled) game's player escrow. */
 export function refund(gameId: string, playerEscrow: Outpoint): Promise<RefundResponse> {
   return request(`/api/game/${gameId}/refund`, {
+    method: 'POST',
+    body: JSON.stringify({ playerEscrow }),
+  })
+}
+
+/**
+ * Fetch the unsigned penalty tx for a stalled game: spends BOTH escrows via
+ * the `playerPenalty` leaf, paying the whole pot to the player after the
+ * CSV(`penaltyTimelockSeconds`) timelock matures. The leaf is [player, arkd]
+ * so no house cooperation is needed at claim time. The client MUST verify
+ * `payoutAddress` is its own before signing.
+ */
+export function penalty(gameId: string, playerEscrow: Outpoint): Promise<PenaltyResponse> {
+  return request(`/api/game/${gameId}/penalty`, {
     method: 'POST',
     body: JSON.stringify({ playerEscrow }),
   })

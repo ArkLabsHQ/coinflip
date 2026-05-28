@@ -277,16 +277,17 @@ describe('CoinflipEscrowScript', () => {
   const serverPubkey = new Uint8Array(32).fill(3)
   const creatorHash = new Uint8Array(32).fill(0xaa)
   const playerHash = new Uint8Array(32).fill(0xbb)
-  const base = { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration: 2000n }
+  const base = { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration: 2000n, penaltyTimelockSeconds: 1024n }
 
   const playerEscrow = new CoinflipEscrowScript({ ...base, refundPubkey: playerPubkey })
   const houseEscrow = new CoinflipEscrowScript({ ...base, refundPubkey: creatorPubkey })
 
-  it('has 3 leaves (creatorWin / playerWin / refund)', () => {
-    expect(playerEscrow.leaves.length).toBe(3)
+  it('has 4 leaves (creatorWin / playerWin / refund / playerPenalty)', () => {
+    expect(playerEscrow.leaves.length).toBe(4)
     expect(playerEscrow.creatorWin()).toBeTruthy()
     expect(playerEscrow.playerWin()).toBeTruthy()
     expect(playerEscrow.refund()).toBeTruthy()
+    expect(playerEscrow.playerPenalty()).toBeTruthy()
   })
 
   it('shares identical win leaves so the winner sweeps both escrows via one leaf', () => {

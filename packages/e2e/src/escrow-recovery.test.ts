@@ -195,4 +195,79 @@ describe('house-escrow recovery for stalled games', () => {
     const state = JSON.parse((await deps.repos.games.get(gameId)).house_vtxos_json)
     expect(state.houseRefundTxid).toBeUndefined() // not touched
   }, 120_000)
+
+  /**
+   * Regression: if the player swept BOTH escrows via the playerPenalty leaf
+   * (R1 forfeit), the house escrow VTXO is already spent. recoverOrphanedHouseEscrows
+   * must handle the double-spend rejection gracefully — no exception propagated,
+   * no houseRefundTxid written, return value reflects 0 new reclaims.
+   *
+   * This test bootstraps its own minimal deps (no wallet funding) and injects a
+   * mock arkProvider.submitTx that rejects with a double-spend error to simulate
+   * the penalty-spent escrow — does NOT require a running regtest.
+   */
+  it('handles a penalty-spent house escrow gracefully (R1 forfeit regression)', async () => {
+    if (!arkAvailable) return
+
+    // Bootstrap a fresh deps for this test — we don't need the house wallet to be
+    // funded; we only need repos (for persistExpiredGame / get) and a real arkInfo
+    // (for buildRefundTransaction to reconstruct the escrow script).
+    const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'coinflip-penalty-spent-test-'))
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const serverMod = require('arkade-coinflip-server')
+    process.env.DATA_DIR = testDataDir
+    const testDeps = await serverMod.bootstrapDeps({ walletSettlementConfig: false })
+
+    try {
+      const now = Math.floor(Date.now() / 1000)
+      const { game: baseGame, houseSecret, playerPubHex, playerHashHex } = await makeGame(now - 3600, now - 7200) // past CLTV so recovery attempts the refund
+      const game = { ...baseGame, penaltyTimelockSeconds: 1024 }
+      const houseEscrowScript = getHouseEscrowScript(game)
+
+      // Persist an expired game with a plausible (but fake) escrow outpoint.
+      // We never actually escrowed anything — the point is to reach submitTx.
+      const id = `penalty-spent-${Date.now()}`
+      await testDeps.repos.games.save({
+        id, tier: BET, playerPubkey: playerPubHex, playerChoice: 'trustless', playerHash: playerHashHex,
+        houseSecretHex: hex.encode(houseSecret), finalScriptHex: hex.encode(houseEscrowScript.pkScript),
+        houseVtxosJson: JSON.stringify({
+          finalExpiration: game.finalExpiration, setupExpiration: game.setupExpiration,
+          houseEscrow: { txid: 'a'.repeat(64), vout: 0, value: BET },
+          penaltyTimelockSeconds: 1024,
+        }),
+      })
+      await testDeps.repos.games.update(id, { status: 'expired' })
+
+      // Patch deps: submitTx throws a double-spend error, simulating the case where
+      // the player penalty-swept both escrows before recovery ran.
+      const penaltySpentDeps = {
+        ...testDeps,
+        wallet: {
+          ...testDeps.wallet,
+          arkProvider: {
+            ...testDeps.wallet.arkProvider,
+            submitTx: async () => {
+              throw new Error('double spend: input already spent')
+            },
+          },
+        },
+      }
+
+      // recoverOrphanedHouseEscrows must not throw and must return 0 reclaims.
+      let recovered: number | undefined
+      await expect(
+        serverMod.recoverOrphanedHouseEscrows(penaltySpentDeps).then((n: number) => { recovered = n }),
+      ).resolves.not.toThrow()
+      expect(recovered).toBe(0)
+
+      // houseRefundTxid must remain unset — no false "reclaimed" record written.
+      const row = await testDeps.repos.games.get(id)
+      const state = JSON.parse(row.house_vtxos_json)
+      expect(state.houseRefundTxid).toBeUndefined()
+    } finally {
+      if (fs.existsSync(testDataDir)) {
+        try { fs.rmSync(testDataDir, { recursive: true, force: true }) } catch { /* best effort */ }
+      }
+    }
+  }, 120_000)
 })

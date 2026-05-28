@@ -148,7 +148,8 @@ describe('variable-odds on-chain condition', () => {
       const script = new CoinflipEscrowScript({
         creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey,
         creatorHash: sha(cSecret), playerHash: sha(pSecret),
-        finalExpiration: past, refundPubkey: housePub, oddsN: n, oddsTarget: target, oddsLo: lo,
+        finalExpiration: past, penaltyTimelockSeconds: 1024n,
+        refundPubkey: housePub, oddsN: n, oddsTarget: target, oddsLo: lo,
       })
       const pk = script.address(HRP, serverPubkey).pkScript
       const hEsc = await escrow(houseW, houseId, pk, BET)
@@ -185,7 +186,8 @@ describe('variable-odds on-chain condition', () => {
     const script = new CoinflipEscrowScript({
       creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey,
       creatorHash: sha(cSecret), playerHash: sha(pSecret),
-      finalExpiration: past, refundPubkey: housePub, oddsN: 6, oddsTarget: 3,
+      finalExpiration: past, penaltyTimelockSeconds: 1024n,
+      refundPubkey: housePub, oddsN: 6, oddsTarget: 3,
     })
     expect(determineVariableWinner(cSecret, pSecret, 6, 3)).toBe('player')
     const pk = script.address(HRP, serverPubkey).pkScript

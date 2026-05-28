@@ -9,6 +9,12 @@
  *   - creatorWin: condition(secrets same size = false) + creator + server
  *   - playerWin: condition(secrets same size = true) + player + server
  *   - abort: CLTV timeout + creator + server (if player doesn't reveal)
+ *
+ * Escrow output (`CoinflipEscrowScript`) has 4 leaves: creatorWin, playerWin,
+ * refund (owner-scoped CLTV self-refund), and playerPenalty (audit R1 forfeit
+ * — ConditionCSVMultisigTapscript leaf: hash-check on the player's revealed
+ * secret + relative CSV timelock + 2-of-2[player, server]; the player sweeps
+ * both escrows after a stall using only their own secret).
  */
 
 import { OP } from '@scure/btc-signer'
@@ -16,6 +22,7 @@ import { hex } from '@scure/base'
 import {
   VtxoScript,
   ConditionMultisigTapscript,
+  ConditionCSVMultisigTapscript,
   CLTVMultisigTapscript,
   TapLeafScript,
 } from '@arkade-os/sdk'
@@ -328,6 +335,24 @@ export interface CoinflipEscrowOptions {
   playerHash: Uint8Array
   finalExpiration: bigint
   /**
+   * Relative timelock (in seconds, BIP68) after the escrow VTXO is confirmed,
+   * after which the player can sweep BOTH escrows via the playerPenalty leaf
+   * with only its own secret — the forfeit a withholding house suffers (R1).
+   * MUST be less than the time-to-`finalExpiration` so the player's penalty
+   * beats the house's self-refund. BIP68 grants 512-second granularity for
+   * seconds-type timelocks, so values rounded to multiples of 512 avoid
+   * surprises. The default in production callers is 1024n (~17 min, with
+   * 30-min refund leaving a ~13-min margin for the house to claim wins).
+   *
+   * **BIP68 silent-floor warning.** Seconds-type timelocks are encoded in
+   * 512-second units; the SDK encoder silently floors non-multiples of 512n
+   * down to the nearest lower multiple. A value below 512n encodes as 0n —
+   * producing an **immediately-spendable** leaf, which **nullifies the R1
+   * forfeit entirely**. Callers MUST pass a value that is `>= 512n` and a
+   * multiple of 512n. The documented default is `1024n` (2 × 512s ≈ 17 min).
+   */
+  penaltyTimelockSeconds: bigint
+  /**
    * The FUNDER's pubkey: only this party (+ server) may refund after the
    * timeout. Set to `playerPubkey` for the player's escrow and `creatorPubkey`
    * for the house's. This is the abort-theft fix — because the player's escrow
@@ -350,21 +375,32 @@ export interface CoinflipEscrowOptions {
 /**
  * Per-party escrow output. Both parties fund a (different) escrow address that
  * shares the win leaves but differs only in the owner-scoped refund leaf:
- *   1. creatorWin: condition(sizes differ → house wins) + creator + server
- *   2. playerWin:  condition(sizes equal → player wins) + player + server
- *   3. refund:     CLTV(finalExpiration) + refundPubkey(funder) + server
+ *   1. creatorWin:    condition(sizes differ → house wins) + creator + server
+ *   2. playerWin:     condition(sizes equal → player wins) + player + server
+ *   3. refund:        CLTV(finalExpiration) + refundPubkey(funder) + server
+ *   4. playerPenalty: ConditionCSVMultisigTapscript leaf —
+ *                     condition(hash-check on player) + relative CSV timelock
+ *                     + 2-of-2[player, server] (audit R1: house-withholding
+ *                     forfeit). A recognized SDK tapscript type, so the
+ *                     standard `buildOffchainTx` helper handles it.
  *
  * The winner sweeps BOTH escrow VTXOs through `creatorWin`/`playerWin` (same
  * leaf script in either escrow); on a stall each side reclaims ONLY its own
- * escrow via `refund`. No cross-party theft is expressible.
+ * escrow via `refund`. If the player revealed and the house withholds, after
+ * `penaltyTimelockSeconds` has elapsed (relative to the escrow VTXO's
+ * confirmation), the player sweeps BOTH escrows via `playerPenalty` with just
+ * its own secret — forfeiting the house's stake. No cross-party theft is
+ * expressible: penalty requires the player's revealed secret, refund requires
+ * the funder's key.
  */
 export class CoinflipEscrowScript extends VtxoScript {
   readonly creatorWinScriptHex: string
   readonly playerWinScriptHex: string
   readonly refundScriptHex: string
+  readonly playerPenaltyScriptHex: string
 
   constructor(readonly options: CoinflipEscrowOptions) {
-    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, refundPubkey, oddsN, oddsTarget, oddsLo } = options
+    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, penaltyTimelockSeconds, refundPubkey, oddsN, oddsTarget, oddsLo } = options
 
     // Variable-odds when both params are set; otherwise the 50/50 coin.
     const conditionScript =
@@ -389,11 +425,29 @@ export class CoinflipEscrowScript extends VtxoScript {
       pubkeys: [refundPubkey, serverPubkey],
     })
 
-    super([creatorWinTapscript.script, playerWinTapscript.script, refundTapscript.script])
+    // Player-forfeit penalty: a recognized ConditionCSVMultisigTapscript leaf
+    // — `<hashCheck(playerHash)> VERIFY <sequence> CSV DROP <player> CSVSIG
+    // <server> CSIG`. Because this is one of `decodeTapscript`'s known types,
+    // the standard `buildOffchainTx` helper handles spends through this leaf;
+    // the CSV is enforced by arkd at the VTXO layer via per-input nSequence
+    // (no explicit nLockTime, mirroring the refund leaf).
+    const playerPenaltyTapscript = ConditionCSVMultisigTapscript.encode({
+      conditionScript: buildHashCheckScript(playerHash),
+      timelock: { value: penaltyTimelockSeconds, type: 'seconds' },
+      pubkeys: [playerPubkey, serverPubkey],
+    })
+
+    super([
+      creatorWinTapscript.script,
+      playerWinTapscript.script,
+      refundTapscript.script,
+      playerPenaltyTapscript.script,
+    ])
 
     this.creatorWinScriptHex = hex.encode(creatorWinTapscript.script)
     this.playerWinScriptHex = hex.encode(playerWinTapscript.script)
     this.refundScriptHex = hex.encode(refundTapscript.script)
+    this.playerPenaltyScriptHex = hex.encode(playerPenaltyTapscript.script)
   }
 
   creatorWin(): TapLeafScript {
@@ -406,5 +460,9 @@ export class CoinflipEscrowScript extends VtxoScript {
 
   refund(): TapLeafScript {
     return this.findLeaf(this.refundScriptHex)
+  }
+
+  playerPenalty(): TapLeafScript {
+    return this.findLeaf(this.playerPenaltyScriptHex)
   }
 }

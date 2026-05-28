@@ -26,6 +26,7 @@ import {
   getHouseEscrowAddress,
   buildSweepTransaction,
   buildRefundTransaction,
+  buildPenaltyTransaction,
   type Game,
   type SweepEscrow,
   type BuiltOffchainTx,
@@ -80,6 +81,13 @@ export interface TrustlessPlayResult {
   oddsLo?: number
   /** Total pot the winner sweeps = player stake (`betAmount`) + house stake. */
   pot: number
+  /**
+   * Relative BIP68 timelock (seconds) for the player's R1 penalty leaf, echoed
+   * so the client can build the penalty tx and stash it after escrowing — the
+   * audit's R1 forfeit relies on the player having the prebuilt penalty PSBT
+   * ready before the house's withholding window opens.
+   */
+  penaltyTimelockSeconds?: number
 }
 
 export interface TrustlessCommitRequest {
@@ -155,6 +163,15 @@ interface TrustlessState {
   oddsN?: number
   oddsTarget?: number
   oddsLo?: number
+  /**
+   * Relative BIP68 timelock (seconds) for the player's R1 penalty leaf,
+   * persisted so commit/refund/recovery rebuild the EXACT same escrow script —
+   * the taproot address is hashed from the leaf bytes, and a drifting timelock
+   * would derive a different address and break spends. Optional on the type
+   * only for backward-compat with any pre-feature rows; new games always
+   * populate it from `handleTrustlessPlay`.
+   */
+  penaltyTimelockSeconds?: number
 }
 
 /**
@@ -184,6 +201,17 @@ async function calcRake(potAmount: number, deps: AppDeps): Promise<number> {
 
 const toXOnly = (b: Uint8Array) => (b.length === 33 ? b.slice(1) : b)
 
+/**
+ * Documented default for the player's R1 penalty leaf BIP68 timelock (seconds).
+ * `2 × 512s ≈ 17 min`. MUST be a multiple of 512 and `>= 512` — BIP68 silently
+ * floors sub-512 values to zero, which would make the penalty leaf immediately
+ * spendable and nullify the R1 forfeit entirely. The escrow taproot address is
+ * hashed from the leaf bytes, so this value also has to be IDENTICAL across
+ * /play, /commit, /refund and recovery rebuilds — that's why we persist it in
+ * `TrustlessState` and read it back at every call site instead of redefining it.
+ */
+const DEFAULT_PENALTY_TIMELOCK_SECONDS = 1024
+
 /** Build the per-game Game object the lib needs to derive the escrow script. */
 async function buildGame(
   deps: AppDeps,
@@ -193,6 +221,7 @@ async function buildGame(
   playerHashHex: string,
   finalExpiration: number,
   setupExpiration: number,
+  penaltyTimelockSeconds: number,
   odds?: { oddsN: number; oddsTarget: number; oddsLo: number },
 ): Promise<Game> {
   const housePub = await deps.identity.xOnlyPublicKey()
@@ -204,6 +233,7 @@ async function buildGame(
     serverPubkey: serverPub,
     setupExpiration,
     finalExpiration,
+    penaltyTimelockSeconds,
     creator: { pubkey: housePub, hash: hex.decode(houseHashHex) },
     player: { pubkey: playerPub, hash: hex.decode(playerHashHex) },
     oddsN: odds?.oddsN,
@@ -235,6 +265,22 @@ function oddsFromState(state: TrustlessState): { oddsN: number; oddsTarget: numb
   return state.oddsN !== undefined && state.oddsTarget !== undefined
     ? { oddsN: state.oddsN, oddsTarget: state.oddsTarget, oddsLo: state.oddsLo ?? 0 }
     : undefined
+}
+
+/**
+ * Read back the persisted BIP68 penalty timelock for an existing game, or fall
+ * back to the documented default for any legacy row that predates the field.
+ * Logs the fallback so a row drift doesn't silently change the derived escrow
+ * address. New games always populate this in `handleTrustlessPlay`.
+ */
+function ensurePenaltyTimelockSeconds(state: TrustlessState, gameId: string): number {
+  if (state.penaltyTimelockSeconds !== undefined) return state.penaltyTimelockSeconds
+  console.warn(
+    `[trustless] game ${gameId} persisted state missing penaltyTimelockSeconds; ` +
+    `using default ${DEFAULT_PENALTY_TIMELOCK_SECONDS} (escrow address will be ` +
+    `recomputed from this — if the original game used a different value the spend will fail).`,
+  )
+  return DEFAULT_PENALTY_TIMELOCK_SECONDS
 }
 
 /**
@@ -327,10 +373,14 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   const housePubkey = Buffer.from(await deps.identity.compressedPublicKey()).toString('hex')
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
   const now = Math.floor(Date.now() / 1000)
-  const finalExpiration = now + 1200
+  // The audit's tighter penalty schedule: the refund window stretches to ~30 min
+  // (was 20) so the R1 penalty leaf (~17 min CSV) can mature with a comfortable
+  // ~13-min margin before the house's self-refund opens.
+  const finalExpiration = now + 1800
   const setupExpiration = now + 600
+  const penaltyTimelockSeconds = DEFAULT_PENALTY_TIMELOCK_SECONDS
 
-  const game = await buildGame(deps, req.tier, houseHash, req.playerPubkey, req.playerHash, finalExpiration, setupExpiration, odds)
+  const game = await buildGame(deps, req.tier, houseHash, req.playerPubkey, req.playerHash, finalExpiration, setupExpiration, penaltyTimelockSeconds, odds)
   // Per-party escrow: the house funds the HOUSE escrow (refundable only by the
   // house); the client funds the PLAYER escrow (refundable only by the player).
   // Neither party's refund leaf can touch the other's stake — abort-theft fix.
@@ -400,7 +450,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     throw err
   }
 
-  const state: TrustlessState = { finalExpiration, setupExpiration, houseEscrow, ...odds }
+  const state: TrustlessState = { finalExpiration, setupExpiration, houseEscrow, penaltyTimelockSeconds, ...odds }
   try {
     await deps.repos.games.save({
       id: gameId,
@@ -431,6 +481,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     oddsTarget: odds?.oddsTarget,
     oddsLo: odds?.oddsLo,
     pot: req.tier + houseStake,
+    penaltyTimelockSeconds,
   }
 }
 
@@ -475,9 +526,14 @@ async function buildCommitContext(
   const roll = odds ? computeVariableRoll(houseSecret, playerSecret, odds.oddsN) : null
 
   const houseHash = hashSecret(houseSecret)
+  // Re-derive with the EXACT persisted penalty timelock — the escrow taproot
+  // address is hashed from the leaf bytes, so a different timelock here would
+  // produce a different address and break the win-leaf sweep. Defensive
+  // fallback to the documented default only if a pre-feature row lacks it.
+  const penaltyTimelockSeconds = ensurePenaltyTimelockSeconds(state, game.id)
   const game2 = await buildGame(
     deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
-    state.finalExpiration, state.setupExpiration, odds,
+    state.finalExpiration, state.setupExpiration, penaltyTimelockSeconds, odds,
   )
   // Rebuild both per-party escrow scripts; the sweep spends each VTXO via its
   // own script's win leaf (win leaves are byte-identical, taptrees differ).
@@ -652,9 +708,10 @@ export async function handleTrustlessRefund(
 
   const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
   const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
+  const penaltyTimelockSeconds = ensurePenaltyTimelockSeconds(state, game.id)
   const game2 = await buildGame(
     deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
-    state.finalExpiration, state.setupExpiration, oddsFromState(state),
+    state.finalExpiration, state.setupExpiration, penaltyTimelockSeconds, oddsFromState(state),
   )
   const playerEscrowScript = getPlayerEscrowScript(game2)
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
@@ -670,6 +727,68 @@ export async function handleTrustlessRefund(
     refundCheckpoints: refund.checkpoints.map((c) => hex.encode(c.toPSBT())),
     finalExpiration: state.finalExpiration,
     refundAddress: game.player_change_address,
+  }
+}
+
+export interface TrustlessPenaltyRequest {
+  /** The player's escrow VTXO outpoint (the one the client supplied at /play time). */
+  playerEscrow: Outpoint
+}
+
+export interface TrustlessPenaltyResult {
+  /** Unsigned penalty tx (hex-encoded PSBT) spending BOTH escrows via the
+   * playerPenalty leaf, paying the full pot to the player's change address.
+   * Client attaches [playerSecret] as the condition witness, signs both inputs
+   * with its key, and submits after the CSV timelock matures (arkd enforces). */
+  penaltyPsbt: string
+  penaltyCheckpoints: string[]
+  /** Relative BIP68 CSV timelock (seconds) baked into the playerPenalty leaf —
+   * for the client's UX countdown / readiness gating. */
+  penaltyTimelockSeconds: number
+  /** Address the penalty pays — the client MUST verify this is its own
+   * change address before signing. */
+  payoutAddress: string
+}
+
+/**
+ * Build the unsigned penalty-claim tx for a game where the house withheld at
+ * /commit (R1 forfeit). The penalty leaf is [player + arkd] + hash-check(playerHash)
+ * + CSV(penaltyTimelockSeconds), so the client can sweep BOTH escrows with its
+ * own secret once the relative timelock matures — no house cooperation required.
+ * Rejected once the game is resolved (escrows already swept).
+ */
+export async function handleTrustlessPenalty(
+  gameId: string,
+  req: TrustlessPenaltyRequest,
+  deps: AppDeps,
+): Promise<TrustlessPenaltyResult> {
+  const game = await deps.repos.games.get(gameId)
+  if (!game) throw new Error(`Game not found: ${gameId}`)
+  if (game.status === 'resolved') throw new Error(`Game ${gameId} is resolved; escrows already swept`)
+  if (!game.player_change_address) throw new Error(`Game ${gameId} has no player change address`)
+
+  const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+  if (!state.houseEscrow) throw new Error(`Game ${gameId} has no recorded house escrow`)
+  const penaltyTimelockSeconds = ensurePenaltyTimelockSeconds(state, gameId)
+  const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
+  const game2 = await buildGame(
+    deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
+    state.finalExpiration, state.setupExpiration, penaltyTimelockSeconds, oddsFromState(state),
+  )
+  const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
+  const escrows: SweepEscrow[] = [
+    { script: getHouseEscrowScript(game2), ...state.houseEscrow },
+    { script: getPlayerEscrowScript(game2), ...req.playerEscrow },
+  ]
+  const penalty = buildPenaltyTransaction(deps.arkInfo, networkHrp, {
+    escrows,
+    payoutAddress: game.player_change_address,
+  })
+  return {
+    penaltyPsbt: hex.encode(penalty.arkTx.toPSBT()),
+    penaltyCheckpoints: penalty.checkpoints.map((c) => hex.encode(c.toPSBT())),
+    penaltyTimelockSeconds,
+    payoutAddress: game.player_change_address,
   }
 }
 
@@ -699,9 +818,10 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
 
     try {
       const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
+      const penaltyTimelockSeconds = ensurePenaltyTimelockSeconds(state, game.id)
       const game2 = await buildGame(
         deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
-        state.finalExpiration, state.setupExpiration, oddsFromState(state),
+        state.finalExpiration, state.setupExpiration, penaltyTimelockSeconds, oddsFromState(state),
       )
       const houseEscrowScript = getHouseEscrowScript(game2)
       const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
@@ -720,8 +840,19 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
       recovered++
       console.log(`[recovery] reclaimed house escrow for stalled game ${game.id} (${state.houseEscrow.value} sats), txid ${txid}`)
     } catch (err) {
-      // Most likely the CLTV isn't accepted yet or the escrow was already spent;
-      // leave the game for a later pass rather than marking it reclaimed.
+      // Most likely the CLTV isn't accepted yet or the escrow was already spent.
+      // A new expected case (R1 forfeit): if the player penalty-claimed (spending
+      // BOTH escrows via the playerPenalty leaf after penaltyTimelockSeconds),
+      // the house escrow VTXO is already spent by the time we try to refund it
+      // here. The submit rejects with a double-spend error, which lands here.
+      // That is the correct outcome — the house has nothing to reclaim because the
+      // player took the whole pot under the R1 forfeit rules. We deliberately do
+      // NOT pre-check for this state (e.g. via an indexer isSpent lookup) because
+      // the catch is sufficient and avoids an extra round-trip on every recovery
+      // pass for the common (non-penalty) case.
+      //
+      // Leave the game for a later pass rather than marking it reclaimed — if it
+      // was a transient CLTV rejection the next scheduled run will succeed.
       console.warn(`[recovery] house escrow reclaim failed for game ${game.id}:`, err instanceof Error ? err.message : err)
     }
   }

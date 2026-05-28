@@ -39,3 +39,5 @@ docker-compose.mutinynet.yml
 # Test/dev artifacts
 .playwright-mcp/
 *.tgz
+
+.research/

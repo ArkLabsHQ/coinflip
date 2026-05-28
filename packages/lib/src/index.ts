@@ -95,3 +95,14 @@ export {
 // against — avoids dueling-instance issues when the SDK ends up installed
 // in multiple package node_modules trees.
 export { contractHandlers } from '@arkade-os/sdk'
+
+// Arkade-script forfeit PoC (not wired into the production game — see
+// `arkade-forfeit.ts` module header for status and rationale).
+export {
+  ARKADE_OP,
+  arkadeScriptHash,
+  computeArkadeScriptPublicKey,
+  buildForfeitArkadeScript,
+  buildForfeitLeafSpec,
+  type ForfeitLeafSpec,
+} from './arkade-forfeit'

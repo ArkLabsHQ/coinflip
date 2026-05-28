@@ -39,5 +39,7 @@ docker-compose.mutinynet.yml
 # Test/dev artifacts
 .playwright-mcp/
 *.tgz
+# …except vendored SDK tarballs we depend on (file: path in package.json).
+!/vendor/*.tgz
 
 .research/

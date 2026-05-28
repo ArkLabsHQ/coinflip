@@ -9,7 +9,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@arkade-os/sdk": "^0.4.27",
+    "@arkade-os/sdk": "file:../../vendor/arkade-os-sdk-0.4.28-arkade-script-5a24cbf.tgz",
     "@scure/base": "^1.2.1",
     "@scure/btc-signer": "^2.0.1"
   },

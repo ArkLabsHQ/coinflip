@@ -20,7 +20,12 @@ services:
       # minted with the 5-leaf escrow + playerForfeit leaf bound to the
       # player's payout address. Unset/unreachable → legacy CSV penalty.
       # See packages/server/src/emulator.ts.
+      # - EMULATOR_URL: the in-docker-network DNS the server probes.
+      # - EMULATOR_PUBLIC_URL: where the browser submits forfeit txs;
+      #   surfaced via GET /api/network. In production this would be a
+      #   public ingress; for local dev, the host port mapping.
       - EMULATOR_URL=http://emulator:7073
+      - EMULATOR_PUBLIC_URL=http://localhost:7073
     ports:
       - "3002:3002"
     networks:

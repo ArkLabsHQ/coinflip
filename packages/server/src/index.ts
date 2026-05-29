@@ -40,6 +40,8 @@ export {
   handleTrustlessPlay,
   handleTrustlessCommit,
   handleTrustlessRefund,
+  handleTrustlessPenalty,
+  handleTrustlessForfeit,
   recoverOrphanedHouseEscrows,
   reconcilePendingSweeps,
   startEscrowRecoveryTimer,
@@ -49,6 +51,10 @@ export {
   type TrustlessCommitResult,
   type TrustlessRefundRequest,
   type TrustlessRefundResult,
+  type TrustlessPenaltyRequest,
+  type TrustlessPenaltyResult,
+  type TrustlessForfeitRequest,
+  type TrustlessForfeitResult,
   type Outpoint,
 } from './trustless-game.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
@@ -95,6 +101,13 @@ export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<App
 async function main() {
   console.log('Bootstrapping server dependencies...')
   const deps = await bootstrapDeps()
+
+  // Probe the arkade-script emulator early so the boot log shows whether
+  // new games will use the 5-leaf escrow or fall back to the 4-leaf CSV
+  // path. loadEmulatorConfig is cache-backed, so this is the only network
+  // hit per process lifetime.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  await (await import('./emulator.js')).loadEmulatorConfig()
 
   // Rebuild VTXO reservations from any pending games that survived a restart,
   // then keep a healthy pool of distinct house VTXOs for concurrent play.

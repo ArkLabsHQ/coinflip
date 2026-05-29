@@ -13,6 +13,7 @@ import {
 } from './trustless-game.js'
 import { HouseBusyError, BetExceedsCapacityError } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
+import { loadEmulatorConfig } from './emulator.js'
 
 export function createPublicRoutes(deps: AppDeps): Router {
   const router = Router()
@@ -20,8 +21,21 @@ export function createPublicRoutes(deps: AppDeps): Router {
   // GET /api/network — the network this server is pinned to (from its
   // ARK_SERVER_URL env, surfaced via the Ark server's /v1/info). The client
   // follows this; the server itself never switches networks at runtime.
-  router.get('/api/network', (_req: Request, res: Response) => {
-    res.json({ network: deps.arkInfo.network })
+  //
+  // Also reports the arkade-script emulator URL the client must use for
+  // forfeit-tx submission, when the emulator is configured. The browser
+  // POSTs the forfeit PSBT directly to this URL (the emulator validates
+  // the covenant + co-signs + forwards to arkd). Null when the server
+  // wasn't started with EMULATOR_URL or the probe failed — clients then
+  // fall back to the CSV playerPenalty path.
+  router.get('/api/network', async (_req: Request, res: Response) => {
+    const emu = await loadEmulatorConfig()
+    res.json({
+      network: deps.arkInfo.network,
+      emulator: emu
+        ? { url: emu.publicUrl, signerPubkey: emu.signerPubkeyHex, version: emu.version }
+        : null,
+    })
   })
 
   // GET /api/tiers — available bet tiers and house readiness

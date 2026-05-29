@@ -59,14 +59,27 @@ export interface StashedRefund {
   refundCheckpoints: string[]
   finalExpiration: number
   createdAt: number
-  /** Penalty-claim spending BOTH escrows for the whole pot (R1 forfeit). Only
-   * usable when the player has REVEALED (sent /commit). Optional because old
-   * stashed rows or pre-reveal stalls may not have it set. */
+  /** Penalty-claim spending BOTH escrows for the whole pot (R1 forfeit, CSV
+   * path). Only usable when the player has REVEALED (sent /commit). Optional
+   * because old stashed rows or pre-reveal stalls may not have it set. */
   penaltyPsbt?: string
   penaltyCheckpoints?: string[]
   /** Relative BIP68 CSV timelock (seconds). Penalty matures `penaltyTimelockSeconds`
    * after the player escrow VTXO is confirmed. */
   penaltyTimelockSeconds?: number
+  /** Arkade-script forfeit-claim PSBT. Set ONLY when the server minted a
+   * 5-leaf escrow (EMULATOR_URL configured at /play time). Submitted to the
+   * EMULATOR's /v1/tx (not arkd directly) — the emulator validates the
+   * covenant + cosigns the tweaked slot, then forwards to arkd. */
+  forfeitPsbt?: string
+  forfeitCheckpoints?: string[]
+  /** Absolute CLTV (unix seconds) baked into the playerForfeit leaf —
+   * forfeit becomes claimable once chain time crosses this. */
+  forfeitClaimableAt?: number
+  /** Emulator base URL (e.g. http://localhost:7073). The forfeit PSBT MUST
+   * be submitted here, NOT to arkd directly. Operator-provided in the
+   * /forfeit response. */
+  forfeitEmulatorUrl?: string
   /** Set true once the player has actually called /commit (revealed their
    * secret). Gates penalty (revealer-takes-all) vs self-refund (own stake).
    * If the player never revealed, only the self-refund applies. */

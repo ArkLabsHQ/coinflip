@@ -18,10 +18,17 @@
  */
 
 const EMULATOR_URL = process.env.EMULATOR_URL?.trim() || ''
+// Publicly-reachable URL the browser uses to POST forfeit txs. Defaults to
+// EMULATOR_URL — only override when the server's network name (e.g. inside
+// docker compose: http://emulator:7073) differs from what the browser sees
+// (e.g. http://localhost:7073 from the host).
+const EMULATOR_PUBLIC_URL = process.env.EMULATOR_PUBLIC_URL?.trim() || EMULATOR_URL
 
 export interface EmulatorConfig {
-  /** Raw URL, e.g. `http://localhost:7073`. */
+  /** Internal URL used by the server, e.g. `http://emulator:7073`. */
   url: string
+  /** Publicly-reachable URL the client posts forfeit txs to. */
+  publicUrl: string
   /** Compressed (33-byte) or x-only (32-byte) signer pubkey, hex. */
   signerPubkeyHex: string
   /** Raw bytes of signerPubkey for handoff to the lib. */
@@ -44,8 +51,12 @@ export async function loadEmulatorConfig(): Promise<EmulatorConfig | undefined> 
     return undefined
   }
   try {
+    // 15s — bootstrapping the server can be CPU-bound and the initial
+    // probe sometimes races a slow first-pass DNS or container-net warmup.
+    // The emulator itself responds in <50ms; this is purely a startup
+    // contention budget.
     const resp = await fetch(`${EMULATOR_URL}/v1/info`, {
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(15000),
     })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const body = (await resp.json()) as { signerPubkey: string; version: string }
@@ -55,6 +66,7 @@ export async function loadEmulatorConfig(): Promise<EmulatorConfig | undefined> 
     const signerPubkey = hexToBytes(body.signerPubkey)
     cached = {
       url: EMULATOR_URL,
+      publicUrl: EMULATOR_PUBLIC_URL,
       signerPubkeyHex: body.signerPubkey,
       signerPubkey,
       version: body.version,

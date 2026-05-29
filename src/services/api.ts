@@ -118,8 +118,19 @@ export function getTiers(): Promise<TiersResponse> {
   return request('/api/tiers')
 }
 
-/** The network the coinflip server is pinned to (regtest / mutinynet / …). */
-export function getNetwork(): Promise<{ network: string }> {
+/** The network the coinflip server is pinned to (regtest / mutinynet / …),
+ *  plus the arkade-script emulator URL when the operator runs one. The
+ *  client posts forfeit txs to `emulator.url`; null means no emulator,
+ *  fall back to the CSV penalty path. */
+export interface NetworkResponse {
+  network: string
+  emulator: null | {
+    url: string
+    signerPubkey: string
+    version: string
+  }
+}
+export function getNetwork(): Promise<NetworkResponse> {
   return request('/api/network')
 }
 
@@ -171,6 +182,30 @@ export function refund(gameId: string, playerEscrow: Outpoint): Promise<RefundRe
  */
 export function penalty(gameId: string, playerEscrow: Outpoint): Promise<PenaltyResponse> {
   return request(`/api/game/${gameId}/penalty`, {
+    method: 'POST',
+    body: JSON.stringify({ playerEscrow }),
+  })
+}
+
+/** /api/game/:id/forfeit — arkade-script forfeit-claim. Available only when
+ *  the server probed the emulator at /play time and minted the 5-leaf
+ *  escrow (state.arkadeForfeit). Two-input claim spending via the
+ *  CLTVMultisigTapscript `playerForfeit` leaf on each escrow. The client
+ *  signs both player slots; submitting to the emulator's /v1/tx triggers
+ *  covenant validation + emulator + arkd co-signing in one round-trip. */
+export interface ForfeitResponse {
+  forfeitPsbt: string
+  forfeitCheckpoints: string[]
+  /** Absolute CLTV (unix seconds) baked into the playerForfeit leaf.
+   *  Once chain time crosses this, the forfeit becomes claimable. */
+  forfeitClaimableAt: number
+  payoutAddress: string
+  /** [houseEscrowValue, playerEscrowValue] — must match the covenant. */
+  payoutAmounts: [number, number]
+}
+
+export function forfeit(gameId: string, playerEscrow: Outpoint): Promise<ForfeitResponse> {
+  return request(`/api/game/${gameId}/forfeit`, {
     method: 'POST',
     body: JSON.stringify({ playerEscrow }),
   })

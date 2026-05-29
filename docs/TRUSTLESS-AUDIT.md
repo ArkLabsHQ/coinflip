@@ -170,12 +170,12 @@ Player sends `playerSecret`; server verifies the hash, resolves via
   — so they cannot be spent inconsistently. This replaces the earlier
   per-escrow-independent covenant we had on this branch.
 
-  **Note on arkd#1085**: when we first prototyped R1 we filed an arkd
-  issue requesting `ConditionCLTVMultisigClosure`. Arkade-script made it
-  unnecessary — the covenant + CLTV combination is now expressible
-  inside the existing `CLTVMultisigTapscript` closure (arkade-script
-  enforces the covenant, arkd enforces the CLTV). The issue is left
-  open as a useful protocol cleanup but is no longer blocking us.
+  **Note on arkd#1085**: still relevant. Our arkade-script workaround
+  requires an emulator service alongside arkd; a native
+  `ConditionCLTVMultisigClosure` would let consumers express the same
+  leaf without that operational dependency, and would let the CSV
+  fallback path retire instead of staying as the always-on default for
+  emulator-less clients.
 
 ### Phase 5 — winner sweeps the pot
 Winner spends **both** escrow VTXOs via the matching win leaf, paying the pot
@@ -319,11 +319,10 @@ back-pressure / on-demand split for bursts.
    `EMULATOR_URL` is set; execution-bucket forfeit without unilateral
    exit. See
    `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`.
-✅ **arkd#1085 dropped.** arkade-script makes the requested
-   `ConditionCLTVMultisigClosure` unnecessary — the same expressiveness
-   lives in the existing `CLTVMultisigTapscript` closure with arkade-
-   script enforcing the covenant + condition. Issue stays open as a
-   cleanup but is no longer a blocker.
+🟠 **arkd#1085 still relevant.** Arkade-script gives us the same
+   expressiveness today but requires an emulator service. A native
+   `ConditionCLTVMultisigClosure` would let consumers express R1
+   without that operational dependency. Tracking upstream.
 
 ---
 

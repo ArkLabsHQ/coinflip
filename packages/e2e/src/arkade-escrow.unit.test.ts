@@ -197,6 +197,64 @@ describe('CoinflipEscrowScript: with arkadeForfeit config', () => {
     expect(a2).not.toBe(a3)
   })
 
+  it('covenant-win leaves: housePayoutPkScript adds playerWinCovenant + creatorWinCovenant', () => {
+    const housePayout = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x99)])
+    const without = new CoinflipEscrowScript({
+      ...baseOpts(),
+      arkadeForfeit: {
+        emulatorPubkey: EMULATOR_PK,
+        forfeitDestPkScript: PAY_PKSCRIPT,
+        forfeitDestValue: 80_000n,
+        otherStakeValue: 30_000n,
+      },
+    })
+    const withCov = new CoinflipEscrowScript({
+      ...baseOpts(),
+      arkadeForfeit: {
+        emulatorPubkey: EMULATOR_PK,
+        forfeitDestPkScript: PAY_PKSCRIPT,
+        forfeitDestValue: 80_000n,
+        otherStakeValue: 30_000n,
+        housePayoutPkScript: housePayout,
+      },
+    })
+    // The escrow without housePayoutPkScript exposes 5 leaves (1-4 legacy + forfeit).
+    expect(without.playerWinCovenantScriptHex).toBeUndefined()
+    expect(without.creatorWinCovenantScriptHex).toBeUndefined()
+    expect(() => without.playerWinCovenant()).toThrow(/housePayoutPkScript/)
+
+    // With it, the two extra leaves exist.
+    expect(withCov.playerWinCovenantScriptHex).toBeDefined()
+    expect(withCov.creatorWinCovenantScriptHex).toBeDefined()
+    expect(withCov.playerWinCovenantArkadeScript).toBeDefined()
+    expect(withCov.creatorWinCovenantArkadeScript).toBeDefined()
+
+    // The two covenant-win arkade scripts differ because their pinned
+    // destination differs (player payout vs. house payout).
+    expect(hex.encode(withCov.playerWinCovenantArkadeScript)).not.toBe(
+      hex.encode(withCov.creatorWinCovenantArkadeScript),
+    )
+
+    // Both must be findLeaf-able and decode as ConditionMultisig.
+    const pWin = decodeTapscript(hex.decode(withCov.playerWinCovenantScriptHex))
+    const cWin = decodeTapscript(hex.decode(withCov.creatorWinCovenantScriptHex))
+    expect(pWin.type).toBe('condition-multisig')
+    expect(cWin.type).toBe('condition-multisig')
+
+    // Multisig is [server, emulator_tweaked] — no player or creator key,
+    // which is what lets the server settle without client signatures.
+    expect(pWin.params.pubkeys).toHaveLength(2)
+    expect(cWin.params.pubkeys).toHaveLength(2)
+    expect(hex.encode(pWin.params.pubkeys[0])).toBe(hex.encode(SERVER_PK))
+    expect(hex.encode(cWin.params.pubkeys[0])).toBe(hex.encode(SERVER_PK))
+
+    // Address divergence from the 5-leaf version confirms the leaves
+    // actually land in the tree.
+    const a5 = without.address(REGTEST_HRP, SERVER_PK).encode()
+    const a7 = withCov.address(REGTEST_HRP, SERVER_PK).encode()
+    expect(a7).not.toBe(a5)
+  })
+
   it('legacy playerPenalty CSV leaf remains alongside the new forfeit leaf', () => {
     const s = new CoinflipEscrowScript({
       ...baseOpts(),

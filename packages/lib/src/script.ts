@@ -354,8 +354,22 @@ export interface ArkadeForfeitConfig {
    * On-chain P2TR pkScript (`0x51 0x20 <32-byte witness program>`) of the
    * player's payout address. The arkade-script covenant pins this script
    * exactly — the spending tx MUST produce an output matching it.
+   *
+   * Used by **two** leaves when both are wired (5-leaf + win-covenant
+   * layout): `playerForfeit` (R1 escape) and `playerWinCovenant`
+   * (server-resolved player win).
    */
   forfeitDestPkScript: Uint8Array
+  /**
+   * Optional: house's payout pkScript. When supplied alongside
+   * `forfeitDestPkScript`, the escrow grows two additional covenant-
+   * resolved win leaves (`playerWinCovenant`, `creatorWinCovenant`)
+   * that let the server settle a resolved game without any client
+   * signature — the covenant pins the destination + amount, the
+   * multisig is `[server, emulator_tweaked]`. Omit to keep the
+   * 5-leaf layout (forfeit only).
+   */
+  housePayoutPkScript?: Uint8Array
   /**
    * Amount the spending tx MUST pay to `forfeitDestPkScript` (in sats).
    *
@@ -460,7 +474,7 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
   readonly refundScriptHex: string
   readonly playerPenaltyScriptHex: string
   /**
-   * Hex of the 5th `playerForfeit` arkade-script leaf script (post-tweak),
+   * Hex of the `playerForfeit` arkade-script leaf script (post-tweak),
    * or `undefined` when `arkadeForfeit` was not supplied. Use
    * `playerForfeit()` to get the `TapLeafScript` for spending.
    */
@@ -471,6 +485,18 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
    * the emulator must execute before signing.
    */
   readonly forfeitArkadeScript?: Uint8Array
+  /**
+   * Hex of the covenant-resolved `playerWinCovenant` /
+   * `creatorWinCovenant` leaves (post-tweak), or `undefined` when
+   * `arkadeForfeit.housePayoutPkScript` was not supplied. Each leaf is
+   * `ConditionMultisig[server, emulator_tweaked]` + win-condition
+   * predicate + atomic-sweep covenant binding the winner's payout.
+   */
+  readonly playerWinCovenantScriptHex?: string
+  readonly creatorWinCovenantScriptHex?: string
+  /** Raw arkade-script bytes for the two covenant-win leaves. */
+  readonly playerWinCovenantArkadeScript?: Uint8Array
+  readonly creatorWinCovenantArkadeScript?: Uint8Array
 
   constructor(readonly options: CoinflipEscrowOptions) {
     const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, penaltyTimelockSeconds, refundPubkey, oddsN, oddsTarget, oddsLo, arkadeForfeit } = options
@@ -558,6 +584,87 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
         }).script
       : undefined
 
+    // Covenant-resolved win leaves (opt-in via arkadeForfeit.housePayoutPkScript).
+    // When both payout pkScripts are pinned, the escrow gets TWO additional
+    // leaves that let the server settle a resolved game with NO client
+    // signature — the covenant binds the winner's destination + the full
+    // pot, the multisig collapses to [server, emulator_tweaked]. The
+    // condition script is the same coinflip win-determination predicate
+    // (so arkd still checks "both secrets reveal AND winner == X" via
+    // ConditionMultisig).
+    //
+    // Cross-input value pinning is the same shape as forfeit: each leaf
+    // checks the OTHER escrow's stake via INSPECTINPUTVALUE, so neither
+    // escrow can be claimed alone via covenant-win.
+    const wantWinCovenant =
+      arkadeForfeit !== undefined &&
+      arkadeForfeit.housePayoutPkScript !== undefined &&
+      arkadeForfeit.otherStakeValue !== undefined &&
+      arkadeForfeit.forfeitDestValue !== undefined
+    const playerWinCovenantArkadeScript = wantWinCovenant && arkadeForfeit
+      ? buildForfeitArkadeScript(
+          arkadeForfeit.forfeitDestPkScript,                 // player payout
+          arkadeForfeit.forfeitDestValue,                    // pot
+          arkadeForfeit.otherStakeValue,                     // other escrow stake
+        )
+      : undefined
+    const creatorWinCovenantArkadeScript = wantWinCovenant && arkadeForfeit
+      ? buildForfeitArkadeScript(
+          arkadeForfeit.housePayoutPkScript!,                // house payout
+          arkadeForfeit.forfeitDestValue,                    // pot
+          arkadeForfeit.otherStakeValue,                     // other escrow stake
+        )
+      : undefined
+    const playerWinCovenantLeaf: arkade.ArkadeLeaf | undefined =
+      wantWinCovenant && arkadeForfeit && playerWinCovenantArkadeScript
+        ? {
+            arkadeScript: playerWinCovenantArkadeScript,
+            emulators: [arkadeForfeit.emulatorPubkey],
+            tapscript: ConditionMultisigTapscript.encode({
+              conditionScript,                                // player-wins predicate
+              pubkeys: [serverPubkey],
+            }),
+          }
+        : undefined
+    const creatorWinCovenantLeaf: arkade.ArkadeLeaf | undefined =
+      wantWinCovenant && arkadeForfeit && creatorWinCovenantArkadeScript
+        ? {
+            arkadeScript: creatorWinCovenantArkadeScript,
+            emulators: [arkadeForfeit.emulatorPubkey],
+            tapscript: ConditionMultisigTapscript.encode({
+              conditionScript: creatorWinCondition,           // house-wins predicate
+              pubkeys: [serverPubkey],
+            }),
+          }
+        : undefined
+    // Mirror ArkadeVtxoScript's pubkey-append to compute findLeaf hexes.
+    const playerWinCovenantScript =
+      wantWinCovenant && arkadeForfeit && playerWinCovenantArkadeScript
+        ? ConditionMultisigTapscript.encode({
+            conditionScript,
+            pubkeys: [
+              serverPubkey,
+              arkade.computeArkadeScriptPublicKey(
+                arkadeForfeit.emulatorPubkey,
+                playerWinCovenantArkadeScript,
+              ),
+            ],
+          }).script
+        : undefined
+    const creatorWinCovenantScript =
+      wantWinCovenant && arkadeForfeit && creatorWinCovenantArkadeScript
+        ? ConditionMultisigTapscript.encode({
+            conditionScript: creatorWinCondition,
+            pubkeys: [
+              serverPubkey,
+              arkade.computeArkadeScriptPublicKey(
+                arkadeForfeit.emulatorPubkey,
+                creatorWinCovenantArkadeScript,
+              ),
+            ],
+          }).script
+        : undefined
+
     const leaves: arkade.ArkadeVtxoInput[] = [
       creatorWinTapscript.script,
       playerWinTapscript.script,
@@ -565,6 +672,8 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
       playerPenaltyTapscript.script,
     ]
     if (forfeitLeaf) leaves.push(forfeitLeaf)
+    if (playerWinCovenantLeaf) leaves.push(playerWinCovenantLeaf)
+    if (creatorWinCovenantLeaf) leaves.push(creatorWinCovenantLeaf)
     super(leaves)
 
     this.creatorWinScriptHex = hex.encode(creatorWinTapscript.script)
@@ -573,6 +682,14 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
     this.playerPenaltyScriptHex = hex.encode(playerPenaltyTapscript.script)
     this.playerForfeitScriptHex = forfeitLeafScript ? hex.encode(forfeitLeafScript) : undefined
     this.forfeitArkadeScript = forfeitArkadeScript
+    this.playerWinCovenantScriptHex = playerWinCovenantScript
+      ? hex.encode(playerWinCovenantScript)
+      : undefined
+    this.creatorWinCovenantScriptHex = creatorWinCovenantScript
+      ? hex.encode(creatorWinCovenantScript)
+      : undefined
+    this.playerWinCovenantArkadeScript = playerWinCovenantArkadeScript
+    this.creatorWinCovenantArkadeScript = creatorWinCovenantArkadeScript
   }
 
   creatorWin(): TapLeafScript {
@@ -603,5 +720,30 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
       )
     }
     return this.findLeaf(this.playerForfeitScriptHex)
+  }
+
+  /**
+   * Covenant-resolved player-win leaf. Only present when the constructor
+   * received `arkadeForfeit.housePayoutPkScript`. The server can spend
+   * this without any client signature — the covenant binds the player's
+   * payout address + pot, and the multisig is [server, emulator_tweaked].
+   */
+  playerWinCovenant(): TapLeafScript {
+    if (!this.playerWinCovenantScriptHex) {
+      throw new Error(
+        'CoinflipEscrowScript: playerWinCovenant() called but no housePayoutPkScript was supplied',
+      )
+    }
+    return this.findLeaf(this.playerWinCovenantScriptHex)
+  }
+
+  /** Covenant-resolved house-win leaf. Symmetric to `playerWinCovenant`. */
+  creatorWinCovenant(): TapLeafScript {
+    if (!this.creatorWinCovenantScriptHex) {
+      throw new Error(
+        'CoinflipEscrowScript: creatorWinCovenant() called but no housePayoutPkScript was supplied',
+      )
+    }
+    return this.findLeaf(this.creatorWinCovenantScriptHex)
   }
 }

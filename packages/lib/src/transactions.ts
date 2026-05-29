@@ -131,6 +131,8 @@ function escrowScript(
           forfeitDestPkScript: game.playerForfeitPkScript,
           forfeitDestValue,
           otherStakeValue,
+          // Optional — adds the covenant-resolved win leaves when set.
+          housePayoutPkScript: game.housePayoutPkScript,
         }
       : undefined
   return new CoinflipEscrowScript({
@@ -605,6 +607,117 @@ export function buildForfeitClaimTransaction(
     witness: encodeEmulatorWitness([
       encodeOutputIndexWitness(0),       // out_idx (bottom)
       encodeOutputIndexWitness(1 - i),   // other_in_idx (top)
+    ]),
+  }))
+  addEmulatorPacket(arkTx, emulatorEntries)
+
+  return { arkTx, checkpoints, emulatorEntries }
+}
+
+export interface CovenantSweepEscrow {
+  script: CoinflipEscrowScript
+  txid: string
+  vout: number
+  value: number
+}
+
+export interface CovenantSweepArgs {
+  winner: 'player' | 'house'
+  /**
+   * Both escrows. MUST have been constructed with
+   * `arkadeForfeit.housePayoutPkScript` set so the covenant-win leaves
+   * exist (`playerWinCovenant()` / `creatorWinCovenant()`).
+   */
+  escrows: CovenantSweepEscrow[]
+  /**
+   * Winner's payout. MUST match the corresponding pin on the covenant
+   * leaf — `forfeitDestPkScript` for a player win,
+   * `housePayoutPkScript` for a house win.
+   */
+  payoutAddress: string
+  /** Full pot — the covenants check output[0].value == potAmount. */
+  potAmount: bigint
+  /**
+   * Condition witness — both revealed secrets in order
+   * `[houseSecret, playerSecret]`, attached to each input via
+   * `ConditionWitness` PSBT field. Same shape as the legacy
+   * `buildSweepTransaction` consumes.
+   */
+  bothSecrets: [Uint8Array, Uint8Array]
+}
+
+/**
+ * Server-resolved win sweep using the covenant-win leaves. One Ark tx
+ * with both escrow inputs and a single user output paying the winner
+ * the full pot. EmulatorPacket per input reveals the arkade-script
+ * covenant + witness arg (`[output_idx=0, other_input_idx=1-i]`).
+ *
+ * Unlike `buildSweepTransaction`, no winner key is in the multisig —
+ * the tapscript closure is `ConditionMultisig[server, emulator_tweaked]`,
+ * so the server signs + the emulator co-signs after running the
+ * covenant. **The winner does not need to sign anything**.
+ *
+ * Falls back to `buildSweepTransaction` is the caller's responsibility
+ * when the escrows weren't minted with `housePayoutPkScript` set.
+ */
+export function buildCovenantSweepTransaction(
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: CovenantSweepArgs,
+): BuiltOffchainTx & { emulatorEntries: { vin: number; script: Uint8Array; witness: Uint8Array }[] } {
+  void networkHrp
+  if (args.escrows.length !== 2) {
+    throw new Error(
+      `buildCovenantSweepTransaction: requires exactly 2 escrows (got ${args.escrows.length})`,
+    )
+  }
+  for (let i = 0; i < args.escrows.length; i++) {
+    const want = args.winner === 'player'
+      ? args.escrows[i].script.playerWinCovenantArkadeScript
+      : args.escrows[i].script.creatorWinCovenantArkadeScript
+    if (!want) {
+      throw new Error(
+        `buildCovenantSweepTransaction: escrow #${i} has no ${args.winner}WinCovenant leaf (housePayoutPkScript missing at /play time?)`,
+      )
+    }
+  }
+  if (args.potAmount <= 0n) {
+    throw new Error('buildCovenantSweepTransaction: potAmount must be positive')
+  }
+
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const inputs: ArkTxInput[] = args.escrows.map((e) => ({
+    txid: e.txid,
+    vout: e.vout,
+    value: e.value,
+    tapLeafScript: args.winner === 'player' ? e.script.playerWinCovenant() : e.script.creatorWinCovenant(),
+    tapTree: e.script.encode(),
+  }))
+
+  const payoutAddr = ArkAddress.decode(args.payoutAddress)
+  const outputs = [{ script: payoutAddr.pkScript, amount: args.potAmount }]
+
+  const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
+
+  // Condition witness — both revealed secrets, attached per input.
+  // Same flow as the legacy sweep: arkd's ConditionMultisig runs the
+  // win-determination predicate against [houseSecret, playerSecret].
+  for (let i = 0; i < args.escrows.length; i++) {
+    setArkPsbtField(arkTx, i, ConditionWitness, args.bothSecrets)
+  }
+
+  // EmulatorPacket per input. Witness = [out_idx=0, other_in_idx=1-i].
+  const emulatorEntries = args.escrows.map((_e, i) => ({
+    vin: i,
+    script: (args.winner === 'player'
+      ? args.escrows[i].script.playerWinCovenantArkadeScript
+      : args.escrows[i].script.creatorWinCovenantArkadeScript)!,
+    witness: encodeEmulatorWitness([
+      encodeOutputIndexWitness(0),
+      encodeOutputIndexWitness(1 - i),
     ]),
   }))
   addEmulatorPacket(arkTx, emulatorEntries)

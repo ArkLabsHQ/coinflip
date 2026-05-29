@@ -98,6 +98,15 @@ export interface Game {
    * SAME taproot address as the original escrow.
    */
   playerForfeitPkScript?: Uint8Array
+  /**
+   * House's payout pkScript. When set alongside `emulatorPubkey` and
+   * `playerForfeitPkScript`, the escrow grows two covenant-resolved
+   * win leaves (`playerWinCovenant`, `creatorWinCovenant`) that let
+   * the server settle a resolved game with NO client signature. The
+   * server derives this from its own wallet's payout address at
+   * /play time.
+   */
+  housePayoutPkScript?: Uint8Array
 }
 
 // -- Game Events --

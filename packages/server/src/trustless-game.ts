@@ -25,12 +25,14 @@ import {
   getPlayerEscrowAddress,
   getHouseEscrowAddress,
   buildSweepTransaction,
+  buildCovenantSweepTransaction,
   buildRefundTransaction,
   buildPenaltyTransaction,
   buildForfeitClaimTransaction,
   type Game,
   type SweepEscrow,
   type ForfeitClaimEscrow,
+  type CovenantSweepEscrow,
   type BuiltOffchainTx,
 } from 'arkade-coinflip'
 import {
@@ -192,6 +194,12 @@ interface TrustlessState {
     playerEscrowValue: number
     /** Per-escrow value the house's escrow covenant binds (house stake). */
     houseEscrowValue: number
+    /**
+     * House payout P2TR pkScript, hex. Optional for back-compat with
+     * games minted before covenant-resolved win leaves landed; new
+     * games always populate it.
+     */
+    housePayoutPkScriptHex?: string
   }
 }
 
@@ -244,7 +252,11 @@ async function buildGame(
   setupExpiration: number,
   penaltyTimelockSeconds: number,
   odds?: { oddsN: number; oddsTarget: number; oddsLo: number },
-  arkadeForfeit?: { emulatorPubkey: Uint8Array; playerForfeitPkScript: Uint8Array },
+  arkadeForfeit?: {
+    emulatorPubkey: Uint8Array
+    playerForfeitPkScript: Uint8Array
+    housePayoutPkScript?: Uint8Array
+  },
 ): Promise<Game> {
   const housePub = await deps.identity.xOnlyPublicKey()
   const playerPub = toXOnly(hex.decode(playerPubkeyHex))
@@ -263,6 +275,7 @@ async function buildGame(
     oddsLo: odds?.oddsLo,
     emulatorPubkey: arkadeForfeit?.emulatorPubkey,
     playerForfeitPkScript: arkadeForfeit?.playerForfeitPkScript,
+    housePayoutPkScript: arkadeForfeit?.housePayoutPkScript,
   }
 }
 
@@ -310,6 +323,7 @@ function rehydrateArkadeForfeit(state: TrustlessState):
   | {
       emulatorPubkey: Uint8Array
       playerForfeitPkScript: Uint8Array
+      housePayoutPkScript?: Uint8Array
       playerEscrowValue: bigint
       houseEscrowValue: bigint
       pot: bigint
@@ -321,6 +335,9 @@ function rehydrateArkadeForfeit(state: TrustlessState):
   return {
     emulatorPubkey: hex.decode(state.arkadeForfeit.emulatorPubkeyHex),
     playerForfeitPkScript: hex.decode(state.arkadeForfeit.playerForfeitPkScriptHex),
+    housePayoutPkScript: state.arkadeForfeit.housePayoutPkScriptHex
+      ? hex.decode(state.arkadeForfeit.housePayoutPkScriptHex)
+      : undefined,
     playerEscrowValue,
     houseEscrowValue,
     pot: playerEscrowValue + houseEscrowValue,
@@ -434,19 +451,29 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   const setupExpiration = now + 600
   const penaltyTimelockSeconds = DEFAULT_PENALTY_TIMELOCK_SECONDS
 
-  // Probe the emulator: if configured (EMULATOR_URL env), wire the 5-leaf
-  // arkade-script escrow with a covenant-bound playerForfeit leaf. The
-  // player's payout pkScript is derived from req.playerChangeAddress (an
-  // Ark address) and pinned into both escrow taptrees. If the emulator
-  // isn't configured or is unreachable, fall back to the legacy 4-leaf
-  // escrow with the CSV `playerPenalty` as the only forfeit path.
+  // Probe the emulator: if configured (EMULATOR_URL env), mint with the
+  // arkade-script escrow. The taptree grows two new leaves on top of
+  // the legacy 4:
+  //   5. playerForfeit  — R1 escape (CLTV + atomic-sweep covenant)
+  //   6. playerWinCovenant — server settles player wins, no client sig
+  //   7. creatorWinCovenant — server settles house wins, no client sig
+  // Both payout pkScripts (player + house) are pinned at /play time
+  // and persisted in TrustlessState so /commit and recovery rebuild the
+  // exact same taproot.
   const emulator = await loadEmulatorConfig()
   const playerForfeitPkScript = emulator
     ? ArkAddress.decode(req.playerChangeAddress).pkScript
     : undefined
+  const housePayoutPkScript = emulator
+    ? ArkAddress.decode(await deps.wallet.getAddress()).pkScript
+    : undefined
   const arkadeForfeit =
-    emulator && playerForfeitPkScript
-      ? { emulatorPubkey: emulator.signerPubkey, playerForfeitPkScript }
+    emulator && playerForfeitPkScript && housePayoutPkScript
+      ? {
+          emulatorPubkey: emulator.signerPubkey,
+          playerForfeitPkScript,
+          housePayoutPkScript,
+        }
       : undefined
 
   const game = await buildGame(
@@ -548,11 +575,12 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     // recovery rebuilds derive the EXACT same escrow taproot address. Any
     // drift (e.g. emulator pubkey rotated, player payout address looked up
     // freshly) would produce a different address and break spends.
-    ...(arkadeForfeit && playerForfeitPkScript
+    ...(arkadeForfeit && playerForfeitPkScript && housePayoutPkScript
       ? {
           arkadeForfeit: {
             emulatorPubkeyHex: hex.encode(arkadeForfeit.emulatorPubkey),
             playerForfeitPkScriptHex: hex.encode(playerForfeitPkScript),
+            housePayoutPkScriptHex: hex.encode(housePayoutPkScript),
             playerEscrowValue: req.tier,
             houseEscrowValue: houseStake,
           },
@@ -650,6 +678,7 @@ async function buildCommitContext(
       ? {
           emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
           playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+          housePayoutPkScript: arkadeForfeitPin.housePayoutPkScript,
         }
       : undefined,
   )
@@ -694,15 +723,30 @@ async function buildCommitContext(
 }
 
 /**
- * Build the commit result from a context, WITHOUT side effects. On a house win
- * it also returns the unsigned sweep tx — the caller submits it on a fresh
- * resolve, or discards it and supplies the persisted txid on a replay. On a
- * player win the sweep PSBTs are embedded for the client to sign + submit.
+ * Build the commit result from a context, WITHOUT side effects.
+ *
+ * Path selection:
+ *  - **House win**: server-side sweep (always). Returned as
+ *    `houseSweepTx` for the caller to submit.
+ *  - **Player win, covenant-win available**: server-side sweep via
+ *    `buildCovenantSweepTransaction`, posted to the emulator's /v1/tx.
+ *    Returned as `playerCovenantSweepTx` so the caller can drive it.
+ *    NO client signature needed; the leaf is `[server, emulator_tweaked]`.
+ *  - **Player win, no covenant**: legacy path — return the PSBTs for
+ *    the client to sign + submit.
+ *
+ * Covenant-win is available when both escrows were minted with
+ * `housePayoutPkScript` set (which requires EMULATOR_URL at /play
+ * time AND the new lib version).
  */
 function buildCommitResult(
   ctx: CommitContext,
   deps: AppDeps,
-): { result: TrustlessCommitResult; houseSweepTx?: BuiltOffchainTx } {
+): {
+  result: TrustlessCommitResult
+  houseSweepTx?: BuiltOffchainTx
+  playerCovenantSweepTx?: BuiltOffchainTx
+} {
   if (ctx.winner === 'house') {
     const houseSweepTx = buildSweepTransaction(deps.arkInfo, ctx.networkHrp, {
       winner: 'house', escrows: ctx.escrows,
@@ -715,8 +759,41 @@ function buildCommitResult(
     }
     return { result, houseSweepTx }
   }
-  // Player won — the playerWin leaf needs the player's key, so the server builds
-  // the sweep but the CLIENT signs + submits it. Return the PSBTs.
+
+  // Player won.
+  const haveCovenantLeaves = ctx.escrows.every(
+    (e) => e.script.playerWinCovenantArkadeScript !== undefined,
+  )
+  // Player-win path prefers the covenant sweep: server submits to the
+  // emulator + arkd directly, no client interaction needed. Falls back
+  // to the legacy "return PSBTs for the client to sign" when the
+  // escrows weren't minted with housePayoutPkScript (or the rake is
+  // non-zero — the covenant binds a single full-pot output, so rake-
+  // taking is incompatible with this path; we still serve those games
+  // via the legacy leaves).
+  if (haveCovenantLeaves && ctx.rake === 0) {
+    const covenantSweep = buildCovenantSweepTransaction(deps.arkInfo, ctx.networkHrp, {
+      winner: 'player',
+      escrows: ctx.escrows as unknown as CovenantSweepEscrow[],
+      payoutAddress: ctx.playerPayoutAddress,
+      potAmount: BigInt(ctx.pot),
+      bothSecrets: [
+        new Uint8Array(Buffer.from(ctx.houseSecretHex, 'hex')),
+        new Uint8Array(Buffer.from(ctx.playerSecretHex, 'hex')),
+      ],
+    })
+    const result: TrustlessCommitResult = {
+      winner: 'player', houseSecret: ctx.houseSecretHex, playerSecret: ctx.playerSecretHex,
+      payout: ctx.pot, rake: 0, proof: ctx.proof,
+      roll: ctx.roll, oddsN: ctx.odds?.oddsN, oddsLo: ctx.odds?.oddsLo, oddsTarget: ctx.odds?.oddsTarget,
+      // No `sweep` field — the server settles via the emulator and
+      // returns the resulting txid. The client doesn't need to do
+      // anything.
+    }
+    return { result, playerCovenantSweepTx: covenantSweep }
+  }
+
+  // Legacy: server builds the playerWin sweep but the CLIENT signs + submits.
   const sweep = buildSweepTransaction(deps.arkInfo, ctx.networkHrp, {
     winner: 'player', escrows: ctx.escrows,
     payoutAddress: ctx.playerPayoutAddress, houseAddress: ctx.houseAddress, rake: ctx.rake,
@@ -777,7 +854,7 @@ export async function handleTrustlessCommit(
     }
     const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
     const ctx = await buildCommitContext(game, state, req.playerSecretHex, req.playerEscrow, deps)
-    const { result, houseSweepTx } = buildCommitResult(ctx, deps)
+    const { result, houseSweepTx, playerCovenantSweepTx } = buildCommitResult(ctx, deps)
 
     let resolveTxid: string | undefined
     if (houseSweepTx) {
@@ -785,6 +862,40 @@ export async function handleTrustlessCommit(
       resolveTxid = await submitOffchain(deps, houseSweepTx.arkTx, houseSweepTx.checkpoints, [0, 1], {
         inputs: [0, 1], data: [ctx.houseSecret, ctx.playerSecret],
       })
+      result.txid = resolveTxid
+    } else if (playerCovenantSweepTx) {
+      // Player won AND covenant-win leaves are available. Server settles
+      // via the emulator: the leaf is [server, emulator_tweaked], so we
+      // sign + post to /v1/tx. Emulator validates the covenant +
+      // co-signs + forwards to arkd. No client signature needed.
+      const cfg = await loadEmulatorConfig()
+      if (!cfg) {
+        // Should never happen — covenant leaves only exist when emulator
+        // was probed OK at /play. Defensive throw rather than silent
+        // fallthrough; the client will retry.
+        throw new Error('Covenant-win path requires emulator URL but loadEmulatorConfig returned null')
+      }
+      const signed = await deps.identity.sign(playerCovenantSweepTx.arkTx, [0, 1])
+      const emuResp = await fetch(`${cfg.url}/v1/tx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          arkTx: base64.encode(signed.toPSBT()),
+          checkpointTxs: playerCovenantSweepTx.checkpoints.map((c) => base64.encode(c.toPSBT())),
+        }),
+        signal: AbortSignal.timeout(20_000),
+      })
+      if (!emuResp.ok) {
+        throw new Error(`Emulator rejected covenant sweep: ${emuResp.status} ${await emuResp.text()}`)
+      }
+      const emuBody = (await emuResp.json()) as { signedArkTx?: string }
+      if (!emuBody.signedArkTx) {
+        throw new Error('Emulator did not return signedArkTx')
+      }
+      // Extract the txid from the finalized PSBT — the emulator
+      // self-finalizes via arkd, so this is the resolved sweep.
+      const finalTx = Transaction.fromPSBT(base64.decode(emuBody.signedArkTx))
+      resolveTxid = finalTx.id
       result.txid = resolveTxid
     }
 
@@ -850,6 +961,7 @@ export async function handleTrustlessRefund(
       ? {
           emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
           playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+          housePayoutPkScript: arkadeForfeitPin.housePayoutPkScript,
         }
       : undefined,
   )
@@ -923,6 +1035,7 @@ export async function handleTrustlessPenalty(
       ? {
           emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
           playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+          housePayoutPkScript: arkadeForfeitPin.housePayoutPkScript,
         }
       : undefined,
   )
@@ -1035,6 +1148,7 @@ export async function handleTrustlessForfeit(
     {
       emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
       playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+          housePayoutPkScript: arkadeForfeitPin.housePayoutPkScript,
     },
   )
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
@@ -1113,6 +1227,7 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
           ? {
               emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
               playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+          housePayoutPkScript: arkadeForfeitPin.housePayoutPkScript,
             }
           : undefined,
       )

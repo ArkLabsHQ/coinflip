@@ -60,12 +60,15 @@ export {
   buildClaimTransaction,
   buildSweepTransaction,
   buildPenaltyTransaction,
+  buildForfeitClaimTransaction,
   buildRefundTransaction,
   getFinalOutpoint,
   type ClaimArgs,
   type SweepArgs,
   type SweepEscrow,
   type PenaltyArgs,
+  type ForfeitClaimArgs,
+  type ForfeitClaimEscrow,
   type RefundArgs,
   determineWinner,
   generateSecret,
@@ -96,8 +99,7 @@ export {
 // in multiple package node_modules trees.
 export { contractHandlers } from '@arkade-os/sdk'
 
-// Arkade-script forfeit PoC (not wired into the production game — see
-// `arkade-forfeit.ts` module header for status and rationale).
+// Arkade-script forfeit support — see arkade-forfeit.ts module header.
 export {
   ARKADE_OP,
   arkadeScriptHash,
@@ -105,4 +107,7 @@ export {
   buildForfeitArkadeScript,
   buildForfeitLeafSpec,
   type ForfeitLeafSpec,
+  encodeEmulatorWitness,
+  encodeOutputIndexWitness,
+  addEmulatorPacket,
 } from './arkade-forfeit'

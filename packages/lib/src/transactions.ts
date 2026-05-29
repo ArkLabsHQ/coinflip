@@ -24,6 +24,11 @@ import {
 import { TAP_LEAF_VERSION, tapLeafHash } from '@scure/btc-signer/payment.js'
 import { CoinflipSetupScript, CoinflipFinalScript, CoinflipEscrowScript, VARIABLE_ODDS_BASE_LEN } from './script'
 import { Game, VtxoInput } from './types'
+import {
+  addEmulatorPacket,
+  encodeEmulatorWitness,
+  encodeOutputIndexWitness,
+} from './arkade-forfeit'
 
 function assertDefined<T>(value: T | undefined | null, name: string): asserts value is T {
   if (value === undefined || value === null) {
@@ -426,6 +431,106 @@ export function buildPenaltyTransaction(
     serverUnrollScript,
   )
   return { arkTx, checkpoints }
+}
+
+export interface ForfeitClaimEscrow {
+  script: CoinflipEscrowScript
+  txid: string
+  vout: number
+  value: number
+}
+
+export interface ForfeitClaimArgs {
+  /**
+   * Escrows to sweep. Each MUST have been constructed with an
+   * `arkadeForfeit` config — its `playerForfeit()` leaf is what's spent.
+   * The escrow's `forfeitArkadeScript` is also required for the
+   * EmulatorPacket entry.
+   */
+  escrows: ForfeitClaimEscrow[]
+  /**
+   * Player payout. MUST match each escrow's bound `forfeitDestPkScript`
+   * — the arkade covenant checks output.scriptPubKey exactly, so if the
+   * caller mistypes the address or uses a different one than the one
+   * pinned at game-creation time the emulator refuses to sign.
+   */
+  payoutAddress: string
+  /**
+   * Per-escrow payout amount, in the same order as `escrows`. Each MUST
+   * match that escrow's bound `forfeitDestValue` (covenant uses `EQUAL`).
+   */
+  payoutAmounts: bigint[]
+}
+
+/**
+ * Build the player's R1 forfeit claim through the arkade-script
+ * `playerForfeit` leaf on each escrow. Produces one Ark transaction with
+ * one input per escrow (each spending via that escrow's playerForfeit) and
+ * one output per escrow paying the player. An EmulatorPacket reveals each
+ * input's arkade script (with witness = output_index) so the emulator can
+ * validate the covenant before co-signing.
+ *
+ * Output layout:
+ *   output[i]   pays escrows[i].forfeitDestPkScript  (== payoutAddress)
+ *               for escrows[i].forfeitDestValue      (== payoutAmounts[i])
+ *
+ * After the emulator co-signs (POST /v1/tx), the player + arkd sign the
+ * remaining slots (the tapscript leaf is 3-of-3 [player, server,
+ * emulator_tweaked]). The flow mirrors the arkade-htlc.test.ts refund
+ * path on the arkade-script-final branch.
+ */
+export function buildForfeitClaimTransaction(
+  arkInfo: ArkInfo,
+  networkHrp: string,
+  args: ForfeitClaimArgs,
+): BuiltOffchainTx & { emulatorEntries: { vin: number; script: Uint8Array; witness: Uint8Array }[] } {
+  void networkHrp
+  if (args.escrows.length === 0) {
+    throw new Error('buildForfeitClaimTransaction: at least one escrow required')
+  }
+  if (args.escrows.length !== args.payoutAmounts.length) {
+    throw new Error('buildForfeitClaimTransaction: escrows.length must match payoutAmounts.length')
+  }
+  for (let i = 0; i < args.escrows.length; i++) {
+    const e = args.escrows[i]
+    if (!e.script.forfeitArkadeScript) {
+      throw new Error(
+        `buildForfeitClaimTransaction: escrow #${i} has no arkadeForfeit config — call escrowScript with one or fall back to buildPenaltyTransaction`,
+      )
+    }
+  }
+
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const inputs: ArkTxInput[] = args.escrows.map((e) => ({
+    txid: e.txid,
+    vout: e.vout,
+    value: e.value,
+    tapLeafScript: e.script.playerForfeit(),
+    tapTree: e.script.encode(),
+  }))
+
+  const payoutAddr = ArkAddress.decode(args.payoutAddress)
+  const outputs = args.payoutAmounts.map((amount) => ({
+    script: payoutAddr.pkScript,
+    amount,
+  }))
+
+  const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
+
+  // EmulatorPacket: per-input, reveals the arkade script + witness arg
+  // (output_index). For our layout output_index == input_index by design
+  // (output[i] is the one escrows[i]'s covenant inspects).
+  const emulatorEntries = args.escrows.map((e, i) => ({
+    vin: i,
+    script: e.script.forfeitArkadeScript!,
+    witness: encodeEmulatorWitness([encodeOutputIndexWitness(i)]),
+  }))
+  addEmulatorPacket(arkTx, emulatorEntries)
+
+  return { arkTx, checkpoints, emulatorEntries }
 }
 
 export interface RefundArgs {

@@ -61,6 +61,13 @@
 import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { OP } from '@scure/btc-signer'
+import {
+  EmulatorPacket,
+  Extension,
+  P2A,
+  Transaction,
+  type ExtensionPacket,
+} from '@arkade-os/sdk'
 
 /**
  * Arkade-extension opcodes used by the forfeit covenant. Sourced from
@@ -215,4 +222,114 @@ export function buildForfeitLeafSpec(args: {
     emulatorPubkey: args.emulatorPubkey,
     emulatorTweakedPubkey: computeArkadeScriptPublicKey(args.emulatorPubkey, arkadeScript),
   }
+}
+
+/**
+ * Serialize a witness stack (array of byte items) the way the emulator
+ * packet expects: `varint(num_items) + varint(item_len) + item_bytes` per
+ * item — i.e. `psbt.WriteTxWitness` / `txutils.ReadTxWitness` format.
+ *
+ * For our forfeit covenant the witness has exactly one item: the output
+ * index. That index is a Bitcoin scriptnum, so:
+ *   - output_index = 0  → empty bytes (encodes as OP_0 in script numeric ctx)
+ *   - output_index = N  → minimal LE bytes for N
+ */
+export function encodeEmulatorWitness(stack: Uint8Array[]): Uint8Array {
+  const out: number[] = []
+  // num_items (compactSize)
+  out.push(...encodeCompactSize(stack.length))
+  for (const item of stack) {
+    out.push(...encodeCompactSize(item.length))
+    for (const b of item) out.push(b)
+  }
+  return new Uint8Array(out)
+}
+
+function encodeCompactSize(n: number): number[] {
+  if (n < 0) throw new Error('compactSize: negative')
+  if (n <= 0xfc) return [n]
+  if (n <= 0xffff) return [0xfd, n & 0xff, (n >> 8) & 0xff]
+  if (n <= 0xffffffff) return [0xfe, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff]
+  throw new Error('compactSize: too large')
+}
+
+/**
+ * Encode a non-negative integer as a Bitcoin script-numeric (CScriptNum)
+ * byte string. Used for the output_index witness arg the forfeit covenant
+ * reads via its leading `DUP INSPECTOUTPUTSCRIPTPUBKEY` opcodes.
+ *
+ *   0     → empty
+ *   1..N  → minimal LE with optional 0x00 sign-pad
+ */
+export function encodeOutputIndexWitness(idx: number): Uint8Array {
+  if (!Number.isInteger(idx) || idx < 0) {
+    throw new Error('encodeOutputIndexWitness: expected non-negative integer')
+  }
+  if (idx === 0) return new Uint8Array(0)
+  const bytes: number[] = []
+  let n = idx
+  while (n > 0) {
+    bytes.push(n & 0xff)
+    n >>>= 8
+  }
+  if (bytes[bytes.length - 1] & 0x80) bytes.push(0x00)
+  return new Uint8Array(bytes)
+}
+
+/**
+ * Attaches an EmulatorPacket to the Ark transaction's output set, in place.
+ *
+ * Mirrors `addEmulatorPacket` from the arkade-script-final test utilities
+ * (which is test code, not exported). If the tx already has an Ark
+ * extension OP_RETURN, the emulator packet is merged into it; otherwise a
+ * new extension output is inserted, before the P2A anchor if present.
+ *
+ * `entries` are per-input (vin = input index): each carries the arkade
+ * script the emulator should execute on that input and the witness blob
+ * the script reads at run-time.
+ */
+export function addEmulatorPacket(
+  tx: Transaction,
+  entries: { vin: number; script: Uint8Array; witness?: Uint8Array }[],
+): void {
+  const packet = EmulatorPacket.create(
+    entries.map((e) => ({
+      vin: e.vin,
+      script: e.script,
+      witness: e.witness ?? new Uint8Array(0),
+    })),
+  )
+
+  for (let i = 0; i < tx.outputsLength; i++) {
+    const out = tx.getOutput(i)
+    if (!out?.script) continue
+    if (!Extension.isExtension(out.script)) continue
+    const existing = Extension.fromBytes(out.script)
+    const merged = Extension.create([
+      ...existing.getPackets(),
+      packet as unknown as ExtensionPacket,
+    ])
+    tx.updateOutput(i, { script: merged.serialize(), amount: 0n })
+    return
+  }
+
+  const ext = Extension.create([packet as unknown as ExtensionPacket])
+  const newOut = ext.txOut()
+
+  const lastIdx = tx.outputsLength - 1
+  const lastOut = lastIdx >= 0 ? tx.getOutput(lastIdx) : null
+  const anchorScript = P2A.script
+  const isAnchorLast =
+    lastOut?.script &&
+    lastOut.script.length === anchorScript.length &&
+    lastOut.script.every((b, j) => b === anchorScript[j])
+
+  if (isAnchorLast && lastOut) {
+    // Overwrite the last slot with the extension and re-append the anchor.
+    tx.updateOutput(lastIdx, { script: newOut.script, amount: newOut.amount })
+    tx.addOutput({ script: lastOut.script, amount: lastOut.amount ?? 0n })
+    return
+  }
+
+  tx.addOutput({ script: newOut.script, amount: newOut.amount })
 }

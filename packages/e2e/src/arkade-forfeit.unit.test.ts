@@ -19,6 +19,8 @@ const {
   computeArkadeScriptPublicKey,
   buildForfeitArkadeScript,
   buildForfeitLeafSpec,
+  encodeEmulatorWitness,
+  encodeOutputIndexWitness,
 } = require('arkade-coinflip')
 
 // Test vector: a fixed P2TR pkScript (v1 segwit, 32-byte witness program).
@@ -109,5 +111,45 @@ describe('arkade-forfeit: tagged hash + key tweak', () => {
     expect(spec.emulatorTweakedPubkey).toEqual(
       computeArkadeScriptPublicKey(emulatorPubkey, spec.arkadeScript),
     )
+  })
+})
+
+describe('arkade-forfeit: witness encoders', () => {
+  it('encodeOutputIndexWitness(0) returns empty bytes (OP_0 in numeric ctx)', () => {
+    const w = encodeOutputIndexWitness(0)
+    expect(w.length).toBe(0)
+  })
+
+  it('encodeOutputIndexWitness encodes 1..127 as minimal LE', () => {
+    expect(Array.from(encodeOutputIndexWitness(1))).toEqual([0x01])
+    expect(Array.from(encodeOutputIndexWitness(15))).toEqual([0x0f])
+    expect(Array.from(encodeOutputIndexWitness(127))).toEqual([0x7f])
+  })
+
+  it('encodeOutputIndexWitness pads when high bit of MSB is set', () => {
+    // 128 = 0x80 → needs sign-pad to stay positive
+    expect(Array.from(encodeOutputIndexWitness(128))).toEqual([0x80, 0x00])
+    expect(Array.from(encodeOutputIndexWitness(255))).toEqual([0xff, 0x00])
+  })
+
+  it('encodeOutputIndexWitness rejects negative + non-integer', () => {
+    expect(() => encodeOutputIndexWitness(-1)).toThrow(/non-negative/)
+    expect(() => encodeOutputIndexWitness(1.5)).toThrow(/non-negative/)
+  })
+
+  it('encodeEmulatorWitness: empty stack → varint(0)', () => {
+    const w = encodeEmulatorWitness([])
+    expect(Array.from(w)).toEqual([0x00])
+  })
+
+  it('encodeEmulatorWitness: single empty item → [0x01, 0x00]', () => {
+    // 1 item, item length = 0 → no payload bytes
+    const w = encodeEmulatorWitness([encodeOutputIndexWitness(0)])
+    expect(Array.from(w)).toEqual([0x01, 0x00])
+  })
+
+  it('encodeEmulatorWitness: single 1-byte item → [num_items=1, item_len=1, item_byte]', () => {
+    const w = encodeEmulatorWitness([encodeOutputIndexWitness(1)])
+    expect(Array.from(w)).toEqual([0x01, 0x01, 0x01])
   })
 })

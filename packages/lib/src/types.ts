@@ -50,6 +50,12 @@ export interface Game {
   /** House stake in sats (computed by the server). Pinned into escrow covenants. */
   houseStake?: number
   /**
+   * CSV exit_delay (seconds) for the unilateral exit-mirror leaves on
+   * `CoinflipEscrowScript`. Matches the operator's `unilateralExitDelay`
+   * from `arkInfo` and pins the timelock each user spends alone under.
+   */
+  exitDelay?: number
+  /**
    * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the escrow win
    * condition is `(oddsLo ?? 0) <= roll < oddsTarget` over `oddsN` outcomes
    * (probability `(oddsTarget - (oddsLo ?? 0))/oddsN`); unset → the 50/50 coin.

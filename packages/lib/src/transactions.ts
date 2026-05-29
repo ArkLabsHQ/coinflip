@@ -113,6 +113,7 @@ function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScrip
   assertDefined(game.housePayoutPkScript, 'housePayoutPkScript')
   assertDefined(game.playerStake, 'playerStake')
   assertDefined(game.houseStake, 'houseStake')
+  assertDefined(game.exitDelay, 'exitDelay')
   return new CoinflipEscrowScript({
     creatorPubkey: game.creator.pubkey,
     playerPubkey: game.player.pubkey,
@@ -121,6 +122,7 @@ function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScrip
     playerHash: game.player.hash,
     finalExpiration: BigInt(game.finalExpiration),
     refundPubkey,
+    exitDelay: BigInt(game.exitDelay),
     oddsN: game.oddsN,
     oddsTarget: game.oddsTarget,
     oddsLo: game.oddsLo,

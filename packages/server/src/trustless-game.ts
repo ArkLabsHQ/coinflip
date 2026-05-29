@@ -154,6 +154,8 @@ interface TrustlessState {
     playerStake: number
     /** House stake in sats. */
     houseStake: number
+    /** CSV exit_delay (seconds) baked into the exit-mirror leaves. */
+    exitDelay: number
   }
 }
 
@@ -189,6 +191,7 @@ async function buildGame(
     housePayoutPkScript: Uint8Array
     playerStake: number
     houseStake: number
+    exitDelay: number
   },
 ): Promise<Game> {
   const housePub = await deps.identity.xOnlyPublicKey()
@@ -210,6 +213,7 @@ async function buildGame(
     housePayoutPkScript: arkadeForfeit.housePayoutPkScript,
     playerStake: arkadeForfeit.playerStake,
     houseStake: arkadeForfeit.houseStake,
+    exitDelay: arkadeForfeit.exitDelay,
   }
 }
 
@@ -260,6 +264,7 @@ function rehydrateArkadeForfeit(state: TrustlessState): {
   housePayoutPkScript: Uint8Array
   playerStake: number
   houseStake: number
+  exitDelay: number
 } {
   return {
     emulatorPubkey: hex.decode(state.arkadeForfeit.emulatorPubkeyHex),
@@ -267,6 +272,7 @@ function rehydrateArkadeForfeit(state: TrustlessState): {
     housePayoutPkScript: hex.decode(state.arkadeForfeit.housePayoutPkScriptHex),
     playerStake: state.arkadeForfeit.playerStake,
     houseStake: state.arkadeForfeit.houseStake,
+    exitDelay: state.arkadeForfeit.exitDelay,
   }
 }
 
@@ -377,12 +383,20 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
       'set EMULATOR_URL and restart the server.',
     )
   }
+  // arkd's configured unilateral-exit delay (BIP68 seconds). Operator-
+  // wide constant, surfaced via /v1/info. Used as the CSV gate on every
+  // unilateral exit-mirror leaf so the user can recover funds on-chain
+  // if arkd censors. Round up to a multiple of 512 if needed — BIP68
+  // silently floors non-multiples.
+  const rawExitDelay = Number(deps.arkInfo.unilateralExitDelay ?? 86400)
+  const exitDelay = Math.max(512, Math.ceil(rawExitDelay / 512) * 512)
   const arkadeForfeit = {
     emulatorPubkey: emulator.signerPubkey,
     playerPayoutPkScript: ArkAddress.decode(req.playerChangeAddress).pkScript,
     housePayoutPkScript: ArkAddress.decode(await deps.wallet.getAddress()).pkScript,
     playerStake: req.tier,
     houseStake,
+    exitDelay,
   }
 
   const game = await buildGame(
@@ -471,6 +485,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
       housePayoutPkScriptHex: hex.encode(arkadeForfeit.housePayoutPkScript),
       playerStake: arkadeForfeit.playerStake,
       houseStake: arkadeForfeit.houseStake,
+      exitDelay: arkadeForfeit.exitDelay,
     },
   }
   try {

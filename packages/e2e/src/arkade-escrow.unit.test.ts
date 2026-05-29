@@ -24,6 +24,7 @@ const EMULATOR_PK = newKey(0x40)
 const CREATOR_HASH = new Uint8Array(32).fill(0xaa)
 const PLAYER_HASH = new Uint8Array(32).fill(0xbb)
 const FINAL_EXP = 2_000_000_000n
+const EXIT_DELAY = 86_528n // 24h-ish, multiple of 512
 const PLAYER_PAYOUT = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x77)])
 const HOUSE_PAYOUT = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x88)])
 const PLAYER_STAKE = 50_000n
@@ -38,6 +39,7 @@ function makeEscrow(refundPubkey: Uint8Array = PLAYER_PK) {
     playerHash: PLAYER_HASH,
     finalExpiration: FINAL_EXP,
     refundPubkey,
+    exitDelay: EXIT_DELAY,
     arkadeForfeit: {
       emulatorPubkey: EMULATOR_PK,
       playerPayoutPkScript: PLAYER_PAYOUT,
@@ -48,13 +50,40 @@ function makeEscrow(refundPubkey: Uint8Array = PLAYER_PK) {
   })
 }
 
-describe('CoinflipEscrowScript: 4 leaves, all covenant-bound', () => {
-  it('exposes the four required leaf accessors', () => {
+describe('CoinflipEscrowScript: 8 leaves — collab + unilateral mirrors', () => {
+  it('exposes all eight leaf accessors', () => {
     const s = makeEscrow()
+    // Collab
     s.playerWinCovenant()
     s.creatorWinCovenant()
     s.playerForfeit()
     s.refund()
+    // Unilateral mirrors
+    s.playerWinExit()
+    s.creatorWinExit()
+    s.playerForfeitExit()
+    s.refundExit()
+  })
+
+  it('exit leaves are exit-bucket closures (CSV-gated, single user)', () => {
+    const s = makeEscrow()
+    const pWinExit = decodeTapscript(hex.decode(s.playerWinExitScriptHex))
+    const cWinExit = decodeTapscript(hex.decode(s.creatorWinExitScriptHex))
+    const forfeitExit = decodeTapscript(hex.decode(s.playerForfeitExitScriptHex))
+    const refundExit = decodeTapscript(hex.decode(s.refundExitScriptHex))
+    expect(pWinExit.type).toBe('condition-csv-multisig')
+    expect(cWinExit.type).toBe('condition-csv-multisig')
+    expect(forfeitExit.type).toBe('condition-csv-multisig')
+    expect(refundExit.type).toBe('csv-multisig')
+    // Each exit leaf has exactly ONE signer (the relevant user).
+    expect(pWinExit.params.pubkeys).toHaveLength(1)
+    expect(cWinExit.params.pubkeys).toHaveLength(1)
+    expect(forfeitExit.params.pubkeys).toHaveLength(1)
+    expect(refundExit.params.pubkeys).toHaveLength(1)
+    expect(hex.encode(pWinExit.params.pubkeys[0])).toBe(hex.encode(PLAYER_PK))
+    expect(hex.encode(cWinExit.params.pubkeys[0])).toBe(hex.encode(CREATOR_PK))
+    expect(hex.encode(forfeitExit.params.pubkeys[0])).toBe(hex.encode(PLAYER_PK))
+    expect(hex.encode(refundExit.params.pubkeys[0])).toBe(hex.encode(PLAYER_PK))
   })
 
   it('all three covenant arkade scripts are defined', () => {

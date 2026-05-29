@@ -37,23 +37,43 @@ double-charge).
 ## 2. The escrow primitive
 
 Each party funds a **different** escrow address from the same
-`CoinflipEscrowScript`. Four leaves, all required, all covenant-bound
-where the spend resolves a payout. The emulator is a hard dependency.
+`CoinflipEscrowScript`. Eight leaves: every collab path (arkd cosigns)
+is mirrored by a CSV-gated unilateral exit so funds are never
+strandable by arkd censorship.
 
-| Leaf | Signers | Predicate | Timelock | Covenant |
-|------|---------|-----------|----------|----------|
-| `playerWinCovenant` | arkd + emulator-tweaked | both secrets, roll **∈** `[lo,target)` | none | output[0] = player payout, value = pot, other-input = matching escrow stake |
-| `creatorWinCovenant` | arkd + emulator-tweaked | both secrets, roll **∉** `[lo,target)` | none | output[0] = house payout, value = pot, other-input = matching escrow stake |
-| `playerForfeit` | player + arkd + emulator-tweaked | — | CLTV @ `finalExpiration` | output[0] = player payout, value = pot, other-input = matching escrow stake |
-| `refund` | **funder** + arkd | — | CLTV @ `finalExpiration` | — (legacy) |
+**Collab (execution bucket; fires during the game window):**
 
-Each covenant uses `OP_INSPECTINPUTVALUE` to verify the OTHER escrow's
-stake is in the spending tx — atomic-sweep. Neither escrow is spendable
-alone via the covenant leaves.
+| Leaf | Signers | Predicate | Timelock |
+|------|---------|-----------|----------|
+| `playerWinCovenant` | arkd + emu | both secrets, roll **∈** `[lo,target)` | — |
+| `creatorWinCovenant` | arkd + emu | both secrets, roll **∉** `[lo,target)` | — |
+| `playerForfeit` | player + arkd + emu | — | CLTV @ `finalExpiration` |
+| `refund` | **funder** + arkd | — | CLTV @ `finalExpiration` |
 
-The win leaves carry NO winner key — the server signs + emulator
-cosigns + arkd cosigns. **Players never sign anything post-/commit**.
-R1 forfeit fires after CLTV when the server stalled.
+All three collab payout leaves carry an atomic-sweep arkade-script
+covenant: output[0] pays the bound destination (player/house) for the
+full pot, plus a cross-input value check requiring the OTHER escrow's
+stake — so neither escrow is spendable alone.
+
+**Unilateral exits (exit bucket; user alone after `exit_delay`):**
+
+| Leaf | Signer | Predicate | Timelock |
+|------|--------|-----------|----------|
+| `playerWinExit` | player | both secrets, roll **∈** `[lo,target)` | CSV `exit_delay` |
+| `creatorWinExit` | creator | both secrets, roll **∉** `[lo,target)` | CSV `exit_delay` |
+| `playerForfeitExit` | player | HASH160(playerSecret) | CSV `exit_delay` |
+| `refundExit` | funder | — | CSV `exit_delay` |
+
+Exit leaves drop the covenant (user signs, picks their own destination)
+and the server signature. `exit_delay` comes from
+`arkInfo.unilateralExitDelay` (typically ≫ the game window), so exits
+naturally fire only when collab paths have stalled AND arkd is
+censoring.
+
+The win covenants carry NO winner key — server signs + emulator
+cosigns + arkd cosigns. **Players never sign anything post-/commit**
+on the happy path. R1 forfeit fires after CLTV when the server
+stalls; `playerForfeitExit` fires after CSV when arkd ALSO censors.
 
 The two escrows share the win leaves (winner sweeps **both** VTXOs) but each
 `refund` leaf is scoped to **its own funder** (`refundPubkey`, script.ts:386).

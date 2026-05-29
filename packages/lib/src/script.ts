@@ -22,7 +22,9 @@ import { hex } from '@scure/base'
 import {
   VtxoScript,
   ConditionMultisigTapscript,
+  ConditionCSVMultisigTapscript,
   CLTVMultisigTapscript,
+  CSVMultisigTapscript,
   TapLeafScript,
   arkade,
 } from '@arkade-os/sdk'
@@ -363,12 +365,16 @@ export interface CoinflipEscrowOptions {
   finalExpiration: bigint
   /**
    * The FUNDER's pubkey: only this party (+ server) may refund after
-   * the timeout. Set to `playerPubkey` for the player's escrow and
-   * `creatorPubkey` for the house's. Per-funder refund is the
-   * abort-theft fix: the house's refund leaf cannot touch the player's
-   * escrow.
+   * the timeout. Per-funder refund is the abort-theft fix.
    */
   refundPubkey: Uint8Array
+  /**
+   * Relative CSV timelock (seconds, BIP68) for the unilateral exit
+   * mirrors. Every collab leaf has a CSV-gated sibling so the user is
+   * never stranded by arkd censorship. Typically matches arkd's
+   * `unilateralExitDelay`. MUST be a multiple of 512 and ≥ 512.
+   */
+  exitDelay: bigint
   /**
    * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the
    * win condition is `oddsLo <= roll < oddsTarget` over `oddsN`
@@ -382,35 +388,40 @@ export interface CoinflipEscrowOptions {
 }
 
 /**
- * Per-party coinflip escrow. Four leaves, all covenant-bound where the
- * spend resolves a payout:
+ * Per-party coinflip escrow. Eight leaves — each collab path (arkd-
+ * cosigned) is mirrored by a CSV-gated unilateral path so the user is
+ * never stranded by arkd censorship.
  *
- *   1. playerWinCovenant  — Condition[player wins] + ConditionMultisig[
- *                           server, emulator_tweaked] + atomic-sweep
- *                           covenant (output → player payout, value = pot,
- *                           other input value = matching escrow stake).
- *                           Server settles, no client signature needed.
- *   2. creatorWinCovenant — Symmetric for a house win, output bound to
- *                           house payout.
- *   3. playerForfeit      — CLTVMultisig[player, server, emulator_tweaked]
- *                           + atomic-sweep covenant (output → player
- *                           payout). R1 safety: after `finalExpiration`
- *                           the player sweeps both stakes with only their
- *                           own key.
- *   4. refund             — CLTVMultisig[refundPubkey(funder), server].
- *                           Pre-reveal abandonment: each funder reclaims
- *                           ONLY their own escrow.
+ * Collab (execution bucket; arkd cosigns, fires within game window):
+ *   1. playerWinCovenant  — ConditionMultisig[server, emu] + player-wins
+ *                           predicate + atomic-sweep covenant → player.
+ *   2. creatorWinCovenant — Symmetric → house.
+ *   3. playerForfeit      — CLTVMultisig[player, server, emu] +
+ *                           atomic-sweep covenant → player. R1.
+ *   4. refund             — CLTVMultisig[funder, server].
+ *                           Per-party reclaim post-finalExpiration.
  *
- * The win leaves are mutually exclusive (the condition determines which
- * fires). `playerForfeit` is only reachable past CLTV — by then any
- * honest-server resolve would have already spent the escrow. `refund`
- * lets each side reclaim their own stake if neither party ever reveals.
+ * Unilateral exits (exit bucket; user signs alone after `exitDelay`):
+ *   5. playerWinExit       — ConditionCSVMultisig[player] + player-wins.
+ *   6. creatorWinExit      — ConditionCSVMultisig[creator] + house-wins.
+ *   7. playerForfeitExit   — ConditionCSVMultisig[player] +
+ *                            hash160(playerSecret). R1 under censorship.
+ *   8. refundExit          — CSVMultisig[funder]. Censorship reclaim.
+ *
+ * Exit leaves drop the covenant (the user signs, picks their own
+ * destination) and the server signature. CSV starts when the escrow
+ * VTXO is on-chain checkpointed; in practice `exitDelay` ≫ game window,
+ * so the exits naturally fire only when collab paths have stalled.
  */
 export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
   readonly playerWinCovenantScriptHex: string
   readonly creatorWinCovenantScriptHex: string
   readonly playerForfeitScriptHex: string
   readonly refundScriptHex: string
+  readonly playerWinExitScriptHex: string
+  readonly creatorWinExitScriptHex: string
+  readonly playerForfeitExitScriptHex: string
+  readonly refundExitScriptHex: string
   readonly playerWinCovenantArkadeScript: Uint8Array
   readonly creatorWinCovenantArkadeScript: Uint8Array
   readonly forfeitArkadeScript: Uint8Array
@@ -418,7 +429,7 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
   constructor(readonly options: CoinflipEscrowOptions) {
     const {
       creatorPubkey, playerPubkey, serverPubkey,
-      creatorHash, playerHash, finalExpiration, refundPubkey,
+      creatorHash, playerHash, finalExpiration, refundPubkey, exitDelay,
       oddsN, oddsTarget, oddsLo,
       arkadeForfeit: { emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake },
     } = options
@@ -503,17 +514,49 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
       pubkeys: [refundPubkey, serverPubkey],
     })
 
+    // Unilateral exit mirrors — same predicate as the collab path but
+    // single-user signature + CSV exit_delay. Drops the covenant
+    // (user signs, chooses their own destination) and arkd's cosign
+    // (these are spent on-chain after Ark unroll).
+    const playerWinExitTapscript = ConditionCSVMultisigTapscript.encode({
+      conditionScript: playerWinsCondition,
+      timelock: { value: exitDelay, type: 'seconds' },
+      pubkeys: [playerPubkey],
+    })
+    const creatorWinExitTapscript = ConditionCSVMultisigTapscript.encode({
+      conditionScript: houseWinsCondition,
+      timelock: { value: exitDelay, type: 'seconds' },
+      pubkeys: [creatorPubkey],
+    })
+    const playerForfeitExitTapscript = ConditionCSVMultisigTapscript.encode({
+      conditionScript: buildHashCheckScript(playerHash),
+      timelock: { value: exitDelay, type: 'seconds' },
+      pubkeys: [playerPubkey],
+    })
+    const refundExitTapscript = CSVMultisigTapscript.encode({
+      timelock: { value: exitDelay, type: 'seconds' },
+      pubkeys: [refundPubkey],
+    })
+
     super([
       playerWinCovenantLeaf,
       creatorWinCovenantLeaf,
       forfeitLeaf,
       refundTapscript.script,
+      playerWinExitTapscript.script,
+      creatorWinExitTapscript.script,
+      playerForfeitExitTapscript.script,
+      refundExitTapscript.script,
     ])
 
     this.playerWinCovenantScriptHex = hex.encode(playerWinCovenantScript)
     this.creatorWinCovenantScriptHex = hex.encode(creatorWinCovenantScript)
     this.playerForfeitScriptHex = hex.encode(forfeitLeafScript)
     this.refundScriptHex = hex.encode(refundTapscript.script)
+    this.playerWinExitScriptHex = hex.encode(playerWinExitTapscript.script)
+    this.creatorWinExitScriptHex = hex.encode(creatorWinExitTapscript.script)
+    this.playerForfeitExitScriptHex = hex.encode(playerForfeitExitTapscript.script)
+    this.refundExitScriptHex = hex.encode(refundExitTapscript.script)
     this.playerWinCovenantArkadeScript = playerWinCovenantArkadeScript
     this.creatorWinCovenantArkadeScript = creatorWinCovenantArkadeScript
     this.forfeitArkadeScript = forfeitArkadeScript
@@ -537,5 +580,25 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
   /** Funder reclaims their own stake after `finalExpiration`. */
   refund(): TapLeafScript {
     return this.findLeaf(this.refundScriptHex)
+  }
+
+  /** Unilateral mirror of playerWinCovenant — player alone, CSV exit_delay. */
+  playerWinExit(): TapLeafScript {
+    return this.findLeaf(this.playerWinExitScriptHex)
+  }
+
+  /** Unilateral mirror of creatorWinCovenant — creator alone, CSV exit_delay. */
+  creatorWinExit(): TapLeafScript {
+    return this.findLeaf(this.creatorWinExitScriptHex)
+  }
+
+  /** Unilateral mirror of playerForfeit — player alone with hash check, CSV exit_delay. */
+  playerForfeitExit(): TapLeafScript {
+    return this.findLeaf(this.playerForfeitExitScriptHex)
+  }
+
+  /** Unilateral mirror of refund — funder alone, CSV exit_delay. */
+  refundExit(): TapLeafScript {
+    return this.findLeaf(this.refundExitScriptHex)
   }
 }

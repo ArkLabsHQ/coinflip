@@ -161,7 +161,7 @@ describe('R1 forfeit through arkade-script playerForfeit leaf (HTTP integration)
       gameId: string
       escrowAddress: string
       houseEscrow: { txid: string; vout: number; value: number }
-      penaltyTimelockSeconds: number
+      pot: number
     }>(`/play`, {
       tier: BET,
       playerPubkey: playerPubHex,
@@ -172,7 +172,7 @@ describe('R1 forfeit through arkade-script playerForfeit leaf (HTTP integration)
     expect(play.gameId).toBeTruthy()
     expect(play.escrowAddress).toMatch(/^t?ark/)
     expect(play.houseEscrow.value).toBe(BET)
-    expect(play.penaltyTimelockSeconds).toBe(1024)
+    expect(play.pot).toBe(2 * BET)
 
     // The arkade-script escrow's taproot is HASHED FROM the playerForfeit
     // leaf bytes, which include the player's pkScript. Two distinct players
@@ -266,44 +266,38 @@ describe('R1 forfeit through arkade-script playerForfeit leaf (HTTP integration)
     await arkProvider.finalizeTx(arkTxid, finals)
     const playerEscrow = { txid: arkTxid, vout: 0, value: BET }
 
-    // Forfeit endpoint. The CLTV gate doesn't have to have matured for the
-    // server to BUILD the PSBT — that's an arkd/emulator-side enforcement.
-    // We just verify the wiring works and the covenant binds correctly.
+    // Forfeit endpoint. The CLTV gate doesn't have to have matured for
+    // the server to BUILD the PSBT — that's an arkd/emulator-side
+    // enforcement. We just verify the wiring + atomic-sweep shape.
     const forfeit = await postJson<{
       forfeitPsbt: string
       forfeitCheckpoints: string[]
       forfeitClaimableAt: number
       payoutAddress: string
-      payoutAmounts: [number, number]
+      potAmount: number
+      stakes: [number, number]
     }>(`/game/${play.gameId}/forfeit`, { playerEscrow })
 
     expect(forfeit.forfeitPsbt).toBeTruthy()
     expect(forfeit.payoutAddress).toBe(playerChangeAddress)
-    expect(forfeit.payoutAmounts).toHaveLength(2)
-    // Player's escrow value matches the tier exactly.
-    expect(forfeit.payoutAmounts[1]).toBe(BET)
-    // House escrow value matches the houseStake the server reported at /play.
-    expect(forfeit.payoutAmounts[0]).toBe(play.houseEscrow.value)
+    expect(forfeit.potAmount).toBe(2 * BET)
+    expect(forfeit.stakes[0]).toBe(play.houseEscrow.value)
+    expect(forfeit.stakes[1]).toBe(BET)
+    expect(forfeit.stakes[0] + forfeit.stakes[1]).toBe(forfeit.potAmount)
     // CLTV gate = the persisted finalExpiration (1800s after /play).
     expect(forfeit.forfeitClaimableAt).toBeGreaterThan(Math.floor(Date.now() / 1000))
 
-    // Decode the PSBT; sanity-check it has 2 inputs + 2 user outputs (+ the
-    // emulator-packet OP_RETURN + the P2A anchor).
+    // Atomic-sweep: 2 inputs, 1 user output (full pot) + anchor + ext.
     const arkTx = Transaction.fromPSBT(hex.decode(forfeit.forfeitPsbt))
     expect(arkTx.inputsLength).toBe(2)
-    // outputs: 2 payouts + 1 OP_RETURN extension (emulator packet) + 1 P2A
-    // anchor. Layout may shift if the SDK changes; just assert ≥ 2 (the
-    // payouts are the user-controlled portion).
-    expect(arkTx.outputsLength).toBeGreaterThanOrEqual(2)
+    expect(arkTx.outputsLength).toBeGreaterThanOrEqual(1)
     console.log(
-      `[r1-http] forfeit PSBT ok: ${arkTx.inputsLength}-in/${arkTx.outputsLength}-out, claimableAt=${forfeit.forfeitClaimableAt}, amounts=${JSON.stringify(forfeit.payoutAmounts)}`,
+      `[r1-http] forfeit PSBT ok: ${arkTx.inputsLength}-in/${arkTx.outputsLength}-out, pot=${forfeit.potAmount}, claimableAt=${forfeit.forfeitClaimableAt}`,
     )
   }, 240_000)
 
-  it('forfeit endpoint rejects games minted without arkade-script (4-leaf)', async () => {
+  it('forfeit endpoint 404s on unknown gameId (route wiring smoke)', async () => {
     if (!infraAvailable) return
-    // No clean way to test this over HTTP unless we have a legacy game in
-    // the server's DB, so just exercise the 404 → ensure the route is wired.
     const r = await fetch(`${COINFLIP_API_URL}/game/00000000-0000-0000-0000-000000000000/forfeit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

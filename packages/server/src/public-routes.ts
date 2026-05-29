@@ -4,10 +4,12 @@ import {
   handleTrustlessCommit,
   handleTrustlessRefund,
   handleTrustlessPenalty,
+  handleTrustlessForfeit,
   type TrustlessPlayRequest,
   type TrustlessCommitRequest,
   type TrustlessRefundRequest,
   type TrustlessPenaltyRequest,
+  type TrustlessForfeitRequest,
 } from './trustless-game.js'
 import { HouseBusyError, BetExceedsCapacityError } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
@@ -162,6 +164,38 @@ export function createPublicRoutes(deps: AppDeps): Router {
         res.status(400).json({ error: message })
       } else {
         console.error('Penalty error:', err)
+        res.status(500).json({ error: message })
+      }
+    }
+  })
+
+  // POST /api/game/:id/forfeit — build the unsigned arkade-script forfeit-
+  // claim tx for a game minted with the 5-leaf escrow (EMULATOR_URL was set
+  // at /play time). The playerForfeit leaf is CLTVMultisigTapscript wrapping
+  // an arkade-script covenant — execution bucket, no unilateral exit needed.
+  // Rejected for legacy games (no arkade-script pin); those use /penalty.
+  router.post('/api/game/:id/forfeit', async (req: Request, res: Response) => {
+    try {
+      const body = req.body as TrustlessForfeitRequest
+      if (!body.playerEscrow?.txid) {
+        res.status(400).json({ error: 'Missing required field: playerEscrow' })
+        return
+      }
+      const result = await handleTrustlessForfeit(String(req.params.id), body, deps)
+      res.json(result)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      if (message.includes('not found')) {
+        res.status(404).json({ error: message })
+      } else if (
+        message.includes('resolved') ||
+        message.includes('no player change') ||
+        message.includes('no recorded house escrow') ||
+        message.includes('without arkade-script forfeit')
+      ) {
+        res.status(400).json({ error: message })
+      } else {
+        console.error('Forfeit error:', err)
         res.status(500).json({ error: message })
       }
     }

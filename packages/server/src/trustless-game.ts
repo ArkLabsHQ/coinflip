@@ -27,8 +27,10 @@ import {
   buildSweepTransaction,
   buildRefundTransaction,
   buildPenaltyTransaction,
+  buildForfeitClaimTransaction,
   type Game,
   type SweepEscrow,
+  type ForfeitClaimEscrow,
   type BuiltOffchainTx,
 } from 'arkade-coinflip'
 import {
@@ -46,6 +48,7 @@ import {
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
 import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, BetExceedsCapacityError, KeyedMutex, outpointKey, pickEscrowVtxo, houseVtxoCache } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
+import { loadEmulatorConfig } from './emulator.js'
 import type { GameRow } from './repositories/types.js'
 
 export interface Outpoint { txid: string; vout: number; value: number }
@@ -172,6 +175,24 @@ interface TrustlessState {
    * populate it from `handleTrustlessPlay`.
    */
   penaltyTimelockSeconds?: number
+  /**
+   * Per-game arkade-script forfeit pin. When set, the escrow was minted with
+   * the 5-leaf layout and a `playerForfeit` arkade-script leaf is available.
+   * All three fields are pinned together — the taproot address is hashed
+   * from them, so /commit, /refund, /forfeit and recovery rebuilds MUST use
+   * the exact same values that were used at /play. Hex-encoded to keep the
+   * persisted JSON small and stable.
+   */
+  arkadeForfeit?: {
+    /** Compressed (33-byte) or x-only (32-byte) emulator pubkey, hex. */
+    emulatorPubkeyHex: string
+    /** Player payout P2TR pkScript, hex. */
+    playerForfeitPkScriptHex: string
+    /** Per-escrow value the player's escrow covenant binds (player stake). */
+    playerEscrowValue: number
+    /** Per-escrow value the house's escrow covenant binds (house stake). */
+    houseEscrowValue: number
+  }
 }
 
 /**
@@ -223,6 +244,7 @@ async function buildGame(
   setupExpiration: number,
   penaltyTimelockSeconds: number,
   odds?: { oddsN: number; oddsTarget: number; oddsLo: number },
+  arkadeForfeit?: { emulatorPubkey: Uint8Array; playerForfeitPkScript: Uint8Array },
 ): Promise<Game> {
   const housePub = await deps.identity.xOnlyPublicKey()
   const playerPub = toXOnly(hex.decode(playerPubkeyHex))
@@ -239,6 +261,8 @@ async function buildGame(
     oddsN: odds?.oddsN,
     oddsTarget: odds?.oddsTarget,
     oddsLo: odds?.oddsLo,
+    emulatorPubkey: arkadeForfeit?.emulatorPubkey,
+    playerForfeitPkScript: arkadeForfeit?.playerForfeitPkScript,
   }
 }
 
@@ -273,6 +297,23 @@ function oddsFromState(state: TrustlessState): { oddsN: number; oddsTarget: numb
  * Logs the fallback so a row drift doesn't silently change the derived escrow
  * address. New games always populate this in `handleTrustlessPlay`.
  */
+/**
+ * Read back the persisted arkade-forfeit pin and revive it into a form
+ * `buildGame` accepts. Returns `undefined` for legacy games (no pin) — those
+ * keep using the 4-leaf escrow, matching what was minted at /play.
+ */
+function rehydrateArkadeForfeit(state: TrustlessState):
+  | { emulatorPubkey: Uint8Array; playerForfeitPkScript: Uint8Array; playerEscrowValue: bigint; houseEscrowValue: bigint }
+  | undefined {
+  if (!state.arkadeForfeit) return undefined
+  return {
+    emulatorPubkey: hex.decode(state.arkadeForfeit.emulatorPubkeyHex),
+    playerForfeitPkScript: hex.decode(state.arkadeForfeit.playerForfeitPkScriptHex),
+    playerEscrowValue: BigInt(state.arkadeForfeit.playerEscrowValue),
+    houseEscrowValue: BigInt(state.arkadeForfeit.houseEscrowValue),
+  }
+}
+
 function ensurePenaltyTimelockSeconds(state: TrustlessState, gameId: string): number {
   if (state.penaltyTimelockSeconds !== undefined) return state.penaltyTimelockSeconds
   console.warn(
@@ -380,12 +421,33 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   const setupExpiration = now + 600
   const penaltyTimelockSeconds = DEFAULT_PENALTY_TIMELOCK_SECONDS
 
-  const game = await buildGame(deps, req.tier, houseHash, req.playerPubkey, req.playerHash, finalExpiration, setupExpiration, penaltyTimelockSeconds, odds)
+  // Probe the emulator: if configured (EMULATOR_URL env), wire the 5-leaf
+  // arkade-script escrow with a covenant-bound playerForfeit leaf. The
+  // player's payout pkScript is derived from req.playerChangeAddress (an
+  // Ark address) and pinned into both escrow taptrees. If the emulator
+  // isn't configured or is unreachable, fall back to the legacy 4-leaf
+  // escrow with the CSV `playerPenalty` as the only forfeit path.
+  const emulator = await loadEmulatorConfig()
+  const playerForfeitPkScript = emulator
+    ? ArkAddress.decode(req.playerChangeAddress).pkScript
+    : undefined
+  const arkadeForfeit =
+    emulator && playerForfeitPkScript
+      ? { emulatorPubkey: emulator.signerPubkey, playerForfeitPkScript }
+      : undefined
+
+  const game = await buildGame(
+    deps, req.tier, houseHash, req.playerPubkey, req.playerHash,
+    finalExpiration, setupExpiration, penaltyTimelockSeconds, odds, arkadeForfeit,
+  )
   // Per-party escrow: the house funds the HOUSE escrow (refundable only by the
   // house); the client funds the PLAYER escrow (refundable only by the player).
   // Neither party's refund leaf can touch the other's stake — abort-theft fix.
-  const houseEscrowScript = getHouseEscrowScript(game)
-  const playerEscrowAddress = getPlayerEscrowAddress(game, networkHrp).encode()
+  // When arkadeForfeit is active each escrow's covenant binds its OWN stake.
+  const houseEscrowScript = getHouseEscrowScript(game, arkadeForfeit ? BigInt(houseStake) : undefined)
+  const playerEscrowAddress = getPlayerEscrowAddress(
+    game, networkHrp, arkadeForfeit ? BigInt(req.tier) : undefined,
+  ).encode()
   const houseEscrowScriptHex = hex.encode(houseEscrowScript.pkScript)
 
   const gameId = uuidv4()
@@ -450,7 +512,27 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     throw err
   }
 
-  const state: TrustlessState = { finalExpiration, setupExpiration, houseEscrow, penaltyTimelockSeconds, ...odds }
+  const state: TrustlessState = {
+    finalExpiration,
+    setupExpiration,
+    houseEscrow,
+    penaltyTimelockSeconds,
+    ...odds,
+    // Persist the arkade-forfeit pin so /commit, /refund, /forfeit and
+    // recovery rebuilds derive the EXACT same escrow taproot address. Any
+    // drift (e.g. emulator pubkey rotated, player payout address looked up
+    // freshly) would produce a different address and break spends.
+    ...(arkadeForfeit && playerForfeitPkScript
+      ? {
+          arkadeForfeit: {
+            emulatorPubkeyHex: hex.encode(arkadeForfeit.emulatorPubkey),
+            playerForfeitPkScriptHex: hex.encode(playerForfeitPkScript),
+            playerEscrowValue: req.tier,
+            houseEscrowValue: houseStake,
+          },
+        }
+      : {}),
+  }
   try {
     await deps.repos.games.save({
       id: gameId,
@@ -531,15 +613,31 @@ async function buildCommitContext(
   // produce a different address and break the win-leaf sweep. Defensive
   // fallback to the documented default only if a pre-feature row lacks it.
   const penaltyTimelockSeconds = ensurePenaltyTimelockSeconds(state, game.id)
+  // Rehydrate the arkade-forfeit pin (no-op for legacy games). Required so
+  // the rebuilt taproot matches what /play minted — the arkade-script leaf
+  // is part of the tree's hash.
+  const arkadeForfeitPin = rehydrateArkadeForfeit(state)
   const game2 = await buildGame(
     deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
     state.finalExpiration, state.setupExpiration, penaltyTimelockSeconds, odds,
+    arkadeForfeitPin
+      ? {
+          emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
+          playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+        }
+      : undefined,
   )
   // Rebuild both per-party escrow scripts; the sweep spends each VTXO via its
   // own script's win leaf (win leaves are byte-identical, taptrees differ).
   const escrows: SweepEscrow[] = [
-    { script: getHouseEscrowScript(game2), ...state.houseEscrow },
-    { script: getPlayerEscrowScript(game2), ...playerEscrow },
+    {
+      script: getHouseEscrowScript(game2, arkadeForfeitPin?.houseEscrowValue),
+      ...state.houseEscrow,
+    },
+    {
+      script: getPlayerEscrowScript(game2, arkadeForfeitPin?.playerEscrowValue),
+      ...playerEscrow,
+    },
   ]
   const pot = escrows.reduce((a, e) => a + e.value, 0)
   // Variable-odds bake the house edge into the asymmetric stakes, so no rake is
@@ -709,11 +807,18 @@ export async function handleTrustlessRefund(
   const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
   const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
   const penaltyTimelockSeconds = ensurePenaltyTimelockSeconds(state, game.id)
+  const arkadeForfeitPin = rehydrateArkadeForfeit(state)
   const game2 = await buildGame(
     deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
     state.finalExpiration, state.setupExpiration, penaltyTimelockSeconds, oddsFromState(state),
+    arkadeForfeitPin
+      ? {
+          emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
+          playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+        }
+      : undefined,
   )
-  const playerEscrowScript = getPlayerEscrowScript(game2)
+  const playerEscrowScript = getPlayerEscrowScript(game2, arkadeForfeitPin?.playerEscrowValue)
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
   const refund = buildRefundTransaction(deps.arkInfo, networkHrp, {
     escrowScript: playerEscrowScript,
@@ -770,15 +875,28 @@ export async function handleTrustlessPenalty(
   const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
   if (!state.houseEscrow) throw new Error(`Game ${gameId} has no recorded house escrow`)
   const penaltyTimelockSeconds = ensurePenaltyTimelockSeconds(state, gameId)
+  const arkadeForfeitPin = rehydrateArkadeForfeit(state)
   const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
   const game2 = await buildGame(
     deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
     state.finalExpiration, state.setupExpiration, penaltyTimelockSeconds, oddsFromState(state),
+    arkadeForfeitPin
+      ? {
+          emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
+          playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+        }
+      : undefined,
   )
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
   const escrows: SweepEscrow[] = [
-    { script: getHouseEscrowScript(game2), ...state.houseEscrow },
-    { script: getPlayerEscrowScript(game2), ...req.playerEscrow },
+    {
+      script: getHouseEscrowScript(game2, arkadeForfeitPin?.houseEscrowValue),
+      ...state.houseEscrow,
+    },
+    {
+      script: getPlayerEscrowScript(game2, arkadeForfeitPin?.playerEscrowValue),
+      ...req.playerEscrow,
+    },
   ]
   const penalty = buildPenaltyTransaction(deps.arkInfo, networkHrp, {
     escrows,
@@ -789,6 +907,113 @@ export async function handleTrustlessPenalty(
     penaltyCheckpoints: penalty.checkpoints.map((c) => hex.encode(c.toPSBT())),
     penaltyTimelockSeconds,
     payoutAddress: game.player_change_address,
+  }
+}
+
+export interface TrustlessForfeitRequest {
+  /** The player's escrow VTXO outpoint (supplied at /play). */
+  playerEscrow: Outpoint
+}
+
+export interface TrustlessForfeitResult {
+  /** Unsigned forfeit-claim tx (hex-encoded PSBT) spending BOTH escrows via
+   * the arkade-script `playerForfeit` leaf. Two outputs: each pays the
+   * player exactly the per-escrow forfeitDestValue the covenant binds.
+   * Client signs + submits to the emulator first (POST /v1/tx), then arkd
+   * accepts the finalized tx after CLTV maturity. */
+  forfeitPsbt: string
+  forfeitCheckpoints: string[]
+  /** Absolute CLTV timelock (unix seconds) baked into the playerForfeit
+   * leaf's CLTVMultisigTapscript closure. Same value as the refund leaf's
+   * — by design the forfeit window opens exactly when the abort window
+   * closes. */
+  forfeitClaimableAt: number
+  /** Address the forfeit pays. The client MUST verify this matches its own
+   * change address before signing (the arkade-script covenant pins this
+   * pkScript exactly — submitting with a different one means the emulator
+   * refuses to sign). */
+  payoutAddress: string
+  /** Per-escrow values the covenants bind. The forfeit tx MUST produce one
+   * output per entry, in this order, each paying `payoutAddress` exactly
+   * the listed value (covenant uses EQUAL). */
+  payoutAmounts: [number, number]
+}
+
+/**
+ * Build the unsigned arkade-script forfeit-claim tx for a game where the
+ * house withheld at /commit AND the game was minted with the 5-leaf
+ * escrow (server had EMULATOR_URL set at /play time).
+ *
+ * Architectural difference from /penalty:
+ * - /penalty spends via `ConditionCSVMultisigTapscript playerPenalty` —
+ *   arkd's exit bucket. Forces a unilateral on-chain exit.
+ * - /forfeit spends via `CLTVMultisigTapscript playerForfeit` wrapping an
+ *   arkade-script covenant — arkd's execution bucket. Stays off-chain,
+ *   matches the architectural intent that "CSV is for unilateral exit;
+ *   CLTV is for execution paths."
+ *
+ * Rejected for games that don't have a pinned arkadeForfeit (legacy games
+ * before EMULATOR_URL was set, or sessions where the emulator probe failed
+ * at /play time). Those keep using /penalty.
+ */
+export async function handleTrustlessForfeit(
+  gameId: string,
+  req: TrustlessForfeitRequest,
+  deps: AppDeps,
+): Promise<TrustlessForfeitResult> {
+  const game = await deps.repos.games.get(gameId)
+  if (!game) throw new Error(`Game not found: ${gameId}`)
+  if (game.status === 'resolved') throw new Error(`Game ${gameId} is resolved; escrows already swept`)
+  if (!game.player_change_address) throw new Error(`Game ${gameId} has no player change address`)
+
+  const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+  if (!state.houseEscrow) throw new Error(`Game ${gameId} has no recorded house escrow`)
+  const arkadeForfeitPin = rehydrateArkadeForfeit(state)
+  if (!arkadeForfeitPin) {
+    throw new Error(
+      `Game ${gameId} was minted without arkade-script forfeit (no EMULATOR_URL at /play time); ` +
+        `use /api/game/:id/penalty for the CSV-based playerPenalty leaf instead`,
+    )
+  }
+
+  const penaltyTimelockSeconds = ensurePenaltyTimelockSeconds(state, gameId)
+  const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
+  const game2 = await buildGame(
+    deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
+    state.finalExpiration, state.setupExpiration, penaltyTimelockSeconds, oddsFromState(state),
+    {
+      emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
+      playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+    },
+  )
+  const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
+  // Two-input claim. Order MUST match the covenant binding so output[i] is
+  // the one escrows[i].playerForfeit() inspects (see buildForfeitClaimTransaction).
+  const escrows: ForfeitClaimEscrow[] = [
+    {
+      script: getHouseEscrowScript(game2, arkadeForfeitPin.houseEscrowValue),
+      ...state.houseEscrow,
+    },
+    {
+      script: getPlayerEscrowScript(game2, arkadeForfeitPin.playerEscrowValue),
+      ...req.playerEscrow,
+    },
+  ]
+  const forfeit = buildForfeitClaimTransaction(deps.arkInfo, networkHrp, {
+    escrows,
+    payoutAddress: game.player_change_address,
+    payoutAmounts: [arkadeForfeitPin.houseEscrowValue, arkadeForfeitPin.playerEscrowValue],
+  })
+
+  return {
+    forfeitPsbt: hex.encode(forfeit.arkTx.toPSBT()),
+    forfeitCheckpoints: forfeit.checkpoints.map((c) => hex.encode(c.toPSBT())),
+    forfeitClaimableAt: state.finalExpiration,
+    payoutAddress: game.player_change_address,
+    payoutAmounts: [
+      Number(arkadeForfeitPin.houseEscrowValue),
+      Number(arkadeForfeitPin.playerEscrowValue),
+    ],
   }
 }
 
@@ -819,11 +1044,18 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
     try {
       const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
       const penaltyTimelockSeconds = ensurePenaltyTimelockSeconds(state, game.id)
+      const arkadeForfeitPin = rehydrateArkadeForfeit(state)
       const game2 = await buildGame(
         deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
         state.finalExpiration, state.setupExpiration, penaltyTimelockSeconds, oddsFromState(state),
+        arkadeForfeitPin
+          ? {
+              emulatorPubkey: arkadeForfeitPin.emulatorPubkey,
+              playerForfeitPkScript: arkadeForfeitPin.playerForfeitPkScript,
+            }
+          : undefined,
       )
-      const houseEscrowScript = getHouseEscrowScript(game2)
+      const houseEscrowScript = getHouseEscrowScript(game2, arkadeForfeitPin?.houseEscrowValue)
       const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
       const refund = buildRefundTransaction(deps.arkInfo, networkHrp, {
         escrowScript: houseEscrowScript,

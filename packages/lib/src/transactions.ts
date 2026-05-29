@@ -94,8 +94,18 @@ export function getFinalAddress(game: Game, networkHrp: string): ArkAddress {
  * Per-party escrow scripts. Both share the win leaves but differ in an
  * owner-scoped refund leaf, so each party can only reclaim its OWN escrow on a
  * stall — the house cannot sweep the player's stake (abort-theft fix).
+ *
+ * When `game.emulatorPubkey` and `game.playerForfeitPkScript` are both set,
+ * the escrow gets the 5-leaf arkade-script forfeit layout. `forfeitDestValue`
+ * is the per-escrow value the arkade covenant binds — caller passes the
+ * player's stake for the player escrow, the house's stake for the house
+ * escrow. (Each input has its own covenant inspecting its own output index.)
  */
-function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScript {
+function escrowScript(
+  game: Game,
+  refundPubkey: Uint8Array,
+  forfeitDestValue?: bigint,
+): CoinflipEscrowScript {
   assertDefined(game.creator, 'creator')
   assertDefined(game.player, 'player')
   assertDefined(game.serverPubkey, 'serverPubkey')
@@ -105,6 +115,17 @@ function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScrip
   assertDefined(game.player.hash, 'player.hash')
   assertDefined(game.finalExpiration, 'finalExpiration')
   assertDefined(game.penaltyTimelockSeconds, 'penaltyTimelockSeconds')
+  // Arkade forfeit leaf is opt-in: all three must be present and consistent.
+  // The (emulator + pkScript) pair without a value would be a misconfiguration
+  // — we require all three together so the escrow address is deterministic.
+  const arkadeForfeit =
+    game.emulatorPubkey && game.playerForfeitPkScript && forfeitDestValue !== undefined
+      ? {
+          emulatorPubkey: game.emulatorPubkey,
+          forfeitDestPkScript: game.playerForfeitPkScript,
+          forfeitDestValue,
+        }
+      : undefined
   return new CoinflipEscrowScript({
     creatorPubkey: game.creator.pubkey,
     playerPubkey: game.player.pubkey,
@@ -117,25 +138,46 @@ function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScrip
     oddsN: game.oddsN,
     oddsTarget: game.oddsTarget,
     oddsLo: game.oddsLo,
+    arkadeForfeit,
   })
 }
 
-/** Escrow the player funds; refundable only by the player after timeout. */
-export function getPlayerEscrowScript(game: Game): CoinflipEscrowScript {
-  return escrowScript(game, game.player!.pubkey!)
+/**
+ * Escrow the player funds; refundable only by the player after timeout.
+ *
+ * @param forfeitDestValue — required ONLY when wiring the arkade-script
+ *   leaf (game.emulatorPubkey + playerForfeitPkScript set). Pass the
+ *   player's stake (i.e. game.betAmount). Omit for the legacy 4-leaf escrow.
+ */
+export function getPlayerEscrowScript(game: Game, forfeitDestValue?: bigint): CoinflipEscrowScript {
+  return escrowScript(game, game.player!.pubkey!, forfeitDestValue)
 }
 
-/** Escrow the house funds; refundable only by the house after timeout. */
-export function getHouseEscrowScript(game: Game): CoinflipEscrowScript {
-  return escrowScript(game, game.creator!.pubkey!)
+/**
+ * Escrow the house funds; refundable only by the house after timeout.
+ *
+ * @param forfeitDestValue — required ONLY when wiring the arkade-script
+ *   leaf. Pass the house's stake (computeHouseStake(...) result). Omit for
+ *   the legacy 4-leaf escrow.
+ */
+export function getHouseEscrowScript(game: Game, forfeitDestValue?: bigint): CoinflipEscrowScript {
+  return escrowScript(game, game.creator!.pubkey!, forfeitDestValue)
 }
 
-export function getPlayerEscrowAddress(game: Game, networkHrp: string): ArkAddress {
-  return getPlayerEscrowScript(game).address(networkHrp, game.serverPubkey!)
+export function getPlayerEscrowAddress(
+  game: Game,
+  networkHrp: string,
+  forfeitDestValue?: bigint,
+): ArkAddress {
+  return getPlayerEscrowScript(game, forfeitDestValue).address(networkHrp, game.serverPubkey!)
 }
 
-export function getHouseEscrowAddress(game: Game, networkHrp: string): ArkAddress {
-  return getHouseEscrowScript(game).address(networkHrp, game.serverPubkey!)
+export function getHouseEscrowAddress(
+  game: Game,
+  networkHrp: string,
+  forfeitDestValue?: bigint,
+): ArkAddress {
+  return getHouseEscrowScript(game, forfeitDestValue).address(networkHrp, game.serverPubkey!)
 }
 
 /** Get the pot amount (2x bet) */

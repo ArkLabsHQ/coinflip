@@ -514,25 +514,64 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
       pubkeys: [refundPubkey, serverPubkey],
     })
 
-    // Unilateral exit mirrors — same predicate as the collab path but
-    // single-user signature + CSV exit_delay. Drops the covenant
-    // (user signs, chooses their own destination) and arkd's cosign
-    // (these are spent on-chain after Ark unroll).
-    const playerWinExitTapscript = ConditionCSVMultisigTapscript.encode({
+    // Unilateral exit mirrors. Three of the four KEEP the atomic-sweep
+    // covenant (and the emu_tweaked key) so the user can exit without
+    // arkd while still preserving destination + atomicity: the user
+    // signs the user slot, emu signs the emu_tweaked slot AFTER running
+    // the same covenant the collab path used. Underlying closure stays
+    // `ConditionCSVMultisig` (exit bucket) — arkd still partitions
+    // correctly.
+    //
+    // `refundExit` is the lone non-covenant exit: the funder is just
+    // reclaiming their own stake (no atomicity / no destination binding
+    // makes sense), so the leaf is a raw `CSVMultisig[funder]`. This
+    // is also the FINAL fallback when arkd AND the emu are both
+    // unavailable — every other leaf requires the emu.
+    const playerWinExitLeaf: arkade.ArkadeLeaf = {
+      arkadeScript: playerWinCovenantArkadeScript,
+      emulators: [emulatorPubkey],
+      tapscript: ConditionCSVMultisigTapscript.encode({
+        conditionScript: playerWinsCondition,
+        timelock: { value: exitDelay, type: 'seconds' },
+        pubkeys: [playerPubkey],
+      }),
+    }
+    const playerWinExitScript = ConditionCSVMultisigTapscript.encode({
       conditionScript: playerWinsCondition,
       timelock: { value: exitDelay, type: 'seconds' },
-      pubkeys: [playerPubkey],
-    })
-    const creatorWinExitTapscript = ConditionCSVMultisigTapscript.encode({
+      pubkeys: [playerPubkey, tweakedEmuKey(playerWinCovenantArkadeScript)],
+    }).script
+
+    const creatorWinExitLeaf: arkade.ArkadeLeaf = {
+      arkadeScript: creatorWinCovenantArkadeScript,
+      emulators: [emulatorPubkey],
+      tapscript: ConditionCSVMultisigTapscript.encode({
+        conditionScript: houseWinsCondition,
+        timelock: { value: exitDelay, type: 'seconds' },
+        pubkeys: [creatorPubkey],
+      }),
+    }
+    const creatorWinExitScript = ConditionCSVMultisigTapscript.encode({
       conditionScript: houseWinsCondition,
       timelock: { value: exitDelay, type: 'seconds' },
-      pubkeys: [creatorPubkey],
-    })
-    const playerForfeitExitTapscript = ConditionCSVMultisigTapscript.encode({
+      pubkeys: [creatorPubkey, tweakedEmuKey(creatorWinCovenantArkadeScript)],
+    }).script
+
+    const playerForfeitExitLeaf: arkade.ArkadeLeaf = {
+      arkadeScript: forfeitArkadeScript,
+      emulators: [emulatorPubkey],
+      tapscript: ConditionCSVMultisigTapscript.encode({
+        conditionScript: buildHashCheckScript(playerHash),
+        timelock: { value: exitDelay, type: 'seconds' },
+        pubkeys: [playerPubkey],
+      }),
+    }
+    const playerForfeitExitScript = ConditionCSVMultisigTapscript.encode({
       conditionScript: buildHashCheckScript(playerHash),
       timelock: { value: exitDelay, type: 'seconds' },
-      pubkeys: [playerPubkey],
-    })
+      pubkeys: [playerPubkey, tweakedEmuKey(forfeitArkadeScript)],
+    }).script
+
     const refundExitTapscript = CSVMultisigTapscript.encode({
       timelock: { value: exitDelay, type: 'seconds' },
       pubkeys: [refundPubkey],
@@ -543,9 +582,9 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
       creatorWinCovenantLeaf,
       forfeitLeaf,
       refundTapscript.script,
-      playerWinExitTapscript.script,
-      creatorWinExitTapscript.script,
-      playerForfeitExitTapscript.script,
+      playerWinExitLeaf,
+      creatorWinExitLeaf,
+      playerForfeitExitLeaf,
       refundExitTapscript.script,
     ])
 
@@ -553,9 +592,9 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
     this.creatorWinCovenantScriptHex = hex.encode(creatorWinCovenantScript)
     this.playerForfeitScriptHex = hex.encode(forfeitLeafScript)
     this.refundScriptHex = hex.encode(refundTapscript.script)
-    this.playerWinExitScriptHex = hex.encode(playerWinExitTapscript.script)
-    this.creatorWinExitScriptHex = hex.encode(creatorWinExitTapscript.script)
-    this.playerForfeitExitScriptHex = hex.encode(playerForfeitExitTapscript.script)
+    this.playerWinExitScriptHex = hex.encode(playerWinExitScript)
+    this.creatorWinExitScriptHex = hex.encode(creatorWinExitScript)
+    this.playerForfeitExitScriptHex = hex.encode(playerForfeitExitScript)
     this.refundExitScriptHex = hex.encode(refundExitTapscript.script)
     this.playerWinCovenantArkadeScript = playerWinCovenantArkadeScript
     this.creatorWinCovenantArkadeScript = creatorWinCovenantArkadeScript

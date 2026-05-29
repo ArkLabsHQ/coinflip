@@ -65,7 +65,7 @@ describe('CoinflipEscrowScript: 8 leaves — collab + unilateral mirrors', () =>
     s.refundExit()
   })
 
-  it('exit leaves are exit-bucket closures (CSV-gated, single user)', () => {
+  it('exit leaves are exit-bucket closures (CSV-gated); win/forfeit keep emu, refund is pure unilateral', () => {
     const s = makeEscrow()
     const pWinExit = decodeTapscript(hex.decode(s.playerWinExitScriptHex))
     const cWinExit = decodeTapscript(hex.decode(s.creatorWinExitScriptHex))
@@ -75,14 +75,31 @@ describe('CoinflipEscrowScript: 8 leaves — collab + unilateral mirrors', () =>
     expect(cWinExit.type).toBe('condition-csv-multisig')
     expect(forfeitExit.type).toBe('condition-csv-multisig')
     expect(refundExit.type).toBe('csv-multisig')
-    // Each exit leaf has exactly ONE signer (the relevant user).
-    expect(pWinExit.params.pubkeys).toHaveLength(1)
-    expect(cWinExit.params.pubkeys).toHaveLength(1)
-    expect(forfeitExit.params.pubkeys).toHaveLength(1)
-    expect(refundExit.params.pubkeys).toHaveLength(1)
+
+    // Win + forfeit exits keep the emu_tweaked key so the covenant is
+    // preserved on exit (atomic-sweep, destination binding) — user
+    // signs alone (no arkd), emu cosigns AFTER running the covenant.
+    expect(pWinExit.params.pubkeys).toHaveLength(2)
+    expect(cWinExit.params.pubkeys).toHaveLength(2)
+    expect(forfeitExit.params.pubkeys).toHaveLength(2)
     expect(hex.encode(pWinExit.params.pubkeys[0])).toBe(hex.encode(PLAYER_PK))
     expect(hex.encode(cWinExit.params.pubkeys[0])).toBe(hex.encode(CREATOR_PK))
     expect(hex.encode(forfeitExit.params.pubkeys[0])).toBe(hex.encode(PLAYER_PK))
+    // The emu_tweaked key in slot 1 matches the covenant the leaf binds.
+    expect(hex.encode(pWinExit.params.pubkeys[1])).toBe(
+      hex.encode(computeArkadeScriptPublicKey(EMULATOR_PK, s.playerWinCovenantArkadeScript)),
+    )
+    expect(hex.encode(cWinExit.params.pubkeys[1])).toBe(
+      hex.encode(computeArkadeScriptPublicKey(EMULATOR_PK, s.creatorWinCovenantArkadeScript)),
+    )
+    expect(hex.encode(forfeitExit.params.pubkeys[1])).toBe(
+      hex.encode(computeArkadeScriptPublicKey(EMULATOR_PK, s.forfeitArkadeScript)),
+    )
+
+    // refundExit is the lone non-covenant exit: funder alone, no emu.
+    // Last-resort path when arkd AND the emu are both unavailable —
+    // funder gets their own stake back (not the pot).
+    expect(refundExit.params.pubkeys).toHaveLength(1)
     expect(hex.encode(refundExit.params.pubkeys[0])).toBe(hex.encode(PLAYER_PK))
   })
 

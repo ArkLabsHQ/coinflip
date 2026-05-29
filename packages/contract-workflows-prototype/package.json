@@ -1,0 +1,23 @@
+{
+  "name": "@arklabshq/contract-workflows-prototype",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Prototype primitives library for building state-machine contracts on Ark via arkade-script. Incubator for the eventual @arkade-os/contract-workflows. See docs/superpowers/specs/2026-05-29-contract-workflows-framework.md.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@arkade-os/sdk": "file:../../vendor/arkade-os-sdk-0.4.28-arkade-script-5a24cbf.tgz",
+    "@scure/base": "^1.2.1",
+    "@scure/btc-signer": "^2.0.1",
+    "@noble/curves": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
+}

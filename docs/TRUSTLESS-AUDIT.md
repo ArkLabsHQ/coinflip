@@ -160,15 +160,22 @@ Player sends `playerSecret`; server verifies the hash, resolves via
   arkade-script path is the architecturally clean version; the CSV path is
   retained for clients that don't trust the operator's emulator.
 
-  **What's open**: cross-input atomicity. Both forfeit paths today require
-  the player to spend each escrow in its own transaction (legacy CSV) or
-  pin one specific `(destPkScript, destValue)` per escrow's covenant (arkade
-  path, single transaction with one output per escrow). A *single covenant
-  per escrow that asserts the OTHER escrow is also being spent in the same
-  tx and that the combined value lands at the player* requires the second
-  escrow's outpoint known at script-build time — straightforward once the
-  setup tx is deterministically committed at game creation. Tracked as the
-  R1-atomic follow-up.
+  **Cross-input atomicity (FIXED).** The arkade-script playerForfeit leaf
+  now uses an **atomic-sweep covenant**: each escrow's covenant additionally
+  pins the OTHER escrow's stake value via `OP_INSPECTINPUTVALUE` on a
+  witness-supplied input index. A forfeit-claim that tries to spend ONE
+  escrow alone fails the value check (no other input → script aborts);
+  the only valid claim shape is a 2-input tx with one output paying the
+  full pot. The two leaves are symmetric — each pins the other's stake
+  — so they cannot be spent inconsistently. This replaces the earlier
+  per-escrow-independent covenant we had on this branch.
+
+  **Note on arkd#1085**: when we first prototyped R1 we filed an arkd
+  issue requesting `ConditionCLTVMultisigClosure`. Arkade-script made it
+  unnecessary — the covenant + CLTV combination is now expressible
+  inside the existing `CLTVMultisigTapscript` closure (arkade-script
+  enforces the covenant, arkd enforces the CLTV). The issue is left
+  open as a useful protocol cleanup but is no longer blocking us.
 
 ### Phase 5 — winner sweeps the pot
 Winner spends **both** escrow VTXOs via the matching win leaf, paying the pot
@@ -306,27 +313,33 @@ back-pressure / on-demand split for bursts.
 ✅ **R1 (CSV path)** `playerPenalty` `ConditionCSVMultisigTapscript` leaf added
    to each escrow; player sweeps both with own secret after ~17-min CSV.
 ✅ **R1 (arkade-script path, opt-in)** `playerForfeit` `CLTVMultisigTapscript`
-   leaf + arkade-script covenant + emulator co-signer when `EMULATOR_URL` is
-   set; execution-bucket forfeit without unilateral exit. See
+   leaf + **atomic-sweep arkade-script covenant** (single output pays
+   the full pot; cross-input `INSPECTINPUTVALUE` check guarantees both
+   escrows are spent in the same tx) + emulator co-signer when
+   `EMULATOR_URL` is set; execution-bucket forfeit without unilateral
+   exit. See
    `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`.
+✅ **arkd#1085 dropped.** arkade-script makes the requested
+   `ConditionCLTVMultisigClosure` unnecessary — the same expressiveness
+   lives in the existing `CLTVMultisigTapscript` closure with arkade-
+   script enforcing the covenant + condition. Issue stays open as a
+   cleanup but is no longer a blocker.
 
 ---
 
 ## 10. Residual risks & recommendations
 
-- **R1 — house can refuse to lose** (mitigated, two paths):
+- **R1 — house can refuse to lose** (fully mitigated, two paths):
   - **CSV `playerPenalty` (default, all clients).** Player sweeps both
     escrows with its own secret after ~17-min CSV; lives in arkd's exit
     bucket so requires unilateral exit. Always available.
   - **Arkade-script `playerForfeit` (opt-in via `EMULATOR_URL`).** Same
     economic outcome, but in arkd's execution bucket via a CLTV closure +
-    arkade-script covenant validated by the
+    **atomic-sweep arkade-script covenant** (cross-input value check —
+    single tx, single output paying the full pot) validated by the
     [emulator service](https://github.com/arkade-os/emulator). No exit
     required. Trust assumption: emulator is liveness-only (cannot redirect
     funds, only refuse to co-sign — at which point the CSV path still works).
-  - **Atomic sweep follow-up.** Both paths still claim one escrow per tx
-    (CSV) or one output per escrow (arkade); a single covenant binding both
-    escrow outpoints would atomize the sweep further. Not blocking.
 - **R3 — Sybil `/play` liquidity DoS.** Per-pubkey pending cap doesn't bound
   per-IP/Sybil; consider rate-limiting `/play` or requiring the player escrow
   before the house commits its stake.

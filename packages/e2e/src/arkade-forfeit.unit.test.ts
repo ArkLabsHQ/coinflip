@@ -70,6 +70,29 @@ describe('arkade-forfeit: script encoding', () => {
     expect(script[idx + 2]).toBe(0x80)
     expect(script[idx + 3]).toBe(0x00)
   })
+
+  it('atomic mode: prepends INSPECTINPUTVALUE <other_stake> EQUALVERIFY before enforcePayTo', () => {
+    const otherStake = 5_000n
+    const pot = 15_000n
+    const script = buildForfeitArkadeScript(PLAYER_PKSCRIPT, pot, otherStake)
+    // Prefix: INSPECTINPUTVALUE (0xc9), push other_stake (0x88, 0x13), EQUALVERIFY.
+    // 5_000 = 0x1388 → minimal LE = [0x88, 0x13, 0x00] (sign-pad because 0x13... wait 0x13 high bit is 0, no pad needed). Actually 5000 = 0x1388, MSB byte (in LE) is 0x13 (high bit 0) → no pad → [0x88, 0x13].
+    expect(script[0]).toBe(ARKADE_OP.INSPECTINPUTVALUE)
+    expect(script[1]).toBe(2)             // push length
+    expect(script[2]).toBe(0x88)          // 5000 = 0x1388 LSB
+    expect(script[3]).toBe(0x13)          // 5000 = 0x1388 MSB
+    expect(script[4]).toBe(0x88)          // OP_EQUALVERIFY
+
+    // The remainder mirrors the single-input encoding for the pot amount.
+    const single = buildForfeitArkadeScript(PLAYER_PKSCRIPT, pot)
+    const atomicTail = script.slice(5)
+    expect(hex.encode(atomicTail)).toBe(hex.encode(single))
+  })
+
+  it('atomic mode: rejects non-positive otherStakeValue', () => {
+    expect(() => buildForfeitArkadeScript(PLAYER_PKSCRIPT, 10_000n, 0n)).toThrow(/positive/)
+    expect(() => buildForfeitArkadeScript(PLAYER_PKSCRIPT, 10_000n, -1n)).toThrow(/positive/)
+  })
 })
 
 describe('arkade-forfeit: tagged hash + key tweak', () => {

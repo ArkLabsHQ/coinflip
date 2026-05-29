@@ -95,16 +95,25 @@ export function getFinalAddress(game: Game, networkHrp: string): ArkAddress {
  * owner-scoped refund leaf, so each party can only reclaim its OWN escrow on a
  * stall — the house cannot sweep the player's stake (abort-theft fix).
  *
- * When `game.emulatorPubkey` and `game.playerForfeitPkScript` are both set,
- * the escrow gets the 5-leaf arkade-script forfeit layout. `forfeitDestValue`
- * is the per-escrow value the arkade covenant binds — caller passes the
- * player's stake for the player escrow, the house's stake for the house
- * escrow. (Each input has its own covenant inspecting its own output index.)
+ * Arkade-script forfeit (5th leaf) is layered on when `game.emulatorPubkey`
+ * and `game.playerForfeitPkScript` are both set. **Atomic-sweep mode**
+ * (default for callers that pass `otherStakeValue`) binds BOTH escrows
+ * together — the covenant on each input verifies the other input's value,
+ * so neither escrow is spendable alone via forfeit. Single-output pays the
+ * full pot.
+ *
+ * Per-escrow caller wiring:
+ *   - player escrow: `forfeitDestValue = pot`, `otherStakeValue = houseStake`
+ *   - house escrow:  `forfeitDestValue = pot`, `otherStakeValue = playerStake`
+ *
+ * Both `forfeitDestValue` values are the SAME (the pot); the `otherStakeValue`
+ * is what's symmetric — each covenant pins the other's contribution.
  */
 function escrowScript(
   game: Game,
   refundPubkey: Uint8Array,
   forfeitDestValue?: bigint,
+  otherStakeValue?: bigint,
 ): CoinflipEscrowScript {
   assertDefined(game.creator, 'creator')
   assertDefined(game.player, 'player')
@@ -115,15 +124,13 @@ function escrowScript(
   assertDefined(game.player.hash, 'player.hash')
   assertDefined(game.finalExpiration, 'finalExpiration')
   assertDefined(game.penaltyTimelockSeconds, 'penaltyTimelockSeconds')
-  // Arkade forfeit leaf is opt-in: all three must be present and consistent.
-  // The (emulator + pkScript) pair without a value would be a misconfiguration
-  // — we require all three together so the escrow address is deterministic.
   const arkadeForfeit =
     game.emulatorPubkey && game.playerForfeitPkScript && forfeitDestValue !== undefined
       ? {
           emulatorPubkey: game.emulatorPubkey,
           forfeitDestPkScript: game.playerForfeitPkScript,
           forfeitDestValue,
+          otherStakeValue,
         }
       : undefined
   return new CoinflipEscrowScript({
@@ -145,39 +152,57 @@ function escrowScript(
 /**
  * Escrow the player funds; refundable only by the player after timeout.
  *
- * @param forfeitDestValue — required ONLY when wiring the arkade-script
- *   leaf (game.emulatorPubkey + playerForfeitPkScript set). Pass the
- *   player's stake (i.e. game.betAmount). Omit for the legacy 4-leaf escrow.
+ * @param forfeitDestValue — required ONLY when wiring the arkade-script leaf.
+ *   Pass the FULL POT (atomic mode) or the player stake alone (legacy single-
+ *   input mode). Omit for the legacy 4-leaf escrow.
+ * @param otherStakeValue — when set, switches to atomic-sweep mode. Pass the
+ *   HOUSE stake for the player escrow.
  */
-export function getPlayerEscrowScript(game: Game, forfeitDestValue?: bigint): CoinflipEscrowScript {
-  return escrowScript(game, game.player!.pubkey!, forfeitDestValue)
+export function getPlayerEscrowScript(
+  game: Game,
+  forfeitDestValue?: bigint,
+  otherStakeValue?: bigint,
+): CoinflipEscrowScript {
+  return escrowScript(game, game.player!.pubkey!, forfeitDestValue, otherStakeValue)
 }
 
 /**
  * Escrow the house funds; refundable only by the house after timeout.
  *
- * @param forfeitDestValue — required ONLY when wiring the arkade-script
- *   leaf. Pass the house's stake (computeHouseStake(...) result). Omit for
- *   the legacy 4-leaf escrow.
+ * @param forfeitDestValue — full pot in atomic mode, house stake alone in
+ *   legacy single-input mode. Omit for the legacy 4-leaf escrow.
+ * @param otherStakeValue — atomic mode: pass the PLAYER stake.
  */
-export function getHouseEscrowScript(game: Game, forfeitDestValue?: bigint): CoinflipEscrowScript {
-  return escrowScript(game, game.creator!.pubkey!, forfeitDestValue)
+export function getHouseEscrowScript(
+  game: Game,
+  forfeitDestValue?: bigint,
+  otherStakeValue?: bigint,
+): CoinflipEscrowScript {
+  return escrowScript(game, game.creator!.pubkey!, forfeitDestValue, otherStakeValue)
 }
 
 export function getPlayerEscrowAddress(
   game: Game,
   networkHrp: string,
   forfeitDestValue?: bigint,
+  otherStakeValue?: bigint,
 ): ArkAddress {
-  return getPlayerEscrowScript(game, forfeitDestValue).address(networkHrp, game.serverPubkey!)
+  return getPlayerEscrowScript(game, forfeitDestValue, otherStakeValue).address(
+    networkHrp,
+    game.serverPubkey!,
+  )
 }
 
 export function getHouseEscrowAddress(
   game: Game,
   networkHrp: string,
   forfeitDestValue?: bigint,
+  otherStakeValue?: bigint,
 ): ArkAddress {
-  return getHouseEscrowScript(game, forfeitDestValue).address(networkHrp, game.serverPubkey!)
+  return getHouseEscrowScript(game, forfeitDestValue, otherStakeValue).address(
+    networkHrp,
+    game.serverPubkey!,
+  )
 }
 
 /** Get the pot amount (2x bet) */
@@ -484,42 +509,46 @@ export interface ForfeitClaimEscrow {
 
 export interface ForfeitClaimArgs {
   /**
-   * Escrows to sweep. Each MUST have been constructed with an
-   * `arkadeForfeit` config — its `playerForfeit()` leaf is what's spent.
-   * The escrow's `forfeitArkadeScript` is also required for the
-   * EmulatorPacket entry.
+   * Escrows to sweep — exactly two for atomic mode (player + house).
+   * Each MUST have been constructed with an `arkadeForfeit` config in
+   * **atomic mode** (`otherStakeValue` set on each, such that each leaf
+   * pins the OTHER escrow's stake). The covenants on the two leaves are
+   * symmetric and consistent: their combined value checks guarantee the
+   * full pot lands at `payoutAddress`.
    */
   escrows: ForfeitClaimEscrow[]
   /**
-   * Player payout. MUST match each escrow's bound `forfeitDestPkScript`
-   * — the arkade covenant checks output.scriptPubKey exactly, so if the
-   * caller mistypes the address or uses a different one than the one
-   * pinned at game-creation time the emulator refuses to sign.
+   * Player payout. MUST match each escrow's bound `forfeitDestPkScript`.
+   * The arkade covenant checks output.scriptPubKey exactly — a mismatch
+   * means the emulator refuses to co-sign.
    */
   payoutAddress: string
   /**
-   * Per-escrow payout amount, in the same order as `escrows`. Each MUST
-   * match that escrow's bound `forfeitDestValue` (covenant uses `EQUAL`).
+   * The full pot — equals `forfeitDestValue` from BOTH escrows (which
+   * are equal in atomic mode). Caller passes it explicitly so this
+   * builder doesn't have to read it back from the script.
    */
-  payoutAmounts: bigint[]
+  potAmount: bigint
 }
 
 /**
  * Build the player's R1 forfeit claim through the arkade-script
- * `playerForfeit` leaf on each escrow. Produces one Ark transaction with
- * one input per escrow (each spending via that escrow's playerForfeit) and
- * one output per escrow paying the player. An EmulatorPacket reveals each
- * input's arkade script (with witness = output_index) so the emulator can
- * validate the covenant before co-signing.
+ * `playerForfeit` leaf on each escrow. Produces **one** Ark transaction
+ * with two inputs (both escrows) and **one** user output (the full pot
+ * to the player). An EmulatorPacket reveals each input's arkade script
+ * with the witness `[output_index=0, other_input_index=1-i]` so the
+ * emulator can validate the cross-input covenant before co-signing.
  *
- * Output layout:
- *   output[i]   pays escrows[i].forfeitDestPkScript  (== payoutAddress)
- *               for escrows[i].forfeitDestValue      (== payoutAmounts[i])
+ * Output layout (atomic mode):
+ *   output[0]   pays escrows[*].forfeitDestPkScript  (== payoutAddress)
+ *               for `potAmount` sats (sum of both stakes)
+ *   output[1]+  (P2A anchor + OP_RETURN extension carrying the
+ *               EmulatorPacket — added by buildOffchainTx +
+ *               addEmulatorPacket; not inspected by the covenant)
  *
  * After the emulator co-signs (POST /v1/tx), the player + arkd sign the
  * remaining slots (the tapscript leaf is 3-of-3 [player, server,
- * emulator_tweaked]). The flow mirrors the arkade-htlc.test.ts refund
- * path on the arkade-script-final branch.
+ * emulator_tweaked]). Mirrors the arkade-htlc.test.ts refund path.
  */
 export function buildForfeitClaimTransaction(
   arkInfo: ArkInfo,
@@ -527,11 +556,10 @@ export function buildForfeitClaimTransaction(
   args: ForfeitClaimArgs,
 ): BuiltOffchainTx & { emulatorEntries: { vin: number; script: Uint8Array; witness: Uint8Array }[] } {
   void networkHrp
-  if (args.escrows.length === 0) {
-    throw new Error('buildForfeitClaimTransaction: at least one escrow required')
-  }
-  if (args.escrows.length !== args.payoutAmounts.length) {
-    throw new Error('buildForfeitClaimTransaction: escrows.length must match payoutAmounts.length')
+  if (args.escrows.length !== 2) {
+    throw new Error(
+      `buildForfeitClaimTransaction: atomic forfeit requires exactly 2 escrows (got ${args.escrows.length})`,
+    )
   }
   for (let i = 0; i < args.escrows.length; i++) {
     const e = args.escrows[i]
@@ -540,6 +568,9 @@ export function buildForfeitClaimTransaction(
         `buildForfeitClaimTransaction: escrow #${i} has no arkadeForfeit config — call escrowScript with one or fall back to buildPenaltyTransaction`,
       )
     }
+  }
+  if (args.potAmount <= 0n) {
+    throw new Error('buildForfeitClaimTransaction: potAmount must be positive')
   }
 
   const serverUnrollScript = decodeTapscript(
@@ -555,20 +586,26 @@ export function buildForfeitClaimTransaction(
   }))
 
   const payoutAddr = ArkAddress.decode(args.payoutAddress)
-  const outputs = args.payoutAmounts.map((amount) => ({
-    script: payoutAddr.pkScript,
-    amount,
-  }))
+  // Atomic sweep: ONE output for the full pot. Both covenants verify it.
+  const outputs = [{ script: payoutAddr.pkScript, amount: args.potAmount }]
 
   const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
 
-  // EmulatorPacket: per-input, reveals the arkade script + witness arg
-  // (output_index). For our layout output_index == input_index by design
-  // (output[i] is the one escrows[i]'s covenant inspects).
-  const emulatorEntries = args.escrows.map((e, i) => ({
+  // EmulatorPacket per input. Witness = [out_idx=0, other_in_idx=1-i].
+  // Both covenants check the SAME output (index 0); each pins the OTHER
+  // input's value via its other_in_idx witness arg.
+  // Witness stack semantics: pushed in order, top item consumed first.
+  // The script's INSPECTINPUTVALUE consumes other_in_idx first, then the
+  // enforcePayTo body operates on out_idx.
+  const emulatorEntries = args.escrows.map((_e, i) => ({
     vin: i,
-    script: e.script.forfeitArkadeScript!,
-    witness: encodeEmulatorWitness([encodeOutputIndexWitness(i)]),
+    script: args.escrows[i].script.forfeitArkadeScript!,
+    // Order in the witness array: [bottom, ..., top]. Bottom = out_idx,
+    // top = other_in_idx.
+    witness: encodeEmulatorWitness([
+      encodeOutputIndexWitness(0),       // out_idx (bottom)
+      encodeOutputIndexWitness(1 - i),   // other_in_idx (top)
+    ]),
   }))
   addEmulatorPacket(arkTx, emulatorEntries)
 

@@ -200,8 +200,12 @@ export interface ForfeitResponse {
    *  Once chain time crosses this, the forfeit becomes claimable. */
   forfeitClaimableAt: number
   payoutAddress: string
-  /** [houseEscrowValue, playerEscrowValue] — must match the covenant. */
-  payoutAmounts: [number, number]
+  /** Total amount the single forfeit output pays to the player. Equals
+   *  the sum of both stakes (atomic-sweep covenant). */
+  potAmount: number
+  /** Per-escrow stakes for display: `[houseStake, playerStake]`. Sum
+   *  must equal `potAmount`. */
+  stakes: [number, number]
 }
 
 export function forfeit(gameId: string, playerEscrow: Outpoint): Promise<ForfeitResponse> {

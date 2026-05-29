@@ -123,6 +123,47 @@ describe('CoinflipEscrowScript: with arkadeForfeit config', () => {
     expect(hex.encode(s.forfeitArkadeScript)).toBe(hex.encode(expected))
   })
 
+  it('atomic-sweep mode: pot binding + symmetric otherStake reshapes leaves consistently', () => {
+    // Player escrow: pot output + house stake "other"
+    const pot = 80_000n
+    const houseStake = 30_000n
+    const playerStake = 50_000n
+    const playerLeaf = new CoinflipEscrowScript({
+      ...baseOpts(),
+      arkadeForfeit: {
+        emulatorPubkey: EMULATOR_PK,
+        forfeitDestPkScript: PAY_PKSCRIPT,
+        forfeitDestValue: pot,
+        otherStakeValue: houseStake,
+      },
+    })
+    // House escrow: SAME pot but other-stake is player's stake
+    const houseLeaf = new CoinflipEscrowScript({
+      ...baseOpts(),
+      arkadeForfeit: {
+        emulatorPubkey: EMULATOR_PK,
+        forfeitDestPkScript: PAY_PKSCRIPT,
+        forfeitDestValue: pot,
+        otherStakeValue: playerStake,
+      },
+    })
+    // Same payee + same pot but different other-stake → different scripts,
+    // different addresses. Symmetric: each pins the other's stake.
+    expect(playerLeaf.forfeitArkadeScript).toBeDefined()
+    expect(houseLeaf.forfeitArkadeScript).toBeDefined()
+    expect(hex.encode(playerLeaf.forfeitArkadeScript)).not.toBe(
+      hex.encode(houseLeaf.forfeitArkadeScript),
+    )
+    expect(playerLeaf.address(REGTEST_HRP, SERVER_PK).encode()).not.toBe(
+      houseLeaf.address(REGTEST_HRP, SERVER_PK).encode(),
+    )
+
+    // Both scripts start with INSPECTINPUTVALUE + <other_stake> + EQUALVERIFY.
+    const ARKADE_INSPECTINPUTVALUE = 0xc9
+    expect(playerLeaf.forfeitArkadeScript[0]).toBe(ARKADE_INSPECTINPUTVALUE)
+    expect(houseLeaf.forfeitArkadeScript[0]).toBe(ARKADE_INSPECTINPUTVALUE)
+  })
+
   it('changing destValue or destPkScript reshapes the tree (covenant binding)', () => {
     const s1 = new CoinflipEscrowScript({
       ...baseOpts(),

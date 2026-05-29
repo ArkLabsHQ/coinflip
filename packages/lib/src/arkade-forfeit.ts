@@ -77,6 +77,7 @@ import {
  * We vendor only the ones we use; full catalog is in the emulator README.
  */
 export const ARKADE_OP = {
+  INSPECTINPUTVALUE: 0xc9,
   INSPECTOUTPUTVALUE: 0xcf,
   INSPECTOUTPUTSCRIPTPUBKEY: 0xd1,
   INSPECTNUMOUTPUTS: 0xd5,
@@ -123,46 +124,63 @@ export function computeArkadeScriptPublicKey(
 /**
  * Build the **forfeit arkade script** — a covenant enforcing that the
  * spending transaction pays `payAmount` sats to `recipientPkScript` at a
- * specific output. Layout mirrors the canonical `enforcePayTo` helper in
- * the arkade-script-final HTLC test:
+ * specific output. Two modes:
  *
- *   ```
- *   DUP INSPECTOUTPUTSCRIPTPUBKEY 1 EQUALVERIFY <wp> EQUALVERIFY
- *   INSPECTOUTPUTVALUE <amount> EQUAL
- *   ```
+ * **Single-input mode** (omit `otherStakeValue`): mirrors the canonical
+ * `enforcePayTo` helper. The covenant binds one output and lives on one
+ * escrow; spends are NOT atomic across the two escrows (each can be
+ * claimed independently).
  *
- * **Witness stack at spend time:** `[output_index]` — the spender chooses
- * which output of the tx the covenant inspects. `DUP` duplicates the index
- * so it can drive both `INSPECTOUTPUTSCRIPTPUBKEY` and `INSPECTOUTPUTVALUE`.
+ * **Atomic-sweep mode** (`otherStakeValue` provided): the covenant ALSO
+ * binds the value of another input (typically the matching escrow). The
+ * spender supplies its index as a witness arg. Because the other input's
+ * value is pinned to a game-specific constant, a forfeit-claim that
+ * spends THIS escrow alone fails the value check — both escrows must
+ * appear in the same transaction. In atomic mode, `payAmount` is the
+ * **total pot** (this stake + other stake) and the single output absorbs
+ * the full sum.
+ *
+ * **Witness stack at spend time:**
+ *   - single-input mode: `[output_index]`
+ *   - atomic mode: `[output_index, other_input_index]` (other_input_index
+ *     on top)
  *
  * Notes:
  * - No `INSPECTNUMOUTPUTS` constraint: Ark transactions carry an anchor
- *   (P2A) and OP_RETURN extension outputs that the player can't suppress,
- *   so pinning the output count would refuse all valid spends.
- * - `EQUAL` (not `GREATERTHANOREQUAL`): matches the canonical helper. Ark
- *   intent fees are charged out-of-band against the operator's fee budget,
- *   so the full `payAmount` reaches the player.
- * - The **preimage check** (player must reveal a secret matching
- *   `playerHash`) is **not** in the arkade script — it lives in the
- *   surrounding tapscript closure as a `ConditionMultisig` condition, where
- *   arkd enforces it at the consensus layer.
- *
- * Layout rationale: covenant lives in arkade (emulator enforces); preimage
- * + CLTV live in the tapscript closure (arkd enforces). Two enforcement
- * surfaces, each carrying the rule it's best suited to enforce.
+ *   (P2A) and OP_RETURN extension outputs that the player can't suppress.
+ * - `EQUAL` (not `GREATERTHANOREQUAL`): Ark intent fees are charged
+ *   out-of-band, so the full `payAmount` reaches the player.
+ * - The **preimage check** lives in the surrounding tapscript closure
+ *   (`ConditionMultisig`), not the arkade script — arkd enforces it at
+ *   the consensus layer.
  */
 export function buildForfeitArkadeScript(
   recipientPkScript: Uint8Array,
   payAmount: bigint,
+  otherStakeValue?: bigint,
 ): Uint8Array {
   if (recipientPkScript[0] !== 0x51 || recipientPkScript[1] !== 0x20) {
     throw new Error('buildForfeitArkadeScript: expected P2TR (v1 witness) pkScript')
   }
   if (payAmount <= 0n) throw new Error('buildForfeitArkadeScript: payAmount must be positive')
+  if (otherStakeValue !== undefined && otherStakeValue <= 0n) {
+    throw new Error('buildForfeitArkadeScript: otherStakeValue must be positive when set')
+  }
   const witnessProgram = recipientPkScript.slice(2)
   const amountBytes = encodeMinimalBigInt(payAmount)
 
   const ops: number[] = []
+  // Atomic mode prefix: pop the other-input-index from the witness top,
+  // verify its value matches `otherStakeValue`, leaving the output_index
+  // exposed on the stack for the enforcePayTo body below.
+  //
+  // Stack at script start (atomic mode): <out_idx> <other_in_idx>
+  if (otherStakeValue !== undefined) {
+    const otherBytes = encodeMinimalBigInt(otherStakeValue)
+    ops.push(ARKADE_OP.INSPECTINPUTVALUE)            // <out_idx> <other_value> (consumes other_in_idx)
+    ops.push(otherBytes.length, ...otherBytes)        // <out_idx> <other_value> <expected>
+    ops.push(OP.EQUALVERIFY)                           // <out_idx>
+  }
   // Stack: <output_index>
   ops.push(OP.DUP)                                  // <idx> <idx>
   ops.push(ARKADE_OP.INSPECTOUTPUTSCRIPTPUBKEY)     // <idx> <program> <version>
@@ -214,8 +232,18 @@ export function buildForfeitLeafSpec(args: {
   recipientPkScript: Uint8Array
   payAmount: bigint
   emulatorPubkey: Uint8Array
+  /**
+   * When set, builds the atomic-sweep variant — the covenant additionally
+   * pins the value of another input (typically the matching escrow).
+   * `payAmount` should be the full pot in this case.
+   */
+  otherStakeValue?: bigint
 }): ForfeitLeafSpec {
-  const arkadeScript = buildForfeitArkadeScript(args.recipientPkScript, args.payAmount)
+  const arkadeScript = buildForfeitArkadeScript(
+    args.recipientPkScript,
+    args.payAmount,
+    args.otherStakeValue,
+  )
   return {
     arkadeScript,
     arkadeScriptHash: arkadeScriptHash(arkadeScript),

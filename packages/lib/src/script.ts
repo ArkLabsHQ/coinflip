@@ -358,10 +358,29 @@ export interface ArkadeForfeitConfig {
   forfeitDestPkScript: Uint8Array
   /**
    * Amount the spending tx MUST pay to `forfeitDestPkScript` (in sats).
-   * For the player's escrow this is `betAmount`; for the house's escrow
-   * it's the house stake. Caller picks per-escrow.
+   *
+   * In **single-input mode** (`otherStakeValue` undefined): this escrow's
+   * own stake. The matching escrow's covenant is independent — partial
+   * forfeits (one escrow at a time) are allowed.
+   *
+   * In **atomic-sweep mode** (`otherStakeValue` set): the full POT
+   * (this stake + the other stake). The covenant requires BOTH escrows
+   * to be in the same transaction, paying the combined total to ONE
+   * output. Strictly stronger than single-input mode.
    */
   forfeitDestValue: bigint
+  /**
+   * When set, switches to atomic-sweep mode. The covenant additionally
+   * verifies that another input of the spending transaction has this
+   * exact satoshi value — typically the matching escrow's stake. The
+   * spender supplies the other input's index as the SECOND witness arg
+   * (the first being the output index, as in single-input mode).
+   *
+   * For the player's escrow leaf, pass the house stake. For the house's
+   * escrow leaf, pass the player stake. The two covenants are symmetric
+   * and consistent: each pins the other's stake by value.
+   */
+  otherStakeValue?: bigint
 }
 
 export interface CoinflipEscrowOptions {
@@ -508,6 +527,7 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
       ? buildForfeitArkadeScript(
           arkadeForfeit.forfeitDestPkScript,
           arkadeForfeit.forfeitDestValue,
+          arkadeForfeit.otherStakeValue,
         )
       : undefined
     const forfeitLeaf: arkade.ArkadeLeaf | undefined =

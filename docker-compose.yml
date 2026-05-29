@@ -16,6 +16,11 @@ services:
       # the docker-compose port map is the right access boundary here.
       - ADMIN_HOST=0.0.0.0
       - DATA_DIR=/app/data
+      # Opt-in arkade-script forfeit (R1 audit). When set, new games are
+      # minted with the 5-leaf escrow + playerForfeit leaf bound to the
+      # player's payout address. Unset/unreachable → legacy CSV penalty.
+      # See packages/server/src/emulator.ts.
+      - EMULATOR_URL=http://emulator:7073
     ports:
       - "3002:3002"
     networks:

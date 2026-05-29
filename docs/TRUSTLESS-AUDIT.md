@@ -37,13 +37,19 @@ double-charge).
 ## 2. The escrow primitive
 
 Each party funds a **different** escrow address from the same
-`CoinflipEscrowScript` (`packages/lib/src/script.ts:361`), with three leaves:
+`CoinflipEscrowScript`, with four leaves baseline (five when the operator runs
+the emulator):
 
-| Leaf | Signers | Extra condition | Timelock |
-|------|---------|-----------------|----------|
-| `creatorWin` | house + arkd | both secrets, roll **∉** `[lo,target)` | none — immediate |
-| `playerWin` | player + arkd | both secrets, roll **∈** `[lo,target)` | none — immediate |
-| `refund` | **funder** + arkd | — | **CLTV @ `finalExpiration`** |
+| Leaf | Signers | Extra condition | Timelock | Bucket |
+|------|---------|-----------------|----------|--------|
+| `creatorWin` | house + arkd | both secrets, roll **∉** `[lo,target)` | none | execution |
+| `playerWin` | player + arkd | both secrets, roll **∈** `[lo,target)` | none | execution |
+| `refund` | **funder** + arkd | — | CLTV @ `finalExpiration` | execution |
+| `playerPenalty` | player + arkd | HASH160(playerSecret) | CSV ~17 min | **exit** |
+| `playerForfeit` *(opt-in)* | player + arkd + emulator-tweaked | arkade-script covenant pins `(payoutPkScript, perEscrowValue)` | CLTV @ `finalExpiration` | execution |
+
+`playerPenalty` and `playerForfeit` are R1 backstops (see Phase 4). The first
+is always present; the second is added when `EMULATOR_URL` is configured.
 
 The two escrows share the win leaves (winner sweeps **both** VTXOs) but each
 `refund` leaf is scoped to **its own funder** (`refundPubkey`, script.ts:386).
@@ -106,7 +112,7 @@ client stashes it **before** revealing (`playTrustlessGame`, step 2b).
 - **Malicious house:** the refund tx pays the player's address and is CLTV+player
   scoped, so the server **cannot redirect** it. ✓
 
-### Phase 4 — `/commit`: reveal + resolve  ⚠ central caveat
+### Phase 4 — `/commit`: reveal + resolve  ⚠ central caveat (R1 mitigated)
 Player sends `playerSecret`; server verifies the hash, resolves via
 `determineVariableWinner`, and:
 - **house win** → server signs + submits the `creatorWin` sweep (it holds both
@@ -117,27 +123,52 @@ Player sends `playerSecret`; server verifies the hash, resolves via
 - **Malicious player:** reveal ≠ committed hash → rejected
   (`"does not match committed hash"`). Out-of-range secret → player loses
   (cheat-penalty). Can't cheat the roll. ✓
-- **Malicious house — the headline finding (R1):** the player reveals **first**
+- **Malicious house — the original R1 finding:** the player reveals **first**
   (in the request); the house learns the outcome and only **then** decides what to
-  return. On a **player win**, a malicious house can **withhold its secret / stall
-  the response**. The player needs **both** secrets to satisfy the win-leaf
-  condition witness, so without the house secret the player **cannot sweep the
-  pot** — they fall back to refunding their **principal only** (§6). The house
-  likewise refunds its own stake. Net: **the house can refuse to *lose*** — it
-  never steals (principal is always safe), but it can void a win it would have had
-  to pay, forcing the game back to even.
-  - This is a genuine **fair-exchange asymmetry**, not covered by the
-    hash-commit ordering (which only prevents *pre-reveal* bias). Whoever reveals
-    last has the abort advantage; here that is the house/server.
-  - **Cost to the house:** none beyond forgoing the edge on that game (both stakes
-    refund) — so a rational malicious house has a positive incentive to grief
-    player wins. The cryptographic guarantee is **principal-safety, not
-    win-liveness**.
-  - **Practical deterrent:** an operator that withholds wins is publicly
-    detectable (the player proves it revealed and got nothing) and loses its
-    player base. **Mitigation is reputational/operational, not cryptographic.**
-    A future fix needs verifiable/forced house-secret revelation (fair exchange or
-    on-chain-openable commitment). *Tracked as R1.*
+  return. On a **player win**, a malicious house can **withhold its secret /
+  stall the response**. The player needs **both** secrets to satisfy the
+  win-leaf condition witness, so without the house secret the player cannot
+  sweep the pot via `playerWin` directly. Two forfeit paths now backstop this:
+
+  1. **CSV `playerPenalty` leaf (legacy fallback).** A
+     `ConditionCSVMultisigTapscript` leaf on each escrow gated by
+     HASH160(playerHash) + relative CSV (~17 min). After CSV maturity the
+     player can sweep both escrows with only its own secret — punishes the
+     house with the loss of its stake. **Architectural caveat:** lives in
+     arkd's *ExitClosures* bucket, so the spend forces a unilateral on-chain
+     exit. Standing rule: *"CSV is for unilateral exit, CLTV is for execution
+     paths"* — so CSV here is correct-by-script-rules but weaker
+     architecturally than the new path.
+
+  2. **Arkade-script `playerForfeit` leaf (new, opt-in).** When the operator
+     sets `EMULATOR_URL`, new games are minted with a 5-leaf escrow whose 5th
+     leaf is `CLTVMultisigTapscript(finalExpiration, [player, server,
+     emulator_tweaked])` wrapping an arkade-script covenant that pins
+     `(playerPayoutPkScript, perEscrowValue)`. arkd enforces the CLTV in its
+     *ForfeitClosures* (execution) bucket; the emulator
+     ([arkade-os/emulator](https://github.com/arkade-os/emulator)) enforces
+     the covenant before co-signing the tweaked slot. Once CLTV opens, the
+     player builds the forfeit-claim through `POST /api/game/:id/forfeit` and
+     submits it to the emulator's `/v1/tx`. **No unilateral exit needed; the
+     forfeit lives alongside the win-resolution paths.** Trust assumption:
+     the emulator is liveness-only — it cannot redirect funds, only refuse
+     to co-sign (which still leaves the CSV path available). See
+     `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`.
+
+  Either path closes R1 cryptographically: a withholding house loses **both**
+  its stake (the CSV penalty) and any future plays (player base). The
+  arkade-script path is the architecturally clean version; the CSV path is
+  retained for clients that don't trust the operator's emulator.
+
+  **What's open**: cross-input atomicity. Both forfeit paths today require
+  the player to spend each escrow in its own transaction (legacy CSV) or
+  pin one specific `(destPkScript, destValue)` per escrow's covenant (arkade
+  path, single transaction with one output per escrow). A *single covenant
+  per escrow that asserts the OTHER escrow is also being spent in the same
+  tx and that the combined value lands at the player* requires the second
+  escrow's outpoint known at script-build time — straightforward once the
+  setup tx is deterministically committed at game creation. Tracked as the
+  R1-atomic follow-up.
 
 ### Phase 5 — winner sweeps the pot
 Winner spends **both** escrow VTXOs via the matching win leaf, paying the pot
@@ -175,8 +206,9 @@ co-signs.
 |---------|---------------|-----------|-----------------|
 | House stalls before player escrows | house | house stake locked to CLTV | house reclaims (§6) |
 | Player abandons after escrowing | house | house stake locked to CLTV | house reclaims (§6) |
-| **House withholds secret on player win (R1)** | **player** | **denied winnings** | **player refunds principal** |
+| **House withholds secret on player win (R1)** | **player** | denied immediate win sweep | **CSV `playerPenalty` (always) or CLTV arkade-script `playerForfeit` (opt-in): player takes BOTH stakes** |
 | arkd refuses to co-sign | winner | sweep blocked | refund principal at CLTV |
+| Emulator refuses to co-sign (arkade path only) | player | arkade forfeit blocked | fall back to CSV `playerPenalty` |
 | Sweep races arkd indexing (R2) | winner | (was) denied winnings | **fixed** (retry) |
 | Chain block time lags the CLTV | reclaiming party | refund delayed | matures as blocks advance |
 
@@ -271,24 +303,39 @@ back-pressure / on-demand split for bursts.
 ✅ **R2** player-win sweep `VTXO_NOT_FOUND` retry (indexing race).
 ✅ **R4** refund readiness gated on chain block time (BIP113 MTP), not wall-clock.
 🟡 **R5** confirm preconfirmed-sweep settlement on a progressing chain (open).
+✅ **R1 (CSV path)** `playerPenalty` `ConditionCSVMultisigTapscript` leaf added
+   to each escrow; player sweeps both with own secret after ~17-min CSV.
+✅ **R1 (arkade-script path, opt-in)** `playerForfeit` `CLTVMultisigTapscript`
+   leaf + arkade-script covenant + emulator co-signer when `EMULATOR_URL` is
+   set; execution-bucket forfeit without unilateral exit. See
+   `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`.
 
 ---
 
 ## 10. Residual risks & recommendations
 
-- **R1 (highest) — house can refuse to lose.** A malicious house withholds its
-  secret at `/commit` on a player win → player recovers principal but not
-  winnings. Principal-trustless, not win-liveness-trustless. *Reputational
-  deterrent today; a fair-exchange / forced-reveal mechanism would close it
-  cryptographically.*
+- **R1 — house can refuse to lose** (mitigated, two paths):
+  - **CSV `playerPenalty` (default, all clients).** Player sweeps both
+    escrows with its own secret after ~17-min CSV; lives in arkd's exit
+    bucket so requires unilateral exit. Always available.
+  - **Arkade-script `playerForfeit` (opt-in via `EMULATOR_URL`).** Same
+    economic outcome, but in arkd's execution bucket via a CLTV closure +
+    arkade-script covenant validated by the
+    [emulator service](https://github.com/arkade-os/emulator). No exit
+    required. Trust assumption: emulator is liveness-only (cannot redirect
+    funds, only refuse to co-sign — at which point the CSV path still works).
+  - **Atomic sweep follow-up.** Both paths still claim one escrow per tx
+    (CSV) or one output per escrow (arkade); a single covenant binding both
+    escrow outpoints would atomize the sweep further. Not blocking.
 - **R3 — Sybil `/play` liquidity DoS.** Per-pubkey pending cap doesn't bound
   per-IP/Sybil; consider rate-limiting `/play` or requiring the player escrow
   before the house commits its stake.
 - **R5 — settlement confirmation** on a non-frozen chain (see §7).
 - **Pool sizing/merge** under sustained production load (§9).
 
-**Bottom line:** funds are safe (no party can take another's principal, by
-construction), and the cooperative happy path is sound. The remaining gap is
-**win-liveness against a dishonest house (R1)** — the player can always get its
-money back, but cannot yet *force* a deserved win to pay out without the house's
-cooperation.
+**Bottom line:** funds are safe by construction (no party takes another's
+principal), the cooperative happy path is sound, and R1 win-liveness now has
+two cryptographic backstops — the universally-available CSV penalty and the
+architecturally cleaner arkade-script forfeit (when the operator runs the
+emulator). The house **cannot refuse to lose** any more: withholding burns
+its stake either way.

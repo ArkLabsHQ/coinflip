@@ -9,6 +9,7 @@ import {
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund, penalty as apiPenalty,
+  forfeit as apiForfeit,
   type Outpoint,
 } from '@/services/api'
 import { createHash } from '@/utils/crypto'
@@ -740,6 +741,45 @@ const ark: Module<ArkState, RootState> = {
         console.warn('[trustless] could not stash penalty (continuing):', e instanceof Error ? e.message : e)
       }
 
+      // 2d. Stash the arkade-script forfeit tx — only available when the
+      // server was started with EMULATOR_URL and the escrow was minted with
+      // the 5-leaf layout. Architecturally cleaner than the CSV penalty
+      // (execution bucket vs exit bucket); the UI will prefer this one when
+      // both are present.
+      //
+      // Like penalty, stashed BEFORE /commit so it survives any commit-time
+      // network failure. The emulator URL must be the BROWSER-reachable one
+      // (server returns publicUrl via /api/network) — we hit /v1/tx on the
+      // emulator directly, not through arkd, because the emulator validates
+      // the arkade covenant + co-signs the tweaked slot + forwards to arkd
+      // in a single request.
+      try {
+        const { emulator } = await getNetwork()
+        if (emulator) {
+          const f = await apiForfeit(playRes.gameId, playerEscrow)
+          if (f.payoutAddress !== playerChangeAddress) {
+            console.warn('[trustless] forfeit payoutAddress mismatch — refusing to stash')
+          } else {
+            updateRefundStash(playRes.gameId, {
+              forfeitPsbt: f.forfeitPsbt,
+              forfeitCheckpoints: f.forfeitCheckpoints,
+              forfeitClaimableAt: f.forfeitClaimableAt,
+              forfeitEmulatorUrl: emulator.url,
+              playerSecretHex,
+            })
+          }
+        }
+      } catch (e) {
+        // 400 here is the expected "legacy 4-leaf escrow" rejection — game
+        // was minted before EMULATOR_URL was wired. Logged at debug only.
+        const msg = e instanceof Error ? e.message : String(e)
+        if (/without arkade-script/i.test(msg)) {
+          console.debug('[trustless] game minted without arkade-script — forfeit unavailable, penalty path active')
+        } else {
+          console.warn('[trustless] could not stash forfeit (continuing):', msg)
+        }
+      }
+
       // 3. Reveal + resolve. On ANY failure the stash is kept so the player can
       // reclaim after the timelock; on success the escrow is swept, so we clear
       // it. Player win → the server built the playerWin sweep; we sign + submit.
@@ -883,6 +923,71 @@ const ark: Module<ArkState, RootState> = {
         }
         throw e
       }
+      clearRefund(gameId)
+      await dispatch('refreshBalance').catch(() => { /* indexer lag */ })
+    },
+
+    /**
+     * Submit the stashed arkade-script forfeit claim — sweeps BOTH escrows to
+     * the player via the `playerForfeit` CLTVMultisigTapscript leaf (execution
+     * bucket; no unilateral exit). Architecturally distinct from claimPenalty:
+     *
+     *   1. PSBT is posted to the EMULATOR (stash.forfeitEmulatorUrl + /v1/tx),
+     *      not arkd. The emulator runs the arkade covenant on each input, then
+     *      signs the tweaked-emulator slot and forwards the finalized tx to
+     *      arkd in a single request.
+     *   2. Witness is empty per input from our side — the covenant reads the
+     *      output index from the EmulatorPacket the server embedded. The
+     *      player just signs both slots.
+     *   3. CLTV is ABSOLUTE (`forfeitClaimableAt`), not relative. Gate on
+     *      `chainTipTime >= forfeitClaimableAt`.
+     *
+     * Clears the stash on success.
+     */
+    async claimForfeit({ rootState, dispatch }, gameId: string) {
+      if (!sdkWallet) throw new Error('Wallet not connected')
+      const privateKey = rootState.wallet.privateKey
+      if (!privateKey) throw new Error('No wallet key available')
+      const stash = loadRefunds().find((x) => x.gameId === gameId)
+      if (
+        !stash || !stash.forfeitPsbt || !stash.forfeitCheckpoints ||
+        !stash.forfeitEmulatorUrl || stash.forfeitClaimableAt === undefined
+      ) {
+        throw new Error('No arkade-script forfeit stashed for this game — use claimPenalty or reclaim.')
+      }
+      if (!stash.revealed) {
+        throw new Error("Can't forfeit-claim a game that wasn't revealed — use refund instead.")
+      }
+
+      const identity = SingleKey.fromHex(privateKey)
+      const arkTx = Transaction.fromPSBT(hex.decode(stash.forfeitPsbt))
+      // Both inputs are 3-of-3 [player, server, emulator_tweaked]. The player
+      // signs both player slots; arkd signs server slots; the emulator signs
+      // the tweaked slots after running the arkade script.
+      const signed = await identity.sign(arkTx, [0, 1])
+      const cps = stash.forfeitCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+
+      // POST to the emulator's /v1/tx with the partially-signed PSBT +
+      // checkpoint PSBTs. The emulator returns the finalized PSBT once arkd
+      // has co-signed (the emulator forwards it internally).
+      const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          arkTx: base64.encode(signed.toPSBT()),
+          checkpointTxs: cps.map((c) => base64.encode(c.toPSBT())),
+        }),
+      })
+      if (!resp.ok) {
+        const text = await resp.text()
+        // Mirror the FORFEIT_CLOSURE_LOCKED messaging — same root cause (CLTV
+        // not yet satisfied at the chain's block time), different surface.
+        if (/locked|too early|CLTV|locktime/i.test(text)) {
+          throw new Error("Not claimable yet — the chain's block time hasn't reached the forfeit CLTV. Try again shortly.")
+        }
+        throw new Error(`Emulator rejected forfeit: ${text}`)
+      }
+
       clearRefund(gameId)
       await dispatch('refreshBalance').catch(() => { /* indexer lag */ })
     },

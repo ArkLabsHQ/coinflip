@@ -5,8 +5,34 @@
       <span class="sub">A game didn't resolve — reclaim your escrowed stake trustlessly.</span>
     </div>
     <div v-for="b in bets" :key="b.gameId" class="bet-row">
-      <!-- R1 forfeit: player revealed, server withheld — penalty path is primary -->
-      <template v-if="hasPenalty(b)">
+      <!-- R1 forfeit, arkade-script path: execution bucket, no unilateral exit.
+           Preferred when present (CSV penalty stays in stash as silent fallback). -->
+      <template v-if="hasForfeit(b)">
+        <div class="bet-info">
+          <span class="amount penalty-amount">Claim full pot — {{ b.tier.toLocaleString() }} sats (your stake + house)</span>
+          <span class="state" :class="{ ready: isForfeitReady(b) }">{{ forfeitStatusLabel(b) }}</span>
+          <span class="penalty-note">The house didn't reveal its secret. Forfeit kicks in — you take everything.</span>
+        </div>
+        <div class="bet-actions">
+          <button
+            class="claim-btn"
+            :disabled="!isForfeitReady(b) || busy === b.gameId"
+            @click="claimForfeit(b.gameId)"
+          >
+            {{ busy === b.gameId ? 'Claiming…' : 'Claim full pot' }}
+          </button>
+          <button
+            class="reclaim-link"
+            :disabled="!isReady(b) || busy === b.gameId"
+            @click="reclaim(b.gameId)"
+          >
+            {{ busy === b.gameId ? 'Reclaiming…' : 'Reclaim principal only' }}
+          </button>
+        </div>
+      </template>
+
+      <!-- R1 forfeit, CSV path: legacy / no emulator. Same economic outcome. -->
+      <template v-else-if="hasPenalty(b)">
         <div class="bet-info">
           <span class="amount penalty-amount">Claim full pot — {{ b.tier.toLocaleString() }} sats (your stake + house)</span>
           <span class="state" :class="{ ready: isPenaltyReady(b) }">{{ penaltyStatusLabel(b) }}</span>
@@ -30,7 +56,7 @@
         </div>
       </template>
 
-      <!-- No penalty: game abandoned before reveal — self-refund only -->
+      <!-- No penalty / no forfeit: game abandoned before reveal — self-refund only -->
       <template v-else>
         <div class="bet-info">
           <span class="amount">{{ b.tier.toLocaleString() }} sats</span>
@@ -82,9 +108,16 @@ export default defineComponent({
     const hasPenalty = (b: StashedRefund) =>
       b.revealed === true && !!b.penaltyPsbt && b.penaltyTimelockSeconds !== undefined
 
+    /** True when the stash has an arkade-script forfeit and the player has revealed. */
+    const hasForfeit = (b: StashedRefund) =>
+      b.revealed === true && !!b.forfeitPsbt && !!b.forfeitEmulatorUrl && b.forfeitClaimableAt !== undefined
+
     /** Penalty claimable-at: createdAt is an upper-bound proxy for escrow confirmation. */
     const penaltyClaimableAt = (b: StashedRefund): number =>
       Math.floor(b.createdAt / 1000) + (b.penaltyTimelockSeconds ?? 0)
+
+    /** Forfeit claimable-at: absolute CLTV pinned in the leaf at /play time. */
+    const forfeitClaimableAt = (b: StashedRefund): number => b.forfeitClaimableAt ?? Number.MAX_SAFE_INTEGER
 
     /** Self-refund readiness (unchanged R4 logic). */
     const isReady = (b: StashedRefund) => chainTime.value !== null && chainTime.value >= b.finalExpiration
@@ -92,6 +125,10 @@ export default defineComponent({
     /** Penalty readiness — mirrors R4 gating but uses penaltyClaimableAt. */
     const isPenaltyReady = (b: StashedRefund) =>
       chainTime.value !== null && chainTime.value >= penaltyClaimableAt(b)
+
+    /** Forfeit readiness — chain time has reached the absolute CLTV. */
+    const isForfeitReady = (b: StashedRefund) =>
+      chainTime.value !== null && chainTime.value >= forfeitClaimableAt(b)
 
     function statusLabel(b: StashedRefund): string {
       if (chainTime.value === null) return 'Checking chain time…'
@@ -107,6 +144,14 @@ export default defineComponent({
       const at = penaltyClaimableAt(b)
       const mins = Math.ceil((at - chainTime.value) / 60)
       return `Claimable in ~${mins} min (chain time)`
+    }
+
+    function forfeitStatusLabel(b: StashedRefund): string {
+      if (chainTime.value === null) return 'Checking chain time…'
+      if (isForfeitReady(b)) return 'Claimable now (arkade)'
+      const at = forfeitClaimableAt(b)
+      const mins = Math.ceil((at - chainTime.value) / 60)
+      return `Claimable in ~${mins} min (arkade, chain time)`
     }
 
     async function reclaim(gameId: string) {
@@ -137,6 +182,20 @@ export default defineComponent({
       }
     }
 
+    async function claimForfeit(gameId: string) {
+      busy.value = gameId
+      message.value = ''
+      try {
+        await store.dispatch('ark/claimForfeit', gameId)
+        message.value = 'Full pot claimed via arkade — both stakes returned to your wallet.'
+      } catch (e: unknown) {
+        message.value = e instanceof Error ? e.message : 'Forfeit failed'
+      } finally {
+        busy.value = null
+        await refresh()
+      }
+    }
+
     onMounted(() => {
       refresh()
       refreshChainTime()
@@ -148,9 +207,9 @@ export default defineComponent({
 
     return {
       bets, busy, message,
-      hasPenalty, isReady, isPenaltyReady,
-      statusLabel, penaltyStatusLabel,
-      reclaim, claimPenalty,
+      hasPenalty, hasForfeit, isReady, isPenaltyReady, isForfeitReady,
+      statusLabel, penaltyStatusLabel, forfeitStatusLabel,
+      reclaim, claimPenalty, claimForfeit,
     }
   },
 })

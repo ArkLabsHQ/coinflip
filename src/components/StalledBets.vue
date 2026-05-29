@@ -31,32 +31,7 @@
         </div>
       </template>
 
-      <!-- R1 forfeit, CSV path: legacy / no emulator. Same economic outcome. -->
-      <template v-else-if="hasPenalty(b)">
-        <div class="bet-info">
-          <span class="amount penalty-amount">Claim full pot — {{ b.tier.toLocaleString() }} sats (your stake + house)</span>
-          <span class="state" :class="{ ready: isPenaltyReady(b) }">{{ penaltyStatusLabel(b) }}</span>
-          <span class="penalty-note">The house didn't reveal its secret. Forfeit kicks in — you take everything.</span>
-        </div>
-        <div class="bet-actions">
-          <button
-            class="claim-btn"
-            :disabled="!isPenaltyReady(b) || busy === b.gameId"
-            @click="claimPenalty(b.gameId)"
-          >
-            {{ busy === b.gameId ? 'Claiming…' : 'Claim full pot' }}
-          </button>
-          <button
-            class="reclaim-link"
-            :disabled="!isReady(b) || busy === b.gameId"
-            @click="reclaim(b.gameId)"
-          >
-            {{ busy === b.gameId ? 'Reclaiming…' : 'Reclaim principal only' }}
-          </button>
-        </div>
-      </template>
-
-      <!-- No penalty / no forfeit: game abandoned before reveal — self-refund only -->
+      <!-- No forfeit stashed (pre-reveal abandonment): self-refund only -->
       <template v-else>
         <div class="bet-info">
           <span class="amount">{{ b.tier.toLocaleString() }} sats</span>
@@ -104,27 +79,15 @@ export default defineComponent({
       if (typeof t === 'number') chainTime.value = t
     }
 
-    /** True when the stash has a penalty and the player has revealed. */
-    const hasPenalty = (b: StashedRefund) =>
-      b.revealed === true && !!b.penaltyPsbt && b.penaltyTimelockSeconds !== undefined
-
     /** True when the stash has an arkade-script forfeit and the player has revealed. */
     const hasForfeit = (b: StashedRefund) =>
       b.revealed === true && !!b.forfeitPsbt && !!b.forfeitEmulatorUrl && b.forfeitClaimableAt !== undefined
 
-    /** Penalty claimable-at: createdAt is an upper-bound proxy for escrow confirmation. */
-    const penaltyClaimableAt = (b: StashedRefund): number =>
-      Math.floor(b.createdAt / 1000) + (b.penaltyTimelockSeconds ?? 0)
-
     /** Forfeit claimable-at: absolute CLTV pinned in the leaf at /play time. */
     const forfeitClaimableAt = (b: StashedRefund): number => b.forfeitClaimableAt ?? Number.MAX_SAFE_INTEGER
 
-    /** Self-refund readiness (unchanged R4 logic). */
+    /** Self-refund readiness. */
     const isReady = (b: StashedRefund) => chainTime.value !== null && chainTime.value >= b.finalExpiration
-
-    /** Penalty readiness — mirrors R4 gating but uses penaltyClaimableAt. */
-    const isPenaltyReady = (b: StashedRefund) =>
-      chainTime.value !== null && chainTime.value >= penaltyClaimableAt(b)
 
     /** Forfeit readiness — chain time has reached the absolute CLTV. */
     const isForfeitReady = (b: StashedRefund) =>
@@ -136,14 +99,6 @@ export default defineComponent({
       const mins = Math.ceil((b.finalExpiration - chainTime.value) / 60)
       // Label as chain-time so a lagging regtest clock reads as expected, not a bug.
       return `Reclaimable in ~${mins} min (chain time)`
-    }
-
-    function penaltyStatusLabel(b: StashedRefund): string {
-      if (chainTime.value === null) return 'Checking chain time…'
-      if (isPenaltyReady(b)) return 'Claimable now'
-      const at = penaltyClaimableAt(b)
-      const mins = Math.ceil((at - chainTime.value) / 60)
-      return `Claimable in ~${mins} min (chain time)`
     }
 
     function forfeitStatusLabel(b: StashedRefund): string {
@@ -162,20 +117,6 @@ export default defineComponent({
         message.value = 'Reclaimed — stake returned to your wallet.'
       } catch (e: unknown) {
         message.value = e instanceof Error ? e.message : 'Reclaim failed'
-      } finally {
-        busy.value = null
-        await refresh()
-      }
-    }
-
-    async function claimPenalty(gameId: string) {
-      busy.value = gameId
-      message.value = ''
-      try {
-        await store.dispatch('ark/claimPenalty', gameId)
-        message.value = 'Full pot claimed — both stakes returned to your wallet.'
-      } catch (e: unknown) {
-        message.value = e instanceof Error ? e.message : 'Claim failed'
       } finally {
         busy.value = null
         await refresh()
@@ -207,9 +148,9 @@ export default defineComponent({
 
     return {
       bets, busy, message,
-      hasPenalty, hasForfeit, isReady, isPenaltyReady, isForfeitReady,
-      statusLabel, penaltyStatusLabel, forfeitStatusLabel,
-      reclaim, claimPenalty, claimForfeit,
+      hasForfeit, isReady, isForfeitReady,
+      statusLabel, forfeitStatusLabel,
+      reclaim, claimForfeit,
     }
   },
 })

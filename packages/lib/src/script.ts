@@ -22,7 +22,6 @@ import { hex } from '@scure/base'
 import {
   VtxoScript,
   ConditionMultisigTapscript,
-  ConditionCSVMultisigTapscript,
   CLTVMultisigTapscript,
   TapLeafScript,
   arkade,
@@ -330,71 +329,29 @@ export class CoinflipFinalScript extends VtxoScript {
 }
 
 /**
- * Optional arkade-script forfeit configuration for `CoinflipEscrowScript`.
- *
- * When supplied, the escrow grows a 5th `playerForfeit` leaf gated by
- * `CLTVMultisigTapscript(finalExpiration, [player, server, emulator_tweaked])`
- * wrapping an arkade-script covenant that enforces the spending tx pays
- * `forfeitDestPkScript` exactly `forfeitDestValue` sats to one of its
- * outputs (output index is supplied by the spender as a witness arg).
- *
- * This is the **execution-bucket** (CLTV) replacement for the legacy
- * `playerPenalty` CSV leaf. Old clients without emulator wiring stay on
- * the CSV path; clients that trust the operator's emulator get the cleaner
- * forfeit path that lives alongside the win-resolution closures rather
- * than forcing unilateral exit.
- *
- * Adding the leaf changes the escrow's taptree → **new address**. Game
- * setup must decide upfront whether the new layout is used (off by default).
+ * Arkade-script forfeit + covenant-win configuration. Required at all
+ * times — the coinflip protocol is single-path: it depends on an
+ * emulator-signed covenant for resolution and a CLTV-gated covenant
+ * for R1 forfeit. There is no legacy fallback.
  */
 export interface ArkadeForfeitConfig {
   /** 32-byte x-only OR 33-byte compressed emulator pubkey. */
   emulatorPubkey: Uint8Array
   /**
-   * On-chain P2TR pkScript (`0x51 0x20 <32-byte witness program>`) of the
-   * player's payout address. The arkade-script covenant pins this script
-   * exactly — the spending tx MUST produce an output matching it.
-   *
-   * Used by **two** leaves when both are wired (5-leaf + win-covenant
-   * layout): `playerForfeit` (R1 escape) and `playerWinCovenant`
-   * (server-resolved player win).
+   * Player payout P2TR pkScript. Pinned by:
+   *   - `playerWinCovenant`  (server settles player win, no client sig)
+   *   - `playerForfeit`      (R1: player sweeps both stakes after CLTV)
    */
-  forfeitDestPkScript: Uint8Array
+  playerPayoutPkScript: Uint8Array
   /**
-   * Optional: house's payout pkScript. When supplied alongside
-   * `forfeitDestPkScript`, the escrow grows two additional covenant-
-   * resolved win leaves (`playerWinCovenant`, `creatorWinCovenant`)
-   * that let the server settle a resolved game without any client
-   * signature — the covenant pins the destination + amount, the
-   * multisig is `[server, emulator_tweaked]`. Omit to keep the
-   * 5-leaf layout (forfeit only).
+   * House payout P2TR pkScript. Pinned by:
+   *   - `creatorWinCovenant` (server settles house win, no client sig)
    */
-  housePayoutPkScript?: Uint8Array
-  /**
-   * Amount the spending tx MUST pay to `forfeitDestPkScript` (in sats).
-   *
-   * In **single-input mode** (`otherStakeValue` undefined): this escrow's
-   * own stake. The matching escrow's covenant is independent — partial
-   * forfeits (one escrow at a time) are allowed.
-   *
-   * In **atomic-sweep mode** (`otherStakeValue` set): the full POT
-   * (this stake + the other stake). The covenant requires BOTH escrows
-   * to be in the same transaction, paying the combined total to ONE
-   * output. Strictly stronger than single-input mode.
-   */
-  forfeitDestValue: bigint
-  /**
-   * When set, switches to atomic-sweep mode. The covenant additionally
-   * verifies that another input of the spending transaction has this
-   * exact satoshi value — typically the matching escrow's stake. The
-   * spender supplies the other input's index as the SECOND witness arg
-   * (the first being the output index, as in single-input mode).
-   *
-   * For the player's escrow leaf, pass the house stake. For the house's
-   * escrow leaf, pass the player stake. The two covenants are symmetric
-   * and consistent: each pins the other's stake by value.
-   */
-  otherStakeValue?: bigint
+  housePayoutPkScript: Uint8Array
+  /** Player stake (this leaf's "other input" value from the house's POV). */
+  playerStake: bigint
+  /** House stake (this leaf's "other input" value from the player's POV). */
+  houseStake: bigint
 }
 
 export interface CoinflipEscrowOptions {
@@ -405,345 +362,180 @@ export interface CoinflipEscrowOptions {
   playerHash: Uint8Array
   finalExpiration: bigint
   /**
-   * Relative timelock (in seconds, BIP68) after the escrow VTXO is confirmed,
-   * after which the player can sweep BOTH escrows via the playerPenalty leaf
-   * with only its own secret — the forfeit a withholding house suffers (R1).
-   * MUST be less than the time-to-`finalExpiration` so the player's penalty
-   * beats the house's self-refund. BIP68 grants 512-second granularity for
-   * seconds-type timelocks, so values rounded to multiples of 512 avoid
-   * surprises. The default in production callers is 1024n (~17 min, with
-   * 30-min refund leaving a ~13-min margin for the house to claim wins).
-   *
-   * **BIP68 silent-floor warning.** Seconds-type timelocks are encoded in
-   * 512-second units; the SDK encoder silently floors non-multiples of 512n
-   * down to the nearest lower multiple. A value below 512n encodes as 0n —
-   * producing an **immediately-spendable** leaf, which **nullifies the R1
-   * forfeit entirely**. Callers MUST pass a value that is `>= 512n` and a
-   * multiple of 512n. The documented default is `1024n` (2 × 512s ≈ 17 min).
-   */
-  penaltyTimelockSeconds: bigint
-  /**
-   * The FUNDER's pubkey: only this party (+ server) may refund after the
-   * timeout. Set to `playerPubkey` for the player's escrow and `creatorPubkey`
-   * for the house's. This is the abort-theft fix — because the player's escrow
-   * refund leaf requires the PLAYER's key, the house can never sweep the
-   * player's stake on a stall.
+   * The FUNDER's pubkey: only this party (+ server) may refund after
+   * the timeout. Set to `playerPubkey` for the player's escrow and
+   * `creatorPubkey` for the house's. Per-funder refund is the
+   * abort-theft fix: the house's refund leaf cannot touch the player's
+   * escrow.
    */
   refundPubkey: Uint8Array
   /**
-   * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the win
-   * condition becomes `oddsLo <= roll < oddsTarget` over `oddsN` outcomes
-   * (probability `(oddsTarget - oddsLo)/oddsN`) instead of the 50/50 coin.
-   * `oddsLo` defaults to 0 (a low-threshold bet); an arbitrary range expresses
-   * "roll 4+", "exactly a 6", etc. Escrow structure is otherwise identical.
+   * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the
+   * win condition is `oddsLo <= roll < oddsTarget` over `oddsN`
+   * outcomes; unset → the 50/50 coin.
    */
   oddsN?: number
   oddsTarget?: number
   oddsLo?: number
-  /**
-   * Opt-in arkade-script forfeit leaf. When set, a 5th leaf is added.
-   * See {@link ArkadeForfeitConfig}.
-   */
-  arkadeForfeit?: ArkadeForfeitConfig
+  /** Arkade-script covenant config. Required. */
+  arkadeForfeit: ArkadeForfeitConfig
 }
 
 /**
- * Per-party escrow output. Both parties fund a (different) escrow address that
- * shares the win leaves but differs only in the owner-scoped refund leaf:
- *   1. creatorWin:    condition(sizes differ → house wins) + creator + server
- *   2. playerWin:     condition(sizes equal → player wins) + player + server
- *   3. refund:        CLTV(finalExpiration) + refundPubkey(funder) + server
- *   4. playerPenalty: ConditionCSVMultisigTapscript leaf —
- *                     condition(hash-check on player) + relative CSV timelock
- *                     + 2-of-2[player, server] (audit R1: house-withholding
- *                     forfeit). A recognized SDK tapscript type, so the
- *                     standard `buildOffchainTx` helper handles it.
+ * Per-party coinflip escrow. Four leaves, all covenant-bound where the
+ * spend resolves a payout:
  *
- * The winner sweeps BOTH escrow VTXOs through `creatorWin`/`playerWin` (same
- * leaf script in either escrow); on a stall each side reclaims ONLY its own
- * escrow via `refund`. If the player revealed and the house withholds, after
- * `penaltyTimelockSeconds` has elapsed (relative to the escrow VTXO's
- * confirmation), the player sweeps BOTH escrows via `playerPenalty` with just
- * its own secret — forfeiting the house's stake. No cross-party theft is
- * expressible: penalty requires the player's revealed secret, refund requires
- * the funder's key.
+ *   1. playerWinCovenant  — Condition[player wins] + ConditionMultisig[
+ *                           server, emulator_tweaked] + atomic-sweep
+ *                           covenant (output → player payout, value = pot,
+ *                           other input value = matching escrow stake).
+ *                           Server settles, no client signature needed.
+ *   2. creatorWinCovenant — Symmetric for a house win, output bound to
+ *                           house payout.
+ *   3. playerForfeit      — CLTVMultisig[player, server, emulator_tweaked]
+ *                           + atomic-sweep covenant (output → player
+ *                           payout). R1 safety: after `finalExpiration`
+ *                           the player sweeps both stakes with only their
+ *                           own key.
+ *   4. refund             — CLTVMultisig[refundPubkey(funder), server].
+ *                           Pre-reveal abandonment: each funder reclaims
+ *                           ONLY their own escrow.
+ *
+ * The win leaves are mutually exclusive (the condition determines which
+ * fires). `playerForfeit` is only reachable past CLTV — by then any
+ * honest-server resolve would have already spent the escrow. `refund`
+ * lets each side reclaim their own stake if neither party ever reveals.
  */
 export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
-  readonly creatorWinScriptHex: string
-  readonly playerWinScriptHex: string
+  readonly playerWinCovenantScriptHex: string
+  readonly creatorWinCovenantScriptHex: string
+  readonly playerForfeitScriptHex: string
   readonly refundScriptHex: string
-  readonly playerPenaltyScriptHex: string
-  /**
-   * Hex of the `playerForfeit` arkade-script leaf script (post-tweak),
-   * or `undefined` when `arkadeForfeit` was not supplied. Use
-   * `playerForfeit()` to get the `TapLeafScript` for spending.
-   */
-  readonly playerForfeitScriptHex?: string
-  /**
-   * Raw arkade-script bytecode for the forfeit leaf, or `undefined`. Needed
-   * at spend time to add the EmulatorPacket entry that reveals the script
-   * the emulator must execute before signing.
-   */
-  readonly forfeitArkadeScript?: Uint8Array
-  /**
-   * Hex of the covenant-resolved `playerWinCovenant` /
-   * `creatorWinCovenant` leaves (post-tweak), or `undefined` when
-   * `arkadeForfeit.housePayoutPkScript` was not supplied. Each leaf is
-   * `ConditionMultisig[server, emulator_tweaked]` + win-condition
-   * predicate + atomic-sweep covenant binding the winner's payout.
-   */
-  readonly playerWinCovenantScriptHex?: string
-  readonly creatorWinCovenantScriptHex?: string
-  /** Raw arkade-script bytes for the two covenant-win leaves. */
-  readonly playerWinCovenantArkadeScript?: Uint8Array
-  readonly creatorWinCovenantArkadeScript?: Uint8Array
+  readonly playerWinCovenantArkadeScript: Uint8Array
+  readonly creatorWinCovenantArkadeScript: Uint8Array
+  readonly forfeitArkadeScript: Uint8Array
 
   constructor(readonly options: CoinflipEscrowOptions) {
-    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration, penaltyTimelockSeconds, refundPubkey, oddsN, oddsTarget, oddsLo, arkadeForfeit } = options
+    const {
+      creatorPubkey, playerPubkey, serverPubkey,
+      creatorHash, playerHash, finalExpiration, refundPubkey,
+      oddsN, oddsTarget, oddsLo,
+      arkadeForfeit: { emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake },
+    } = options
 
-    // Variable-odds when both params are set; otherwise the 50/50 coin.
-    const conditionScript =
+    const pot = playerStake + houseStake
+    // Which "other input" value each leaf pins is **symmetric** — every
+    // leaf on the player's escrow pins the house stake, every leaf on
+    // the house's escrow pins the player stake. The atomic-sweep
+    // covenant uses this to require both escrows to be in the same tx.
+    // The caller picks which "other" to bind by passing `refundPubkey`
+    // — player escrow → otherStake = houseStake; house escrow →
+    // otherStake = playerStake.
+    const isPlayerEscrow = hex.encode(refundPubkey) === hex.encode(playerPubkey)
+    const otherStake = isPlayerEscrow ? houseStake : playerStake
+
+    // Win-determination condition (player wins). House wins = OP_NOT.
+    const playerWinsCondition =
       oddsN !== undefined && oddsTarget !== undefined
         ? buildVariableOddsConditionScript(creatorHash, playerHash, oddsN, oddsTarget, oddsLo ?? 0)
         : buildCoinflipConditionScript(creatorHash, playerHash)
+    const houseWinsCondition = new Uint8Array([...playerWinsCondition, OP.NOT])
 
-    const creatorWinCondition = new Uint8Array([...conditionScript, OP.NOT])
-    const creatorWinTapscript = ConditionMultisigTapscript.encode({
-      conditionScript: creatorWinCondition,
-      pubkeys: [creatorPubkey, serverPubkey],
-    })
+    // Covenants — three of them, all atomic-sweep (cross-input value
+    // check + single output of the full pot to the winner's address).
+    const playerWinCovenantArkadeScript = buildForfeitArkadeScript(
+      playerPayoutPkScript, pot, otherStake,
+    )
+    const creatorWinCovenantArkadeScript = buildForfeitArkadeScript(
+      housePayoutPkScript, pot, otherStake,
+    )
+    const forfeitArkadeScript = buildForfeitArkadeScript(
+      playerPayoutPkScript, pot, otherStake,
+    )
 
-    const playerWinTapscript = ConditionMultisigTapscript.encode({
-      conditionScript,
-      pubkeys: [playerPubkey, serverPubkey],
-    })
+    // Leaves. ArkadeVtxoScript appends the emulator-tweaked key after
+    // hashing each arkade script — we mirror that to compute findLeaf
+    // hexes.
+    const tweakedEmuKey = (script: Uint8Array) =>
+      arkade.computeArkadeScriptPublicKey(emulatorPubkey, script)
 
-    // Owner-scoped refund: only the funder (+ server) can reclaim after timeout.
+    const playerWinCovenantLeaf: arkade.ArkadeLeaf = {
+      arkadeScript: playerWinCovenantArkadeScript,
+      emulators: [emulatorPubkey],
+      tapscript: ConditionMultisigTapscript.encode({
+        conditionScript: playerWinsCondition,
+        pubkeys: [serverPubkey],
+      }),
+    }
+    const playerWinCovenantScript = ConditionMultisigTapscript.encode({
+      conditionScript: playerWinsCondition,
+      pubkeys: [serverPubkey, tweakedEmuKey(playerWinCovenantArkadeScript)],
+    }).script
+
+    const creatorWinCovenantLeaf: arkade.ArkadeLeaf = {
+      arkadeScript: creatorWinCovenantArkadeScript,
+      emulators: [emulatorPubkey],
+      tapscript: ConditionMultisigTapscript.encode({
+        conditionScript: houseWinsCondition,
+        pubkeys: [serverPubkey],
+      }),
+    }
+    const creatorWinCovenantScript = ConditionMultisigTapscript.encode({
+      conditionScript: houseWinsCondition,
+      pubkeys: [serverPubkey, tweakedEmuKey(creatorWinCovenantArkadeScript)],
+    }).script
+
+    const forfeitLeaf: arkade.ArkadeLeaf = {
+      arkadeScript: forfeitArkadeScript,
+      emulators: [emulatorPubkey],
+      tapscript: CLTVMultisigTapscript.encode({
+        absoluteTimelock: finalExpiration,
+        pubkeys: [playerPubkey, serverPubkey],
+      }),
+    }
+    const forfeitLeafScript = CLTVMultisigTapscript.encode({
+      absoluteTimelock: finalExpiration,
+      pubkeys: [playerPubkey, serverPubkey, tweakedEmuKey(forfeitArkadeScript)],
+    }).script
+
     const refundTapscript = CLTVMultisigTapscript.encode({
       absoluteTimelock: finalExpiration,
       pubkeys: [refundPubkey, serverPubkey],
     })
 
-    // Legacy player-forfeit penalty (CSV, exit-bucket). Kept as the fallback
-    // forfeit path for clients that don't trust an emulator. See the class
-    // docstring for the architectural bucket trade-off and
-    // `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`
-    // for the rationale behind preferring the arkade-script leaf when an
-    // emulator is wired in.
-    const playerPenaltyTapscript = ConditionCSVMultisigTapscript.encode({
-      conditionScript: buildHashCheckScript(playerHash),
-      timelock: { value: penaltyTimelockSeconds, type: 'seconds' },
-      pubkeys: [playerPubkey, serverPubkey],
-    })
-
-    // 5th leaf (optional) — arkade-script forfeit (execution-bucket CLTV +
-    // covenant). The CLTV uses `finalExpiration` (same gate as `refund`) so
-    // the forfeit window opens exactly when the game window closes; if the
-    // house signed the win or refunded earlier the escrow is spent already
-    // so this leaf never fires.
-    //
-    // The covenant pins `(forfeitDestPkScript, forfeitDestValue)` — the
-    // spend MUST produce one output matching exactly. The output_index
-    // the covenant inspects is supplied as a witness arg by the spender.
-    //
-    // Multisig is [player, server, emulator_tweaked]: player gates "who is
-    // spending", server cosigns the CLTV satisfaction, emulator only
-    // cosigns when the arkade-script runs to true.
-    const forfeitArkadeScript = arkadeForfeit
-      ? buildForfeitArkadeScript(
-          arkadeForfeit.forfeitDestPkScript,
-          arkadeForfeit.forfeitDestValue,
-          arkadeForfeit.otherStakeValue,
-        )
-      : undefined
-    const forfeitLeaf: arkade.ArkadeLeaf | undefined =
-      arkadeForfeit && forfeitArkadeScript
-        ? {
-            arkadeScript: forfeitArkadeScript,
-            emulators: [arkadeForfeit.emulatorPubkey],
-            tapscript: CLTVMultisigTapscript.encode({
-              absoluteTimelock: finalExpiration,
-              pubkeys: [playerPubkey, serverPubkey],
-            }),
-          }
-        : undefined
-    // ArkadeVtxoScript appends the emulator-tweaked key to the leaf's
-    // pubkey list before encoding. Mirror that to compute the post-tweak
-    // script bytes (so we can locate the leaf via findLeaf).
-    const forfeitLeafScript = arkadeForfeit && forfeitArkadeScript
-      ? CLTVMultisigTapscript.encode({
-          absoluteTimelock: finalExpiration,
-          pubkeys: [
-            playerPubkey,
-            serverPubkey,
-            arkade.computeArkadeScriptPublicKey(
-              arkadeForfeit.emulatorPubkey,
-              forfeitArkadeScript,
-            ),
-          ],
-        }).script
-      : undefined
-
-    // Covenant-resolved win leaves (opt-in via arkadeForfeit.housePayoutPkScript).
-    // When both payout pkScripts are pinned, the escrow gets TWO additional
-    // leaves that let the server settle a resolved game with NO client
-    // signature — the covenant binds the winner's destination + the full
-    // pot, the multisig collapses to [server, emulator_tweaked]. The
-    // condition script is the same coinflip win-determination predicate
-    // (so arkd still checks "both secrets reveal AND winner == X" via
-    // ConditionMultisig).
-    //
-    // Cross-input value pinning is the same shape as forfeit: each leaf
-    // checks the OTHER escrow's stake via INSPECTINPUTVALUE, so neither
-    // escrow can be claimed alone via covenant-win.
-    const wantWinCovenant =
-      arkadeForfeit !== undefined &&
-      arkadeForfeit.housePayoutPkScript !== undefined &&
-      arkadeForfeit.otherStakeValue !== undefined &&
-      arkadeForfeit.forfeitDestValue !== undefined
-    const playerWinCovenantArkadeScript = wantWinCovenant && arkadeForfeit
-      ? buildForfeitArkadeScript(
-          arkadeForfeit.forfeitDestPkScript,                 // player payout
-          arkadeForfeit.forfeitDestValue,                    // pot
-          arkadeForfeit.otherStakeValue,                     // other escrow stake
-        )
-      : undefined
-    const creatorWinCovenantArkadeScript = wantWinCovenant && arkadeForfeit
-      ? buildForfeitArkadeScript(
-          arkadeForfeit.housePayoutPkScript!,                // house payout
-          arkadeForfeit.forfeitDestValue,                    // pot
-          arkadeForfeit.otherStakeValue,                     // other escrow stake
-        )
-      : undefined
-    const playerWinCovenantLeaf: arkade.ArkadeLeaf | undefined =
-      wantWinCovenant && arkadeForfeit && playerWinCovenantArkadeScript
-        ? {
-            arkadeScript: playerWinCovenantArkadeScript,
-            emulators: [arkadeForfeit.emulatorPubkey],
-            tapscript: ConditionMultisigTapscript.encode({
-              conditionScript,                                // player-wins predicate
-              pubkeys: [serverPubkey],
-            }),
-          }
-        : undefined
-    const creatorWinCovenantLeaf: arkade.ArkadeLeaf | undefined =
-      wantWinCovenant && arkadeForfeit && creatorWinCovenantArkadeScript
-        ? {
-            arkadeScript: creatorWinCovenantArkadeScript,
-            emulators: [arkadeForfeit.emulatorPubkey],
-            tapscript: ConditionMultisigTapscript.encode({
-              conditionScript: creatorWinCondition,           // house-wins predicate
-              pubkeys: [serverPubkey],
-            }),
-          }
-        : undefined
-    // Mirror ArkadeVtxoScript's pubkey-append to compute findLeaf hexes.
-    const playerWinCovenantScript =
-      wantWinCovenant && arkadeForfeit && playerWinCovenantArkadeScript
-        ? ConditionMultisigTapscript.encode({
-            conditionScript,
-            pubkeys: [
-              serverPubkey,
-              arkade.computeArkadeScriptPublicKey(
-                arkadeForfeit.emulatorPubkey,
-                playerWinCovenantArkadeScript,
-              ),
-            ],
-          }).script
-        : undefined
-    const creatorWinCovenantScript =
-      wantWinCovenant && arkadeForfeit && creatorWinCovenantArkadeScript
-        ? ConditionMultisigTapscript.encode({
-            conditionScript: creatorWinCondition,
-            pubkeys: [
-              serverPubkey,
-              arkade.computeArkadeScriptPublicKey(
-                arkadeForfeit.emulatorPubkey,
-                creatorWinCovenantArkadeScript,
-              ),
-            ],
-          }).script
-        : undefined
-
-    const leaves: arkade.ArkadeVtxoInput[] = [
-      creatorWinTapscript.script,
-      playerWinTapscript.script,
+    super([
+      playerWinCovenantLeaf,
+      creatorWinCovenantLeaf,
+      forfeitLeaf,
       refundTapscript.script,
-      playerPenaltyTapscript.script,
-    ]
-    if (forfeitLeaf) leaves.push(forfeitLeaf)
-    if (playerWinCovenantLeaf) leaves.push(playerWinCovenantLeaf)
-    if (creatorWinCovenantLeaf) leaves.push(creatorWinCovenantLeaf)
-    super(leaves)
+    ])
 
-    this.creatorWinScriptHex = hex.encode(creatorWinTapscript.script)
-    this.playerWinScriptHex = hex.encode(playerWinTapscript.script)
+    this.playerWinCovenantScriptHex = hex.encode(playerWinCovenantScript)
+    this.creatorWinCovenantScriptHex = hex.encode(creatorWinCovenantScript)
+    this.playerForfeitScriptHex = hex.encode(forfeitLeafScript)
     this.refundScriptHex = hex.encode(refundTapscript.script)
-    this.playerPenaltyScriptHex = hex.encode(playerPenaltyTapscript.script)
-    this.playerForfeitScriptHex = forfeitLeafScript ? hex.encode(forfeitLeafScript) : undefined
-    this.forfeitArkadeScript = forfeitArkadeScript
-    this.playerWinCovenantScriptHex = playerWinCovenantScript
-      ? hex.encode(playerWinCovenantScript)
-      : undefined
-    this.creatorWinCovenantScriptHex = creatorWinCovenantScript
-      ? hex.encode(creatorWinCovenantScript)
-      : undefined
     this.playerWinCovenantArkadeScript = playerWinCovenantArkadeScript
     this.creatorWinCovenantArkadeScript = creatorWinCovenantArkadeScript
+    this.forfeitArkadeScript = forfeitArkadeScript
   }
 
-  creatorWin(): TapLeafScript {
-    return this.findLeaf(this.creatorWinScriptHex)
-  }
-
-  playerWin(): TapLeafScript {
-    return this.findLeaf(this.playerWinScriptHex)
-  }
-
-  refund(): TapLeafScript {
-    return this.findLeaf(this.refundScriptHex)
-  }
-
-  playerPenalty(): TapLeafScript {
-    return this.findLeaf(this.playerPenaltyScriptHex)
-  }
-
-  /**
-   * Arkade-script playerForfeit leaf — only present when the constructor
-   * received an `arkadeForfeit` config. Throws if you call it on an escrow
-   * that wasn't built with one.
-   */
-  playerForfeit(): TapLeafScript {
-    if (!this.playerForfeitScriptHex) {
-      throw new Error(
-        'CoinflipEscrowScript: playerForfeit() called but no arkadeForfeit config was supplied',
-      )
-    }
-    return this.findLeaf(this.playerForfeitScriptHex)
-  }
-
-  /**
-   * Covenant-resolved player-win leaf. Only present when the constructor
-   * received `arkadeForfeit.housePayoutPkScript`. The server can spend
-   * this without any client signature — the covenant binds the player's
-   * payout address + pot, and the multisig is [server, emulator_tweaked].
-   */
+  /** Server settles a player win (no client signature). */
   playerWinCovenant(): TapLeafScript {
-    if (!this.playerWinCovenantScriptHex) {
-      throw new Error(
-        'CoinflipEscrowScript: playerWinCovenant() called but no housePayoutPkScript was supplied',
-      )
-    }
     return this.findLeaf(this.playerWinCovenantScriptHex)
   }
 
-  /** Covenant-resolved house-win leaf. Symmetric to `playerWinCovenant`. */
+  /** Server settles a house win (no client signature). */
   creatorWinCovenant(): TapLeafScript {
-    if (!this.creatorWinCovenantScriptHex) {
-      throw new Error(
-        'CoinflipEscrowScript: creatorWinCovenant() called but no housePayoutPkScript was supplied',
-      )
-    }
     return this.findLeaf(this.creatorWinCovenantScriptHex)
+  }
+
+  /** R1: player sweeps both stakes after `finalExpiration`. */
+  playerForfeit(): TapLeafScript {
+    return this.findLeaf(this.playerForfeitScriptHex)
+  }
+
+  /** Funder reclaims their own stake after `finalExpiration`. */
+  refund(): TapLeafScript {
+    return this.findLeaf(this.refundScriptHex)
   }
 }

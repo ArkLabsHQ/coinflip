@@ -37,19 +37,23 @@ double-charge).
 ## 2. The escrow primitive
 
 Each party funds a **different** escrow address from the same
-`CoinflipEscrowScript`, with four leaves baseline (five when the operator runs
-the emulator):
+`CoinflipEscrowScript`. Four leaves, all required, all covenant-bound
+where the spend resolves a payout. The emulator is a hard dependency.
 
-| Leaf | Signers | Extra condition | Timelock | Bucket |
-|------|---------|-----------------|----------|--------|
-| `creatorWin` | house + arkd | both secrets, roll **∉** `[lo,target)` | none | execution |
-| `playerWin` | player + arkd | both secrets, roll **∈** `[lo,target)` | none | execution |
-| `refund` | **funder** + arkd | — | CLTV @ `finalExpiration` | execution |
-| `playerPenalty` | player + arkd | HASH160(playerSecret) | CSV ~17 min | **exit** |
-| `playerForfeit` *(opt-in)* | player + arkd + emulator-tweaked | arkade-script covenant pins `(payoutPkScript, perEscrowValue)` | CLTV @ `finalExpiration` | execution |
+| Leaf | Signers | Predicate | Timelock | Covenant |
+|------|---------|-----------|----------|----------|
+| `playerWinCovenant` | arkd + emulator-tweaked | both secrets, roll **∈** `[lo,target)` | none | output[0] = player payout, value = pot, other-input = matching escrow stake |
+| `creatorWinCovenant` | arkd + emulator-tweaked | both secrets, roll **∉** `[lo,target)` | none | output[0] = house payout, value = pot, other-input = matching escrow stake |
+| `playerForfeit` | player + arkd + emulator-tweaked | — | CLTV @ `finalExpiration` | output[0] = player payout, value = pot, other-input = matching escrow stake |
+| `refund` | **funder** + arkd | — | CLTV @ `finalExpiration` | — (legacy) |
 
-`playerPenalty` and `playerForfeit` are R1 backstops (see Phase 4). The first
-is always present; the second is added when `EMULATOR_URL` is configured.
+Each covenant uses `OP_INSPECTINPUTVALUE` to verify the OTHER escrow's
+stake is in the spending tx — atomic-sweep. Neither escrow is spendable
+alone via the covenant leaves.
+
+The win leaves carry NO winner key — the server signs + emulator
+cosigns + arkd cosigns. **Players never sign anything post-/commit**.
+R1 forfeit fires after CLTV when the server stalled.
 
 The two escrows share the win leaves (winner sweeps **both** VTXOs) but each
 `refund` leaf is scoped to **its own funder** (`refundPubkey`, script.ts:386).

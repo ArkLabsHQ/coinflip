@@ -3,12 +3,10 @@ import {
   handleTrustlessPlay,
   handleTrustlessCommit,
   handleTrustlessRefund,
-  handleTrustlessPenalty,
   handleTrustlessForfeit,
   type TrustlessPlayRequest,
   type TrustlessCommitRequest,
   type TrustlessRefundRequest,
-  type TrustlessPenaltyRequest,
   type TrustlessForfeitRequest,
 } from './trustless-game.js'
 import { HouseBusyError, BetExceedsCapacityError } from './vtxo-pool.js'
@@ -151,33 +149,6 @@ export function createPublicRoutes(deps: AppDeps): Router {
         res.status(400).json({ error: message })
       } else {
         console.error('Refund error:', err)
-        res.status(500).json({ error: message })
-      }
-    }
-  })
-
-  // POST /api/game/:id/penalty — build the unsigned player-penalty tx for a
-  // game where the house withheld at /commit. The penalty leaf is [player +
-  // arkd] + hash-check(playerHash) + CSV(penaltyTimelockSeconds), so the
-  // client can sweep BOTH escrows with its own secret once the relative
-  // timelock matures — no house cooperation required (R1 forfeit).
-  router.post('/api/game/:id/penalty', async (req: Request, res: Response) => {
-    try {
-      const body = req.body as TrustlessPenaltyRequest
-      if (!body.playerEscrow?.txid) {
-        res.status(400).json({ error: 'Missing required field: playerEscrow' })
-        return
-      }
-      const result = await handleTrustlessPenalty(String(req.params.id), body, deps)
-      res.json(result)
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Unknown error'
-      if (message.includes('not found')) {
-        res.status(404).json({ error: message })
-      } else if (message.includes('resolved') || message.includes('no player change') || message.includes('no recorded house escrow')) {
-        res.status(400).json({ error: message })
-      } else {
-        console.error('Penalty error:', err)
         res.status(500).json({ error: message })
       }
     }

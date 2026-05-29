@@ -91,30 +91,15 @@ export function getFinalAddress(game: Game, networkHrp: string): ArkAddress {
 }
 
 /**
- * Per-party escrow scripts. Both share the win leaves but differ in an
- * owner-scoped refund leaf, so each party can only reclaim its OWN escrow on a
- * stall — the house cannot sweep the player's stake (abort-theft fix).
+ * Per-party escrow scripts — 4 leaves each (`playerWinCovenant`,
+ * `creatorWinCovenant`, `playerForfeit`, `refund`). All payout-emitting
+ * leaves are covenant-bound to the matching payout pkScript.
  *
- * Arkade-script forfeit (5th leaf) is layered on when `game.emulatorPubkey`
- * and `game.playerForfeitPkScript` are both set. **Atomic-sweep mode**
- * (default for callers that pass `otherStakeValue`) binds BOTH escrows
- * together — the covenant on each input verifies the other input's value,
- * so neither escrow is spendable alone via forfeit. Single-output pays the
- * full pot.
- *
- * Per-escrow caller wiring:
- *   - player escrow: `forfeitDestValue = pot`, `otherStakeValue = houseStake`
- *   - house escrow:  `forfeitDestValue = pot`, `otherStakeValue = playerStake`
- *
- * Both `forfeitDestValue` values are the SAME (the pot); the `otherStakeValue`
- * is what's symmetric — each covenant pins the other's contribution.
+ * The arkade-script config (`emulatorPubkey`, both payout pkScripts,
+ * both stakes) is required on the `Game` — there is no fallback escrow
+ * shape.
  */
-function escrowScript(
-  game: Game,
-  refundPubkey: Uint8Array,
-  forfeitDestValue?: bigint,
-  otherStakeValue?: bigint,
-): CoinflipEscrowScript {
+function escrowScript(game: Game, refundPubkey: Uint8Array): CoinflipEscrowScript {
   assertDefined(game.creator, 'creator')
   assertDefined(game.player, 'player')
   assertDefined(game.serverPubkey, 'serverPubkey')
@@ -123,18 +108,11 @@ function escrowScript(
   assertDefined(game.player.pubkey, 'player.pubkey')
   assertDefined(game.player.hash, 'player.hash')
   assertDefined(game.finalExpiration, 'finalExpiration')
-  assertDefined(game.penaltyTimelockSeconds, 'penaltyTimelockSeconds')
-  const arkadeForfeit =
-    game.emulatorPubkey && game.playerForfeitPkScript && forfeitDestValue !== undefined
-      ? {
-          emulatorPubkey: game.emulatorPubkey,
-          forfeitDestPkScript: game.playerForfeitPkScript,
-          forfeitDestValue,
-          otherStakeValue,
-          // Optional — adds the covenant-resolved win leaves when set.
-          housePayoutPkScript: game.housePayoutPkScript,
-        }
-      : undefined
+  assertDefined(game.emulatorPubkey, 'emulatorPubkey')
+  assertDefined(game.playerForfeitPkScript, 'playerForfeitPkScript')
+  assertDefined(game.housePayoutPkScript, 'housePayoutPkScript')
+  assertDefined(game.playerStake, 'playerStake')
+  assertDefined(game.houseStake, 'houseStake')
   return new CoinflipEscrowScript({
     creatorPubkey: game.creator.pubkey,
     playerPubkey: game.player.pubkey,
@@ -142,69 +120,34 @@ function escrowScript(
     creatorHash: game.creator.hash,
     playerHash: game.player.hash,
     finalExpiration: BigInt(game.finalExpiration),
-    penaltyTimelockSeconds: BigInt(game.penaltyTimelockSeconds),
     refundPubkey,
     oddsN: game.oddsN,
     oddsTarget: game.oddsTarget,
     oddsLo: game.oddsLo,
-    arkadeForfeit,
+    arkadeForfeit: {
+      emulatorPubkey: game.emulatorPubkey,
+      playerPayoutPkScript: game.playerForfeitPkScript,
+      housePayoutPkScript: game.housePayoutPkScript,
+      playerStake: BigInt(game.playerStake),
+      houseStake: BigInt(game.houseStake),
+    },
   })
 }
 
-/**
- * Escrow the player funds; refundable only by the player after timeout.
- *
- * @param forfeitDestValue — required ONLY when wiring the arkade-script leaf.
- *   Pass the FULL POT (atomic mode) or the player stake alone (legacy single-
- *   input mode). Omit for the legacy 4-leaf escrow.
- * @param otherStakeValue — when set, switches to atomic-sweep mode. Pass the
- *   HOUSE stake for the player escrow.
- */
-export function getPlayerEscrowScript(
-  game: Game,
-  forfeitDestValue?: bigint,
-  otherStakeValue?: bigint,
-): CoinflipEscrowScript {
-  return escrowScript(game, game.player!.pubkey!, forfeitDestValue, otherStakeValue)
+export function getPlayerEscrowScript(game: Game): CoinflipEscrowScript {
+  return escrowScript(game, game.player!.pubkey!)
 }
 
-/**
- * Escrow the house funds; refundable only by the house after timeout.
- *
- * @param forfeitDestValue — full pot in atomic mode, house stake alone in
- *   legacy single-input mode. Omit for the legacy 4-leaf escrow.
- * @param otherStakeValue — atomic mode: pass the PLAYER stake.
- */
-export function getHouseEscrowScript(
-  game: Game,
-  forfeitDestValue?: bigint,
-  otherStakeValue?: bigint,
-): CoinflipEscrowScript {
-  return escrowScript(game, game.creator!.pubkey!, forfeitDestValue, otherStakeValue)
+export function getHouseEscrowScript(game: Game): CoinflipEscrowScript {
+  return escrowScript(game, game.creator!.pubkey!)
 }
 
-export function getPlayerEscrowAddress(
-  game: Game,
-  networkHrp: string,
-  forfeitDestValue?: bigint,
-  otherStakeValue?: bigint,
-): ArkAddress {
-  return getPlayerEscrowScript(game, forfeitDestValue, otherStakeValue).address(
-    networkHrp,
-    game.serverPubkey!,
-  )
+export function getPlayerEscrowAddress(game: Game, networkHrp: string): ArkAddress {
+  return getPlayerEscrowScript(game).address(networkHrp, game.serverPubkey!)
 }
 
-export function getHouseEscrowAddress(
-  game: Game,
-  networkHrp: string,
-  forfeitDestValue?: bigint,
-  otherStakeValue?: bigint,
-): ArkAddress {
-  return getHouseEscrowScript(game, forfeitDestValue, otherStakeValue).address(
-    networkHrp,
-    game.serverPubkey!,
-  )
+export function getHouseEscrowAddress(game: Game, networkHrp: string): ArkAddress {
+  return getHouseEscrowScript(game).address(networkHrp, game.serverPubkey!)
 }
 
 /** Get the pot amount (2x bet) */
@@ -404,105 +347,8 @@ export function buildClaimTransaction(
 }
 
 /** One escrow VTXO plus the per-party script it sits behind. */
-export interface SweepEscrow {
-  script: CoinflipEscrowScript
-  txid: string
-  vout: number
-  value: number
-}
-
-export interface SweepArgs {
-  winner: 'player' | 'house'
-  /** The escrow VTXOs to sweep — each at its own per-party escrow address. */
-  escrows: SweepEscrow[]
-  payoutAddress: string
-  houseAddress: string
-  rake: number
-}
-
-/**
- * Sweep the per-party escrow VTXOs through the winner's leaf into one payout.
- * Each input is spent via ITS OWN escrow script's win leaf (the win leaves are
- * identical across player/house escrows, but the taptrees differ, so each input
- * carries its own leaf + tree). Single-party: only the winner + Ark server sign.
- * Player win → two outputs (pot−rake to player, rake to house); house win →
- * single pot output. The condition witness (both secrets) is attached by the
- * broadcaster.
- */
-export function buildSweepTransaction(
-  arkInfo: ArkInfo,
-  networkHrp: string,
-  args: SweepArgs,
-): BuiltOffchainTx {
-  void networkHrp
-  const serverUnrollScript = decodeTapscript(
-    hex.decode(arkInfo.checkpointTapscript),
-  ) as CSVMultisigTapscript.Type
-
-  const inputs: ArkTxInput[] = args.escrows.map((e) => ({
-    txid: e.txid,
-    vout: e.vout,
-    value: e.value,
-    tapLeafScript: args.winner === 'player' ? e.script.playerWin() : e.script.creatorWin(),
-    tapTree: e.script.encode(),
-  }))
-  const pot = args.escrows.reduce((a, e) => a + e.value, 0)
-
-  const winnerAddr = ArkAddress.decode(args.payoutAddress)
-  const outputs: { script: Uint8Array; amount: bigint }[] = []
-  if (args.winner === 'player' && args.rake > 0) {
-    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot - args.rake) })
-    outputs.push({ script: ArkAddress.decode(args.houseAddress).pkScript, amount: BigInt(args.rake) })
-  } else {
-    outputs.push({ script: winnerAddr.pkScript, amount: BigInt(pot) })
-  }
-
-  const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
-  return { arkTx, checkpoints }
-}
-
-export interface PenaltyArgs {
-  escrows: SweepEscrow[]
-  /** Player's Ark address — receives the entire pot via the playerPenalty leaf. */
-  payoutAddress: string
-}
-
-/**
- * Build the player's penalty-claim spending BOTH escrow VTXOs via the
- * `playerPenalty` leaf (hash-check + CSV(penaltyTimelockSeconds) + 2-of-2[player,
- * server]). Single output = the whole pot to the player. The condition witness
- * is just [playerSecret], attached by the broadcaster (not covered by the
- * signature, as with the sweep). The CSV is enforced by arkd at the VTXO layer
- * via per-input nSequence — no explicit nLockTime, mirroring buildRefundTransaction.
- */
-export function buildPenaltyTransaction(
-  arkInfo: ArkInfo,
-  networkHrp: string,
-  args: PenaltyArgs,
-): BuiltOffchainTx {
-  void networkHrp // reserved for symmetry with the other builders
-  const serverUnrollScript = decodeTapscript(
-    hex.decode(arkInfo.checkpointTapscript),
-  ) as CSVMultisigTapscript.Type
-
-  const inputs: ArkTxInput[] = args.escrows.map((e) => ({
-    txid: e.txid,
-    vout: e.vout,
-    value: e.value,
-    tapLeafScript: e.script.playerPenalty(),
-    tapTree: e.script.encode(),
-  }))
-  const pot = args.escrows.reduce((a, e) => a + e.value, 0)
-  const payoutAddr = ArkAddress.decode(args.payoutAddress)
-  const { arkTx, checkpoints } = buildOffchainTx(
-    inputs,
-    [{ script: payoutAddr.pkScript, amount: BigInt(pot) }],
-    serverUnrollScript,
-  )
-  return { arkTx, checkpoints }
-}
-
-export interface ForfeitClaimEscrow {
+/** One escrow VTXO plus the per-party script it sits behind. */
+export interface EscrowInput {
   script: CoinflipEscrowScript
   txid: string
   vout: number
@@ -518,7 +364,7 @@ export interface ForfeitClaimArgs {
    * symmetric and consistent: their combined value checks guarantee the
    * full pot lands at `payoutAddress`.
    */
-  escrows: ForfeitClaimEscrow[]
+  escrows: EscrowInput[]
   /**
    * Player payout. MUST match each escrow's bound `forfeitDestPkScript`.
    * The arkade covenant checks output.scriptPubKey exactly — a mismatch
@@ -614,13 +460,6 @@ export function buildForfeitClaimTransaction(
   return { arkTx, checkpoints, emulatorEntries }
 }
 
-export interface CovenantSweepEscrow {
-  script: CoinflipEscrowScript
-  txid: string
-  vout: number
-  value: number
-}
-
 export interface CovenantSweepArgs {
   winner: 'player' | 'house'
   /**
@@ -628,7 +467,7 @@ export interface CovenantSweepArgs {
    * `arkadeForfeit.housePayoutPkScript` set so the covenant-win leaves
    * exist (`playerWinCovenant()` / `creatorWinCovenant()`).
    */
-  escrows: CovenantSweepEscrow[]
+  escrows: EscrowInput[]
   /**
    * Winner's payout. MUST match the corresponding pin on the covenant
    * leaf — `forfeitDestPkScript` for a player win,

@@ -1,25 +1,15 @@
 /**
- * Encoding-level tests for the arkade-script-augmented CoinflipEscrowScript.
+ * Tests for the single-path, covenant-only `CoinflipEscrowScript`.
  *
- * Verifies (without regtest):
- *  - 4-leaf layout when no `arkadeForfeit` config is passed (backwards compat).
- *  - 5-leaf layout + new `playerForfeit()` leaf when config is supplied.
- *  - Adding the 5th leaf produces a DIFFERENT taptree (different escrow
- *    address) — confirms the leaf actually lands in the tree.
- *  - The 5th leaf is a `CLTVMultisigTapscript` over `[player, server,
- *    emulator_tweaked]` — execution bucket, the architectural point of
- *    the whole exercise.
+ * Four leaves, all required: playerWinCovenant, creatorWinCovenant,
+ * playerForfeit, refund. No optional arkadeForfeit, no legacy fallback.
  */
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const { hex } = require('@scure/base')
 const { schnorr } = require('@noble/curves/secp256k1.js')
 const { decodeTapscript } = require('@arkade-os/sdk')
-const {
-  CoinflipEscrowScript,
-  computeArkadeScriptPublicKey,
-  buildForfeitArkadeScript,
-} = require('arkade-coinflip')
+const { CoinflipEscrowScript, computeArkadeScriptPublicKey } = require('arkade-coinflip')
 
 const REGTEST_HRP = 'tark'
 
@@ -34,239 +24,118 @@ const EMULATOR_PK = newKey(0x40)
 const CREATOR_HASH = new Uint8Array(32).fill(0xaa)
 const PLAYER_HASH = new Uint8Array(32).fill(0xbb)
 const FINAL_EXP = 2_000_000_000n
-const PAY_PKSCRIPT = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x77)])
+const PLAYER_PAYOUT = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x77)])
+const HOUSE_PAYOUT = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x88)])
+const PLAYER_STAKE = 50_000n
+const HOUSE_STAKE = 30_000n
 
-function baseOpts() {
-  return {
+function makeEscrow(refundPubkey: Uint8Array = PLAYER_PK) {
+  return new CoinflipEscrowScript({
     creatorPubkey: CREATOR_PK,
     playerPubkey: PLAYER_PK,
     serverPubkey: SERVER_PK,
     creatorHash: CREATOR_HASH,
     playerHash: PLAYER_HASH,
     finalExpiration: FINAL_EXP,
-    penaltyTimelockSeconds: 1024n,
-    refundPubkey: PLAYER_PK,
-  }
+    refundPubkey,
+    arkadeForfeit: {
+      emulatorPubkey: EMULATOR_PK,
+      playerPayoutPkScript: PLAYER_PAYOUT,
+      housePayoutPkScript: HOUSE_PAYOUT,
+      playerStake: PLAYER_STAKE,
+      houseStake: HOUSE_STAKE,
+    },
+  })
 }
 
-describe('CoinflipEscrowScript: backwards compatibility (no arkadeForfeit)', () => {
-  it('exposes the legacy 4 leaves; playerForfeit() throws', () => {
-    const s = new CoinflipEscrowScript(baseOpts())
-    expect(s.playerForfeitScriptHex).toBeUndefined()
-    expect(s.forfeitArkadeScript).toBeUndefined()
-    // Calling these does not throw.
-    s.creatorWin()
-    s.playerWin()
+describe('CoinflipEscrowScript: 4 leaves, all covenant-bound', () => {
+  it('exposes the four required leaf accessors', () => {
+    const s = makeEscrow()
+    s.playerWinCovenant()
+    s.creatorWinCovenant()
+    s.playerForfeit()
     s.refund()
-    s.playerPenalty()
-    expect(() => s.playerForfeit()).toThrow(/arkadeForfeit/)
-  })
-})
-
-describe('CoinflipEscrowScript: with arkadeForfeit config', () => {
-  it('adds a 5th playerForfeit leaf and changes the address', () => {
-    const without = new CoinflipEscrowScript(baseOpts())
-    const withCfg = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: 50_000n,
-      },
-    })
-
-    expect(withCfg.playerForfeitScriptHex).toBeDefined()
-    expect(withCfg.forfeitArkadeScript).toBeDefined()
-
-    // Addresses differ — confirms the 5th leaf actually lands in the tree.
-    const a1 = without.address(REGTEST_HRP, SERVER_PK).encode()
-    const a2 = withCfg.address(REGTEST_HRP, SERVER_PK).encode()
-    expect(a2).not.toBe(a1)
   })
 
-  it('forfeit leaf is CLTVMultisig over [player, server, emulator_tweaked]', () => {
-    const s = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: 50_000n,
-      },
-    })
-
-    const tweaked = computeArkadeScriptPublicKey(EMULATOR_PK, s.forfeitArkadeScript)
-    const leafBytes = hex.decode(s.playerForfeitScriptHex)
-    const decoded = decodeTapscript(leafBytes)
-
-    // CLTVMultisigTapscript — the execution-bucket closure. This is the
-    // entire architectural point of the arkade-script approach.
-    expect(decoded.type).toBe('cltv-multisig')
-    expect(decoded.params.absoluteTimelock).toBe(FINAL_EXP)
-    const pubkeyHexes = decoded.params.pubkeys.map((pk: Uint8Array) => hex.encode(pk))
-    expect(pubkeyHexes).toEqual([
-      hex.encode(PLAYER_PK),
-      hex.encode(SERVER_PK),
-      hex.encode(tweaked),
-    ])
+  it('all three covenant arkade scripts are defined', () => {
+    const s = makeEscrow()
+    expect(s.playerWinCovenantArkadeScript).toBeDefined()
+    expect(s.creatorWinCovenantArkadeScript).toBeDefined()
+    expect(s.forfeitArkadeScript).toBeDefined()
   })
 
-  it('arkade script is the canonical enforcePayTo for (destPkScript, destValue)', () => {
-    const s = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: 50_000n,
-      },
-    })
-    const expected = buildForfeitArkadeScript(PAY_PKSCRIPT, 50_000n)
-    expect(hex.encode(s.forfeitArkadeScript)).toBe(hex.encode(expected))
-  })
-
-  it('atomic-sweep mode: pot binding + symmetric otherStake reshapes leaves consistently', () => {
-    // Player escrow: pot output + house stake "other"
-    const pot = 80_000n
-    const houseStake = 30_000n
-    const playerStake = 50_000n
-    const playerLeaf = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: pot,
-        otherStakeValue: houseStake,
-      },
-    })
-    // House escrow: SAME pot but other-stake is player's stake
-    const houseLeaf = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: pot,
-        otherStakeValue: playerStake,
-      },
-    })
-    // Same payee + same pot but different other-stake → different scripts,
-    // different addresses. Symmetric: each pins the other's stake.
-    expect(playerLeaf.forfeitArkadeScript).toBeDefined()
-    expect(houseLeaf.forfeitArkadeScript).toBeDefined()
-    expect(hex.encode(playerLeaf.forfeitArkadeScript)).not.toBe(
-      hex.encode(houseLeaf.forfeitArkadeScript),
+  it('playerWinCovenant + creatorWinCovenant are ConditionMultisig[server, emu_tweaked]', () => {
+    const s = makeEscrow()
+    const pwc = decodeTapscript(hex.decode(s.playerWinCovenantScriptHex))
+    const cwc = decodeTapscript(hex.decode(s.creatorWinCovenantScriptHex))
+    expect(pwc.type).toBe('condition-multisig')
+    expect(cwc.type).toBe('condition-multisig')
+    // Multisig is [server, emulator_tweaked] — no winner key required.
+    expect(pwc.params.pubkeys).toHaveLength(2)
+    expect(cwc.params.pubkeys).toHaveLength(2)
+    expect(hex.encode(pwc.params.pubkeys[0])).toBe(hex.encode(SERVER_PK))
+    expect(hex.encode(cwc.params.pubkeys[0])).toBe(hex.encode(SERVER_PK))
+    // The emulator-tweaked key in slot 1 differs per leaf (different arkade scripts).
+    expect(hex.encode(pwc.params.pubkeys[1])).not.toBe(hex.encode(cwc.params.pubkeys[1]))
+    // And matches what computeArkadeScriptPublicKey produces.
+    expect(hex.encode(pwc.params.pubkeys[1])).toBe(
+      hex.encode(computeArkadeScriptPublicKey(EMULATOR_PK, s.playerWinCovenantArkadeScript)),
     )
-    expect(playerLeaf.address(REGTEST_HRP, SERVER_PK).encode()).not.toBe(
-      houseLeaf.address(REGTEST_HRP, SERVER_PK).encode(),
+    expect(hex.encode(cwc.params.pubkeys[1])).toBe(
+      hex.encode(computeArkadeScriptPublicKey(EMULATOR_PK, s.creatorWinCovenantArkadeScript)),
     )
+  })
 
-    // Both scripts start with INSPECTINPUTVALUE + <other_stake> + EQUALVERIFY.
+  it('playerForfeit is CLTVMultisig[player, server, emu_tweaked] at finalExpiration', () => {
+    const s = makeEscrow()
+    const f = decodeTapscript(hex.decode(s.playerForfeitScriptHex))
+    expect(f.type).toBe('cltv-multisig')
+    expect(f.params.absoluteTimelock).toBe(FINAL_EXP)
+    expect(f.params.pubkeys).toHaveLength(3)
+    expect(hex.encode(f.params.pubkeys[0])).toBe(hex.encode(PLAYER_PK))
+    expect(hex.encode(f.params.pubkeys[1])).toBe(hex.encode(SERVER_PK))
+    expect(hex.encode(f.params.pubkeys[2])).toBe(
+      hex.encode(computeArkadeScriptPublicKey(EMULATOR_PK, s.forfeitArkadeScript)),
+    )
+  })
+
+  it('refund is CLTVMultisig[funder, server] at finalExpiration', () => {
+    const playerEscrow = makeEscrow(PLAYER_PK)
+    const houseEscrow = makeEscrow(CREATOR_PK)
+    const pr = decodeTapscript(hex.decode(playerEscrow.refundScriptHex))
+    const hr = decodeTapscript(hex.decode(houseEscrow.refundScriptHex))
+    expect(pr.type).toBe('cltv-multisig')
+    expect(hr.type).toBe('cltv-multisig')
+    expect(pr.params.pubkeys).toHaveLength(2)
+    expect(hex.encode(pr.params.pubkeys[0])).toBe(hex.encode(PLAYER_PK))
+    expect(hex.encode(hr.params.pubkeys[0])).toBe(hex.encode(CREATOR_PK))
+  })
+
+  it('player vs house escrow taproot addresses differ (owner-scoped refund leaf)', () => {
+    const pl = makeEscrow(PLAYER_PK)
+    const ho = makeEscrow(CREATOR_PK)
+    expect(pl.address(REGTEST_HRP, SERVER_PK).encode()).not.toBe(
+      ho.address(REGTEST_HRP, SERVER_PK).encode(),
+    )
+  })
+
+  it('covenant arkade scripts all start with INSPECTINPUTVALUE (atomic-sweep)', () => {
+    const s = makeEscrow()
     const ARKADE_INSPECTINPUTVALUE = 0xc9
-    expect(playerLeaf.forfeitArkadeScript[0]).toBe(ARKADE_INSPECTINPUTVALUE)
-    expect(houseLeaf.forfeitArkadeScript[0]).toBe(ARKADE_INSPECTINPUTVALUE)
+    expect(s.playerWinCovenantArkadeScript[0]).toBe(ARKADE_INSPECTINPUTVALUE)
+    expect(s.creatorWinCovenantArkadeScript[0]).toBe(ARKADE_INSPECTINPUTVALUE)
+    expect(s.forfeitArkadeScript[0]).toBe(ARKADE_INSPECTINPUTVALUE)
   })
 
-  it('changing destValue or destPkScript reshapes the tree (covenant binding)', () => {
-    const s1 = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: 50_000n,
-      },
-    })
-    const s2 = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: 60_000n,
-      },
-    })
-    const s3 = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x88)]),
-        forfeitDestValue: 50_000n,
-      },
-    })
-    const a1 = s1.address(REGTEST_HRP, SERVER_PK).encode()
-    const a2 = s2.address(REGTEST_HRP, SERVER_PK).encode()
-    const a3 = s3.address(REGTEST_HRP, SERVER_PK).encode()
-    expect(a1).not.toBe(a2)
-    expect(a1).not.toBe(a3)
-    expect(a2).not.toBe(a3)
-  })
-
-  it('covenant-win leaves: housePayoutPkScript adds playerWinCovenant + creatorWinCovenant', () => {
-    const housePayout = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x99)])
-    const without = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: 80_000n,
-        otherStakeValue: 30_000n,
-      },
-    })
-    const withCov = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: 80_000n,
-        otherStakeValue: 30_000n,
-        housePayoutPkScript: housePayout,
-      },
-    })
-    // The escrow without housePayoutPkScript exposes 5 leaves (1-4 legacy + forfeit).
-    expect(without.playerWinCovenantScriptHex).toBeUndefined()
-    expect(without.creatorWinCovenantScriptHex).toBeUndefined()
-    expect(() => without.playerWinCovenant()).toThrow(/housePayoutPkScript/)
-
-    // With it, the two extra leaves exist.
-    expect(withCov.playerWinCovenantScriptHex).toBeDefined()
-    expect(withCov.creatorWinCovenantScriptHex).toBeDefined()
-    expect(withCov.playerWinCovenantArkadeScript).toBeDefined()
-    expect(withCov.creatorWinCovenantArkadeScript).toBeDefined()
-
-    // The two covenant-win arkade scripts differ because their pinned
-    // destination differs (player payout vs. house payout).
-    expect(hex.encode(withCov.playerWinCovenantArkadeScript)).not.toBe(
-      hex.encode(withCov.creatorWinCovenantArkadeScript),
+  it('playerWin + playerForfeit covenants both bind PLAYER_PAYOUT; creatorWin binds HOUSE_PAYOUT', () => {
+    const s = makeEscrow()
+    // Easiest signal: scripts that bind the SAME destination are byte-equal
+    // when their other-stake matches (both pin pot + same other-stake).
+    expect(hex.encode(s.playerWinCovenantArkadeScript)).toBe(
+      hex.encode(s.forfeitArkadeScript),
     )
-
-    // Both must be findLeaf-able and decode as ConditionMultisig.
-    const pWin = decodeTapscript(hex.decode(withCov.playerWinCovenantScriptHex))
-    const cWin = decodeTapscript(hex.decode(withCov.creatorWinCovenantScriptHex))
-    expect(pWin.type).toBe('condition-multisig')
-    expect(cWin.type).toBe('condition-multisig')
-
-    // Multisig is [server, emulator_tweaked] — no player or creator key,
-    // which is what lets the server settle without client signatures.
-    expect(pWin.params.pubkeys).toHaveLength(2)
-    expect(cWin.params.pubkeys).toHaveLength(2)
-    expect(hex.encode(pWin.params.pubkeys[0])).toBe(hex.encode(SERVER_PK))
-    expect(hex.encode(cWin.params.pubkeys[0])).toBe(hex.encode(SERVER_PK))
-
-    // Address divergence from the 5-leaf version confirms the leaves
-    // actually land in the tree.
-    const a5 = without.address(REGTEST_HRP, SERVER_PK).encode()
-    const a7 = withCov.address(REGTEST_HRP, SERVER_PK).encode()
-    expect(a7).not.toBe(a5)
-  })
-
-  it('legacy playerPenalty CSV leaf remains alongside the new forfeit leaf', () => {
-    const s = new CoinflipEscrowScript({
-      ...baseOpts(),
-      arkadeForfeit: {
-        emulatorPubkey: EMULATOR_PK,
-        forfeitDestPkScript: PAY_PKSCRIPT,
-        forfeitDestValue: 50_000n,
-      },
-    })
-    // playerPenalty (CSV) must still be findable so the fallback path is
-    // available — clients without emulator support keep working.
-    const csvLeaf = decodeTapscript(hex.decode(s.playerPenaltyScriptHex))
-    expect(csvLeaf.type).toBe('condition-csv-multisig')
+    expect(hex.encode(s.creatorWinCovenantArkadeScript)).not.toBe(
+      hex.encode(s.playerWinCovenantArkadeScript),
+    )
   })
 })

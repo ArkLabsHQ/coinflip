@@ -12,7 +12,19 @@ import CoinSkin from './CoinSkin.vue'
 import SlotSkin from './SlotSkin.vue'
 import DiceSkin from './DiceSkin.vue'
 import RocketSkin from './RocketSkin.vue'
+import RouletteSkin from './RouletteSkin.vue'
 import { ROCKET_ODDS_N, ROCKET_LADDER } from '@/rocket'
+
+/**
+ * European-style single-zero wheel (37 slots, 0..36) — the on-chain primitive
+ * is a contiguous winning band [lo, target), so this is "range roulette"
+ * (pick a band of `winSize` slots out of 37). Red/black is intentionally NOT
+ * mapped here: real roulette red/black is a scatter of 18 specific numbers,
+ * which would need an OR-of-bands predicate the script doesn't have. The skin
+ * shows which 18 (or 12, or 6, …) slots are yours, the wheel lands on a slot,
+ * and you win iff it's inside the band.
+ */
+export const ROULETTE_N = 37
 
 /** Slot: a fixed 3-reel machine of SLOT_BASE ranked symbols (index 0 lowest). */
 export const SLOT_BASE = 5
@@ -57,6 +69,18 @@ function diceLadder(): OddsBet[] {
   return out
 }
 
+// Roulette: walk the player through "bet any 18", "bet any 12", "bet any 6",
+// "bet any 4", "bet any 3", "bet any 2", "bet any 1" — covering the natural
+// ladder of real-roulette bet types (Even, Dozen, Line, Corner, Street, Split,
+// Straight) without dressing up the on-chain math. Each step is the contiguous
+// band [lo, target) = [n - winSize, n), so the highest indices always win for
+// any band size — gives the wheel a single "winning arc" the player can see.
+function rouletteLadder(): OddsBet[] {
+  return [18, 12, 6, 4, 3, 2, 1].map((winSize) => ({
+    n: ROULETTE_N, lo: ROULETTE_N - winSize, target: ROULETTE_N,
+  }))
+}
+
 // Rocket: each ladder step is a target multiplier M; the on-chain bet is the
 // variable-odds range [n − floor(n/M), n) so the player wins iff the roll
 // lands in the top 1/M of [0, n). Slider sets the AUTO-CASHOUT target; the
@@ -71,6 +95,7 @@ function rocketLadder(): OddsBet[] {
 const coinBets = coinLadder()
 const slotBets = slotLadder()
 const diceBets = diceLadder()
+const rouletteBets = rouletteLadder()
 const rocketBets = rocketLadder()
 
 export const SKINS: SkinMeta[] = [
@@ -88,6 +113,14 @@ export const SKINS: SkinMeta[] = [
     id: 'dice', name: 'Dice', icon: '⚅', component: DiceSkin,
     oddsLadder: diceBets, defaultStep: nearHalf(diceBets),
     stepLabel: (b) => `ROLL ${b.lo + 1}+`,
+  },
+  {
+    id: 'roulette', name: 'Roulette', icon: '🎡', component: RouletteSkin,
+    oddsLadder: rouletteBets, defaultStep: 0,
+    stepLabel: (b) => {
+      const win = b.target - b.lo
+      return `ANY ${win} OF ${b.n}`
+    },
   },
   {
     id: 'rocket', name: 'Rocket', icon: '🚀', component: RocketSkin,

@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
 import PlayView from '../views/PlayView.vue'
-import CrashView from '../views/CrashView.vue'
+import RocketView from '../views/RocketView.vue'
 import WalletView from '../views/WalletView.vue'
 import SetupView from '../views/SetupView.vue'
 import HistoryView from '../views/HistoryView.vue'
@@ -14,9 +14,9 @@ const routes: Array<RouteRecordRaw> = [
     meta: { requiresWallet: true }
   },
   {
-    path: '/crash',
-    name: 'crash',
-    component: CrashView,
+    path: '/rocket',
+    name: 'rocket',
+    component: RocketView,
     meta: { requiresWallet: true }
   },
   {

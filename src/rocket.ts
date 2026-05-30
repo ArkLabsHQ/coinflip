@@ -1,18 +1,20 @@
 /**
- * Crash-game math — maps a target multiplier M onto the existing trustless
+ * Rocket-game math — maps a target multiplier M onto the existing trustless
  * variable-odds engine and back.
  *
- * A crash bet "the multiplier reaches M×" is the same trustless primitive the
+ * A rocket bet "the multiplier reaches M×" is the same trustless primitive the
  * coin/slot/dice skins use: a provably-fair roll in [0, n) and a win when it
  * lands in a contiguous band. Picking the TOP 1/M of the range gives
  * P(win) = 1/M and a payout of ~M× (shaved by the house edge) — i.e. the
- * classic crash distribution P(crash ≥ M) = 1/M.
+ * classic crash distribution P(crash ≥ M) = 1/M. ("Crash point" stays as the
+ * math term: it's the standard name for that distribution, and the rocket
+ * does crash on a loss.)
  *
  * Client-only by convention: the standalone client build doesn't import the
  * `arkade-coinflip` lib, so (like PlayView's `houseStakeOf`) it re-derives the
  * money math here. The SERVER remains the source of truth — it enforces the
  * range on-chain via the same `(oddsN, oddsTarget, oddsLo)` we submit, and
- * `crashHouseStake` mirrors its `computeHouseStake` exactly to avoid drift.
+ * `rocketHouseStake` mirrors its `computeHouseStake` exactly to avoid drift.
  */
 
 /**
@@ -22,12 +24,12 @@
  * secret. Bitcoin's script push limit is 520 bytes, so the lib's
  * CoinflipEscrowScript hard-rejects `16 + n − 1 > 520`, i.e. n > 505. We use
  * 300: comfortably under that ceiling (max secret 315B) and divisible by every
- * CRASH_LADDER multiplier, so P(win) = 1/M is exact at each ladder stop. Crash
- * points therefore top out at n/(n−(n−1)) = 300×.
+ * ROCKET_LADDER multiplier, so P(win) = 1/M is exact at each ladder stop.
+ * Crash points therefore top out at n/(n−(n−1)) = 300×.
  */
-export const CRASH_ODDS_N = 300
+export const ROCKET_ODDS_N = 300
 
-export interface CrashOdds {
+export interface RocketOdds {
   oddsN: number
   oddsTarget: number
   oddsLo: number
@@ -46,7 +48,7 @@ export interface CrashOdds {
  * disagreement on the boundary roll. floor costs at most ~1/n of win
  * probability and keeps the two views in lockstep.
  */
-export function crashToOdds(multiplier: number, n: number = CRASH_ODDS_N): CrashOdds {
+export function rocketToOdds(multiplier: number, n: number = ROCKET_ODDS_N): RocketOdds {
   const m = Math.max(1.01, multiplier)
   // Winning band size; clamp to [1, n-1] so lo stays in [1, n-1] and the range
   // is non-empty and non-certain (the server requires 0 ≤ lo < target ≤ n).
@@ -60,7 +62,7 @@ export function crashToOdds(multiplier: number, n: number = CRASH_ODDS_N): Crash
  * The player wins iff C ≥ their locked multiplier, which is exactly the
  * on-chain condition (roll ∈ [lo, n) where lo = n − floor(n/M)).
  */
-export function rollToCrashPoint(roll: number, n: number = CRASH_ODDS_N): number {
+export function rollToCrashPoint(roll: number, n: number = ROCKET_ODDS_N): number {
   const denom = Math.max(1, n - roll)
   return n / denom
 }
@@ -70,7 +72,7 @@ export function rollToCrashPoint(roll: number, n: number = CRASH_ODDS_N): number
  * computeHouseStake(bet, n, target, lo, edge) for the same range, so the
  * client's cap/preview never disagrees with what the server will charge.
  */
-export function crashHouseStake(bet: number, odds: CrashOdds, edgeBps: number): number {
+export function rocketHouseStake(bet: number, odds: RocketOdds, edgeBps: number): number {
   const win = odds.oddsTarget - odds.oddsLo
   if (win <= 0) return 0
   return Math.floor((bet * (odds.oddsN - win) * (10000 - edgeBps)) / (win * 10000))
@@ -82,7 +84,7 @@ export function crashHouseStake(bet: number, odds: CrashOdds, edgeBps: number): 
  */
 export function effectivePayoutMultiplier(bet: number, multiplier: number, edgeBps: number): number {
   if (bet <= 0) return multiplier
-  return (bet + crashHouseStake(bet, crashToOdds(multiplier), edgeBps)) / bet
+  return (bet + rocketHouseStake(bet, rocketToOdds(multiplier), edgeBps)) / bet
 }
 
 /**
@@ -90,4 +92,4 @@ export function effectivePayoutMultiplier(bet: number, multiplier: number, edgeB
  * affordable window — a low M makes the house stake sub-dust, a high M pushes
  * it past the bankroll — exactly like the odds-slider ladder in PlayView.
  */
-export const CRASH_LADDER: number[] = [1.2, 1.5, 2, 3, 5, 10, 20, 50, 100]
+export const ROCKET_LADDER: number[] = [1.2, 1.5, 2, 3, 5, 10, 20, 50, 100]

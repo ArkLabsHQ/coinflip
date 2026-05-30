@@ -9,10 +9,10 @@
     </button>
 
     <!-- Game-mode switch, top-left. Only the two game routes are modes; the
-         active link is highlighted so Crash is discoverable from Flip and back. -->
+         active link is highlighted so Rocket is discoverable from Flip and back. -->
     <nav v-if="isInitialized && isGameRoute" class="mode-switch">
       <router-link to="/" class="mode-link" exact-active-class="active">Flip</router-link>
-      <router-link to="/crash" class="mode-link" active-class="active">Crash</router-link>
+      <router-link to="/rocket" class="mode-link" active-class="active">Rocket</router-link>
     </nav>
 
     <router-view v-slot="{ Component }">
@@ -45,7 +45,7 @@ export default defineComponent({
     const route = useRoute()
     const router = useRouter()
     const isInitialized = computed(() => store.state.wallet?.isInitialized)
-    const isGameRoute = computed(() => route.path === '/' || route.path === '/crash')
+    const isGameRoute = computed(() => route.path === '/' || route.path === '/rocket')
     const walletBalance = computed(() => {
       const settled = store.getters['ark/balance']
       return settled !== undefined ? Number(settled) : (store.state.walletBalance || 0)

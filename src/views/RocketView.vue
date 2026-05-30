@@ -1,12 +1,12 @@
 <template>
-  <div class="page crash-page">
+  <div class="page rocket-page">
     <!-- Win flash — same Stake/Roobet trick PlayView uses. -->
     <div v-if="winFlash" class="win-flash" />
 
     <!-- Top HUD: mode is set by the nav in App.vue; here we mirror PlayView's
          right-side P&L pill + history button so both games share the HUD. -->
     <div class="top-hud">
-      <div class="mode-tag">🚀 CRASH</div>
+      <div class="mode-tag">🚀 ROCKET</div>
       <div class="hud-right">
         <div class="pnl-pill" :class="pnlClass" @click="togglePnlScope" :title="`Click to switch — currently ${pnlScope}`">
           <span class="pnl-scope">{{ pnlScope }}</span>
@@ -121,8 +121,8 @@ import GameHistoryList, { type GameHistoryItem } from '@/components/GameHistoryL
 import StalledBets from '@/components/StalledBets.vue'
 import { getTiers } from '@/services/api'
 import {
-  CRASH_ODDS_N, CRASH_LADDER, rollToCrashPoint, crashHouseStake,
-} from '@/crash'
+  ROCKET_ODDS_N, ROCKET_LADDER, rollToCrashPoint, rocketHouseStake,
+} from '@/rocket'
 
 // Exponential climb: multiplier = e^(rate·seconds). 0.18 reaches ~2× in 3.9s,
 // ~5× in 8.9s, ~10× in 12.8s — fast enough to stay tense, slow enough to read.
@@ -135,7 +135,7 @@ type Phase = 'idle' | 'climbing' | 'settling' | 'revealed'
 interface SlabResult { won: boolean; amount: number }
 
 export default defineComponent({
-  name: 'CrashView',
+  name: 'RocketView',
   components: { TierSelector, GameHistoryList, StalledBets },
   emits: ['open-wallet'],
   setup(_props, { emit }) {
@@ -148,7 +148,7 @@ export default defineComponent({
     const oddsEdgeBps = ref(300)
     const selectedTier = ref<number | null>(null)
 
-    // ── Money math (mirrors the server's computeHouseStake via crash.ts) ──
+    // ── Money math (mirrors the server's computeHouseStake via rocket.ts) ──
     // House escrow for "reach M" at this stake. Rises with M (bigger payout),
     // so the playable multiplier window is a band: the dust FLOOR (a low M's
     // stake must clear dust) up to the bankroll CEILING (a high M's stake must
@@ -159,13 +159,13 @@ export default defineComponent({
     // through floor(n/M)) keeps the committed band byte-identical to what the
     // player sees — a win→n/win→floor round-trip drifts by ±1 for ~6% of bands.
     function oddsForWin(win: number) {
-      return { oddsN: CRASH_ODDS_N, oddsTarget: CRASH_ODDS_N, oddsLo: CRASH_ODDS_N - win }
+      return { oddsN: ROCKET_ODDS_N, oddsTarget: ROCKET_ODDS_N, oddsLo: ROCKET_ODDS_N - win }
     }
     function winForMult(m: number): number {
-      return Math.min(CRASH_ODDS_N - 1, Math.max(1, Math.round(CRASH_ODDS_N / m)))
+      return Math.min(ROCKET_ODDS_N - 1, Math.max(1, Math.round(ROCKET_ODDS_N / m)))
     }
     function houseStakeForWin(bet: number, win: number): number {
-      return crashHouseStake(bet, oddsForWin(win), oddsEdgeBps.value)
+      return rocketHouseStake(bet, oddsForWin(win), oddsEdgeBps.value)
     }
     function houseStakeFor(bet: number, m: number): number {
       return houseStakeForWin(bet, winForMult(m))
@@ -175,7 +175,7 @@ export default defineComponent({
     // (a high-chance/low-M bet's stake is far below the tier).
     const affordableTiers = computed<number[]>(() =>
       tiers.value.filter((t) =>
-        CRASH_LADDER.some((m) => {
+        ROCKET_LADDER.some((m) => {
           const s = houseStakeFor(t, m)
           return s >= dust.value && s <= houseBankroll.value
         }),
@@ -185,15 +185,15 @@ export default defineComponent({
     const floorIdx = computed(() => {
       const bet = selectedTier.value
       if (!bet) return 0
-      for (let i = 0; i < CRASH_LADDER.length; i++) if (houseStakeFor(bet, CRASH_LADDER[i]) >= dust.value) return i
-      return CRASH_LADDER.length - 1
+      for (let i = 0; i < ROCKET_LADDER.length; i++) if (houseStakeFor(bet, ROCKET_LADDER[i]) >= dust.value) return i
+      return ROCKET_LADDER.length - 1
     })
     const ceilIdx = computed(() => {
       const bet = selectedTier.value
-      if (!bet) return CRASH_LADDER.length - 1
+      if (!bet) return ROCKET_LADDER.length - 1
       let hi = floorIdx.value
-      for (let i = floorIdx.value; i < CRASH_LADDER.length; i++) {
-        if (houseStakeFor(bet, CRASH_LADDER[i]) <= houseBankroll.value) hi = i
+      for (let i = floorIdx.value; i < ROCKET_LADDER.length; i++) {
+        if (houseStakeFor(bet, ROCKET_LADDER[i]) <= houseBankroll.value) hi = i
         else break
       }
       return Math.max(hi, floorIdx.value)
@@ -204,8 +204,8 @@ export default defineComponent({
     // Auto-cashout ceiling (the most you'll ride to) and dust floor (the least
     // you can cash out at). Both are exact achievable thresholds (n=300 is
     // divisible by every ladder M, so 1/M is exact at each stop).
-    const targetMult = computed(() => CRASH_LADDER[safeTargetIdx.value])
-    const minMult = computed(() => CRASH_LADDER[floorIdx.value])
+    const targetMult = computed(() => ROCKET_LADDER[safeTargetIdx.value])
+    const minMult = computed(() => ROCKET_LADDER[floorIdx.value])
     const winPctLabel = computed(() => {
       const p = (1 / targetMult.value) * 100
       return (p >= 10 ? Math.round(p) : Math.round(p * 10) / 10) + '%'
@@ -234,9 +234,9 @@ export default defineComponent({
     // player sees IS what settles on-chain (reveal "C ≥ n/win" agrees byte-for-
     // byte with the chain's "roll ≥ n−win").
     const liveWin = computed(() =>
-      Math.min(CRASH_ODDS_N - 1, Math.max(1, Math.floor(CRASH_ODDS_N / Math.min(rawMult.value, CRASH_ODDS_N)))),
+      Math.min(ROCKET_ODDS_N - 1, Math.max(1, Math.floor(ROCKET_ODDS_N / Math.min(rawMult.value, ROCKET_ODDS_N)))),
     )
-    const displayMult = computed(() => CRASH_ODDS_N / liveWin.value)
+    const displayMult = computed(() => ROCKET_ODDS_N / liveWin.value)
     const canCashOut = computed(() => phase.value === 'climbing' && displayMult.value >= minMult.value)
     // What the player would sweep if they cashed out right now.
     const liveCashoutSats = computed(() =>
@@ -282,7 +282,7 @@ export default defineComponent({
       if (!isAuto && !canCashOut.value) return
       if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
       lockedWin.value = isAuto ? winForMult(targetMult.value) : liveWin.value
-      lockedMult.value = CRASH_ODDS_N / lockedWin.value
+      lockedMult.value = ROCKET_ODDS_N / lockedWin.value
       phase.value = 'settling'
       await settle()
     }
@@ -365,7 +365,7 @@ export default defineComponent({
       const entry: GameHistoryItem = {
         id: `${Date.now()}`,
         tier: bet,
-        playerChoice: `CRASH ${lockedMult.value.toFixed(2)}×`,
+        playerChoice: `ROCKET ${lockedMult.value.toFixed(2)}×`,
         winner: isWin ? 'player' : 'house',
         rakeAmount: rake,
         payoutAmount: payout,
@@ -449,7 +449,7 @@ export default defineComponent({
 </script>
 
 <style scoped>
-.crash-page {
+.rocket-page {
   max-width: 520px;
   margin: 0 auto;
   padding: 60px 16px 80px;

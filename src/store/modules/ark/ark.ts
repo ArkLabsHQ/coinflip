@@ -135,6 +135,17 @@ export interface BoardingUtxo {
   confirmations?: number
 }
 
+/**
+ * Per-game in-flight claim. Set when either the manual button or the
+ * background auto-claim poll starts a forfeit/refund submission; cleared
+ * in the `finally` of the same action so a failure doesn't strand the
+ * lock. `mode` lets the UI distinguish "Auto-claiming…" from a click in
+ * progress.
+ */
+export type ClaimKind = 'forfeit' | 'refund'
+export type ClaimMode = 'manual' | 'auto'
+export interface ClaimingInfo { kind: ClaimKind; mode: ClaimMode }
+
 export interface TxHistoryEntry {
   /** Best txid we have — arkTxid first, then commitment, then boarding. */
   txid: string
@@ -162,6 +173,7 @@ interface ArkState {
   arkAddress: string | null
   boardingAddress: string | null
   txHistory: TxHistoryEntry[]
+  claimingGames: Record<string, ClaimingInfo>
 }
 
 /**
@@ -250,6 +262,13 @@ let settling = false
 // client heals itself instead of stranding the user on "not connected".
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempts = 0
+// Background poller that auto-fires stalled-bet claims once their CLTV
+// matures. Lives only while the wallet is connected and the tab is open
+// — see startAutoClaim / stopAutoClaim. Manual claims via StalledBets
+// stay available and the two paths share the same `claimingGames` lock
+// so a click during a background tick (or vice versa) can't double-spend.
+let autoClaimTimer: ReturnType<typeof setInterval> | null = null
+const AUTO_CLAIM_INTERVAL_MS = 15_000
 
 export function getSDKWallet(): Wallet | null {
   return sdkWallet
@@ -293,7 +312,8 @@ const ark: Module<ArkState, RootState> = {
     walletBalance: null,
     arkAddress: null,
     boardingAddress: null,
-    txHistory: []
+    txHistory: [],
+    claimingGames: {},
   },
 
   mutations: {
@@ -341,7 +361,15 @@ const ark: Module<ArkState, RootState> = {
     },
     SET_TX_HISTORY(state, history: TxHistoryEntry[]) {
       state.txHistory = history
-    }
+    },
+    SET_CLAIMING(state, { gameId, info }: { gameId: string; info: ClaimingInfo }) {
+      state.claimingGames = { ...state.claimingGames, [gameId]: info }
+    },
+    CLEAR_CLAIMING(state, gameId: string) {
+      const next = { ...state.claimingGames }
+      delete next[gameId]
+      state.claimingGames = next
+    },
   },
 
   actions: {
@@ -458,6 +486,16 @@ const ark: Module<ArkState, RootState> = {
         commit('SET_ERROR', null)
         reconnectAttempts = 0 // connected — reset the backoff
 
+        // Background stalled-bet auto-claim. Fire once now so a stash
+        // already past expiry doesn't have to wait one full tick, then
+        // poll on the interval. The action itself short-circuits when
+        // there are no stashes / nothing is ready.
+        if (autoClaimTimer) clearInterval(autoClaimTimer)
+        dispatch('runAutoClaim').catch(() => { /* logged inside */ })
+        autoClaimTimer = setInterval(() => {
+          dispatch('runAutoClaim').catch(() => { /* logged inside */ })
+        }, AUTO_CLAIM_INTERVAL_MS)
+
         // Initialize swap service (Lightning + chain swaps via Boltz)
         try {
           const boltzApi = localStorage.getItem('boltz_api') || (info.network === 'regtest' ? 'http://localhost:9069' : undefined)
@@ -473,6 +511,7 @@ const ark: Module<ArkState, RootState> = {
         console.error('Failed to connect to Ark server:', error)
         await destroySwaps().catch(() => {})
         sdkWallet = null
+        if (autoClaimTimer) { clearInterval(autoClaimTimer); autoClaimTimer = null }
         commit('SET_STATUS', 'error')
         commit('SET_ERROR', new Error(`Failed to connect: ${(error as Error).message}`))
         commit('SET_INFO', null)
@@ -790,43 +829,56 @@ const ark: Module<ArkState, RootState> = {
      * enforces the CLTV, so this only succeeds at/after finalExpiration; before
      * that we surface a clear "not yet" message. Clears the stash on success.
      */
-    async reclaimStalledBet({ rootState, dispatch }, gameId: string) {
+    async reclaimStalledBet(
+      { state, rootState, dispatch, commit },
+      payload: string | { gameId: string; mode?: ClaimMode },
+    ) {
+      const { gameId, mode = 'manual' } =
+        typeof payload === 'string' ? { gameId: payload, mode: 'manual' as ClaimMode } : payload
+      if (state.claimingGames[gameId]) {
+        throw new Error('A claim is already in progress for this game.')
+      }
       if (!sdkWallet) throw new Error('Wallet not connected')
       const privateKey = rootState.wallet.privateKey
       if (!privateKey) throw new Error('No wallet key available')
       const stash = loadRefunds().find((x) => x.gameId === gameId)
       if (!stash) throw new Error('No stashed refund for this game')
-      // arkd enforces the refund CLTV against the chain's block time (BIP113
-      // MTP), which trails wall-clock when blocks are sparse. Gate on chain time
-      // — not Date.now() — so we don't submit a refund arkd rejects. Fall back to
-      // wall-clock only if the chain tip is unreadable (the catch below backstops).
-      const chainTime = await chainTipTime()
-      const refClock = chainTime ?? Math.floor(Date.now() / 1000)
-      if (refClock < stash.finalExpiration) {
-        const lifts = new Date(stash.finalExpiration * 1000).toLocaleString()
-        throw new Error(
-          chainTime !== null
-            ? `Not reclaimable yet — the chain's block time is ${new Date(chainTime * 1000).toLocaleString()}; the timelock lifts at ${lifts} (chain time), as new blocks are mined.`
-            : `Not reclaimable yet — the timelock lifts at ${lifts}.`,
-        )
-      }
-      const identity = SingleKey.fromHex(privateKey)
-      const refundArk = Transaction.fromPSBT(hex.decode(stash.refundPsbt))
-      const refundCps = stash.refundCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+      commit('SET_CLAIMING', { gameId, info: { kind: 'refund', mode } })
       try {
-        await submitOffchain(sdkWallet.arkProvider, identity, refundArk, refundCps, [0])
-      } catch (e) {
-        // Race: our chain-time read passed the CLTV but arkd's tip MTP still
-        // trails it. Surface a clear "wait for the next block" instead of the
-        // raw FORFEIT_CLOSURE_LOCKED — the stash is kept so a retry still works.
-        const msg = e instanceof Error ? e.message : String(e)
-        if (/FORFEIT_CLOSURE_LOCKED|is locked|locked/i.test(msg)) {
-          throw new Error("Not reclaimable yet — the chain hasn't mined a block past the timelock. Try again shortly.")
+        // arkd enforces the refund CLTV against the chain's block time (BIP113
+        // MTP), which trails wall-clock when blocks are sparse. Gate on chain time
+        // — not Date.now() — so we don't submit a refund arkd rejects. Fall back to
+        // wall-clock only if the chain tip is unreadable (the catch below backstops).
+        const chainTime = await chainTipTime()
+        const refClock = chainTime ?? Math.floor(Date.now() / 1000)
+        if (refClock < stash.finalExpiration) {
+          const lifts = new Date(stash.finalExpiration * 1000).toLocaleString()
+          throw new Error(
+            chainTime !== null
+              ? `Not reclaimable yet — the chain's block time is ${new Date(chainTime * 1000).toLocaleString()}; the timelock lifts at ${lifts} (chain time), as new blocks are mined.`
+              : `Not reclaimable yet — the timelock lifts at ${lifts}.`,
+          )
         }
-        throw e
+        const identity = SingleKey.fromHex(privateKey)
+        const refundArk = Transaction.fromPSBT(hex.decode(stash.refundPsbt))
+        const refundCps = stash.refundCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+        try {
+          await submitOffchain(sdkWallet.arkProvider, identity, refundArk, refundCps, [0])
+        } catch (e) {
+          // Race: our chain-time read passed the CLTV but arkd's tip MTP still
+          // trails it. Surface a clear "wait for the next block" instead of the
+          // raw FORFEIT_CLOSURE_LOCKED — the stash is kept so a retry still works.
+          const msg = e instanceof Error ? e.message : String(e)
+          if (/FORFEIT_CLOSURE_LOCKED|is locked|locked/i.test(msg)) {
+            throw new Error("Not reclaimable yet — the chain hasn't mined a block past the timelock. Try again shortly.")
+          }
+          throw e
+        }
+        clearRefund(gameId)
+        await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
+      } finally {
+        commit('CLEAR_CLAIMING', gameId)
       }
-      clearRefund(gameId)
-      await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
     },
 
     /**
@@ -837,7 +889,15 @@ const ark: Module<ArkState, RootState> = {
      * to arkd. CLTV is ABSOLUTE (`forfeitClaimableAt`) — gate on
      * `chainTipTime >= forfeitClaimableAt`. Clears the stash on success.
      */
-    async claimForfeit({ rootState, dispatch }, gameId: string) {
+    async claimForfeit(
+      { state, rootState, dispatch, commit },
+      payload: string | { gameId: string; mode?: ClaimMode },
+    ) {
+      const { gameId, mode = 'manual' } =
+        typeof payload === 'string' ? { gameId: payload, mode: 'manual' as ClaimMode } : payload
+      if (state.claimingGames[gameId]) {
+        throw new Error('A claim is already in progress for this game.')
+      }
       if (!sdkWallet) throw new Error('Wallet not connected')
       const privateKey = rootState.wallet.privateKey
       if (!privateKey) throw new Error('No wallet key available')
@@ -852,41 +912,86 @@ const ark: Module<ArkState, RootState> = {
         throw new Error("Can't forfeit-claim a game that wasn't revealed — use refund instead.")
       }
 
-      const identity = SingleKey.fromHex(privateKey)
-      const arkTx = Transaction.fromPSBT(hex.decode(stash.forfeitPsbt))
-      // Both inputs are 3-of-3 [player, server, emulator_tweaked]. The player
-      // signs both player slots; arkd signs server slots; the emulator signs
-      // the tweaked slots after running the arkade script.
-      const signed = await identity.sign(arkTx, [0, 1])
-      const cps = stash.forfeitCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+      commit('SET_CLAIMING', { gameId, info: { kind: 'forfeit', mode } })
+      try {
+        const identity = SingleKey.fromHex(privateKey)
+        const arkTx = Transaction.fromPSBT(hex.decode(stash.forfeitPsbt))
+        // Both inputs are 3-of-3 [player, server, emulator_tweaked]. The player
+        // signs both player slots; arkd signs server slots; the emulator signs
+        // the tweaked slots after running the arkade script.
+        const signed = await identity.sign(arkTx, [0, 1])
+        const cps = stash.forfeitCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
 
-      // POST to the emulator's /v1/tx with the partially-signed PSBT +
-      // checkpoint PSBTs. The emulator returns the finalized PSBT once arkd
-      // has co-signed (the emulator forwards it internally).
-      const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          arkTx: base64.encode(signed.toPSBT()),
-          checkpointTxs: cps.map((c) => base64.encode(c.toPSBT())),
-        }),
-      })
-      if (!resp.ok) {
-        const text = await resp.text()
-        // Mirror the FORFEIT_CLOSURE_LOCKED messaging — same root cause (CLTV
-        // not yet satisfied at the chain's block time), different surface.
-        if (/locked|too early|CLTV|locktime/i.test(text)) {
-          throw new Error("Not claimable yet — the chain's block time hasn't reached the forfeit CLTV. Try again shortly.")
+        // POST to the emulator's /v1/tx with the partially-signed PSBT +
+        // checkpoint PSBTs. The emulator returns the finalized PSBT once arkd
+        // has co-signed (the emulator forwards it internally).
+        const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            arkTx: base64.encode(signed.toPSBT()),
+            checkpointTxs: cps.map((c) => base64.encode(c.toPSBT())),
+          }),
+        })
+        if (!resp.ok) {
+          const text = await resp.text()
+          // Mirror the FORFEIT_CLOSURE_LOCKED messaging — same root cause (CLTV
+          // not yet satisfied at the chain's block time), different surface.
+          if (/locked|too early|CLTV|locktime/i.test(text)) {
+            throw new Error("Not claimable yet — the chain's block time hasn't reached the forfeit CLTV. Try again shortly.")
+          }
+          throw new Error(`Emulator rejected forfeit: ${text}`)
         }
-        throw new Error(`Emulator rejected forfeit: ${text}`)
-      }
 
-      clearRefund(gameId)
-      await dispatch('refreshBalance').catch(() => { /* indexer lag */ })
+        clearRefund(gameId)
+        await dispatch('refreshBalance').catch(() => { /* indexer lag */ })
+      } finally {
+        commit('CLEAR_CLAIMING', gameId)
+      }
+    },
+
+    /**
+     * One pass over every stashed game: if its CLTV has matured and no
+     * claim is in flight, fire the better one (forfeit > refund) with
+     * `mode: 'auto'`. Backgrounded by `autoClaimTimer`; also safe to
+     * dispatch manually (e.g. immediately after connect so a stash
+     * past expiry doesn't wait one full tick).
+     */
+    async runAutoClaim({ state, dispatch }) {
+      if (!sdkWallet) return
+      const stashes = loadRefunds()
+      if (!stashes.length) return
+      const chainTime = await chainTipTime()
+      if (chainTime === null) return // can't decide; try next tick
+      for (const stash of stashes) {
+        if (state.claimingGames[stash.gameId]) continue
+        const canForfeit =
+          stash.revealed === true &&
+          !!stash.forfeitPsbt &&
+          !!stash.forfeitEmulatorUrl &&
+          stash.forfeitClaimableAt !== undefined &&
+          chainTime >= stash.forfeitClaimableAt
+        const canRefund = chainTime >= stash.finalExpiration
+        try {
+          if (canForfeit) {
+            await dispatch('claimForfeit', { gameId: stash.gameId, mode: 'auto' })
+          } else if (canRefund) {
+            await dispatch('reclaimStalledBet', { gameId: stash.gameId, mode: 'auto' })
+          }
+        } catch (e) {
+          // Transient — next tick retries. Log once so a persistent
+          // failure shows up in console.
+          console.warn(
+            `[auto-claim] ${stash.gameId} failed:`,
+            e instanceof Error ? e.message : e,
+          )
+        }
+      }
     },
   },
 
   getters: {
+    claimingGames: (state) => state.claimingGames,
     serverPubkey: (state) => state.info?.pubkey || null,
     serverNetwork: (state) => state.info?.network || null,
     dust: (state) => state.info?.dust ? parseInt(state.info.dust) : null,

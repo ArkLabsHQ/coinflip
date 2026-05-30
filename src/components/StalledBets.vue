@@ -2,7 +2,7 @@
   <div v-if="bets.length" class="stalled">
     <div class="stalled-head">
       <span class="title">⚠ Reclaim stalled bets</span>
-      <span class="sub">A game didn't resolve — reclaim your escrowed stake trustlessly.</span>
+      <span class="sub">A game didn't resolve — reclaim your escrowed stake trustlessly. Auto-claims at expiry; manual buttons stay as a backup.</span>
     </div>
     <div v-for="b in bets" :key="b.gameId" class="bet-row">
       <!-- R1 forfeit, arkade-script path: execution bucket, no unilateral exit.
@@ -10,23 +10,23 @@
       <template v-if="hasForfeit(b)">
         <div class="bet-info">
           <span class="amount penalty-amount">Claim full pot — {{ b.tier.toLocaleString() }} sats (your stake + house)</span>
-          <span class="state" :class="{ ready: isForfeitReady(b) }">{{ forfeitStatusLabel(b) }}</span>
+          <span class="state" :class="{ ready: isForfeitReady(b), auto: isAutoClaiming(b) }">{{ forfeitStatusLabel(b) }}</span>
           <span class="penalty-note">The house didn't reveal its secret. Forfeit kicks in — you take everything.</span>
         </div>
         <div class="bet-actions">
           <button
             class="claim-btn"
-            :disabled="!isForfeitReady(b) || busy === b.gameId"
+            :disabled="!isForfeitReady(b) || isClaiming(b)"
             @click="claimForfeit(b.gameId)"
           >
-            {{ busy === b.gameId ? 'Claiming…' : 'Claim full pot' }}
+            {{ claimBtnLabel(b, 'forfeit') }}
           </button>
           <button
             class="reclaim-link"
-            :disabled="!isReady(b) || busy === b.gameId"
+            :disabled="!isReady(b) || isClaiming(b)"
             @click="reclaim(b.gameId)"
           >
-            {{ busy === b.gameId ? 'Reclaiming…' : 'Reclaim principal only' }}
+            {{ claimBtnLabel(b, 'refund-link') }}
           </button>
         </div>
       </template>
@@ -35,14 +35,14 @@
       <template v-else>
         <div class="bet-info">
           <span class="amount">{{ b.tier.toLocaleString() }} sats</span>
-          <span class="state" :class="{ ready: isReady(b) }">{{ statusLabel(b) }}</span>
+          <span class="state" :class="{ ready: isReady(b), auto: isAutoClaiming(b) }">{{ statusLabel(b) }}</span>
         </div>
         <button
           class="reclaim-btn"
-          :disabled="!isReady(b) || busy === b.gameId"
+          :disabled="!isReady(b) || isClaiming(b)"
           @click="reclaim(b.gameId)"
         >
-          {{ busy === b.gameId ? 'Reclaiming…' : 'Reclaim' }}
+          {{ claimBtnLabel(b, 'refund') }}
         </button>
       </template>
     </div>
@@ -51,17 +51,27 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, onMounted, onUnmounted } from 'vue'
+import { defineComponent, ref, computed, onMounted, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
-import type { StashedRefund } from '@/store/modules/ark/ark'
+import type { StashedRefund, ClaimingInfo } from '@/store/modules/ark/ark'
 
 export default defineComponent({
   name: 'StalledBets',
   setup() {
     const store = useStore()
     const bets = ref<StashedRefund[]>([])
-    const busy = ref<string | null>(null)
     const message = ref('')
+    // Store-backed in-flight map — populated by BOTH the manual buttons
+    // here and the background auto-claim poll in the ark store. Reading
+    // it (rather than a local `busy` ref) means a background tick that
+    // fires between renders also disables this row, preventing a manual
+    // click from racing the poll.
+    const claimingGames = computed<Record<string, ClaimingInfo>>(
+      () => store.getters['ark/claimingGames'] || {},
+    )
+    const isClaiming = (b: StashedRefund) => !!claimingGames.value[b.gameId]
+    const isAutoClaiming = (b: StashedRefund) =>
+      claimingGames.value[b.gameId]?.mode === 'auto'
     // arkd releases the refund at its CLTV measured in the chain's block time
     // (BIP113 MTP), which lags wall-clock when blocks are sparse. Gate readiness
     // STRICTLY on chain time — never a wall-clock fallback, which would flash
@@ -94,6 +104,7 @@ export default defineComponent({
       chainTime.value !== null && chainTime.value >= forfeitClaimableAt(b)
 
     function statusLabel(b: StashedRefund): string {
+      if (isAutoClaiming(b)) return 'Auto-claiming…'
       if (chainTime.value === null) return 'Checking chain time…'
       if (isReady(b)) return 'Reclaimable now'
       const mins = Math.ceil((b.finalExpiration - chainTime.value) / 60)
@@ -102,6 +113,7 @@ export default defineComponent({
     }
 
     function forfeitStatusLabel(b: StashedRefund): string {
+      if (isAutoClaiming(b)) return 'Auto-claiming…'
       if (chainTime.value === null) return 'Checking chain time…'
       if (isForfeitReady(b)) return 'Claimable now (arkade)'
       const at = forfeitClaimableAt(b)
@@ -109,47 +121,64 @@ export default defineComponent({
       return `Claimable in ~${mins} min (arkade, chain time)`
     }
 
+    /** Per-button label. `kind` distinguishes the three button slots so each gets a fitting verb. */
+    function claimBtnLabel(b: StashedRefund, kind: 'forfeit' | 'refund' | 'refund-link'): string {
+      const info = claimingGames.value[b.gameId]
+      if (info) {
+        if (info.mode === 'auto') return 'Auto-claiming…'
+        return kind === 'forfeit' ? 'Claiming…' : 'Reclaiming…'
+      }
+      if (kind === 'forfeit') return 'Claim full pot'
+      if (kind === 'refund-link') return 'Reclaim principal only'
+      return 'Reclaim'
+    }
+
     async function reclaim(gameId: string) {
-      busy.value = gameId
       message.value = ''
       try {
-        await store.dispatch('ark/reclaimStalledBet', gameId)
+        await store.dispatch('ark/reclaimStalledBet', { gameId, mode: 'manual' })
         message.value = 'Reclaimed — stake returned to your wallet.'
       } catch (e: unknown) {
         message.value = e instanceof Error ? e.message : 'Reclaim failed'
       } finally {
-        busy.value = null
         await refresh()
       }
     }
 
     async function claimForfeit(gameId: string) {
-      busy.value = gameId
       message.value = ''
       try {
-        await store.dispatch('ark/claimForfeit', gameId)
+        await store.dispatch('ark/claimForfeit', { gameId, mode: 'manual' })
         message.value = 'Full pot claimed via arkade — both stakes returned to your wallet.'
       } catch (e: unknown) {
         message.value = e instanceof Error ? e.message : 'Forfeit failed'
       } finally {
-        busy.value = null
         await refresh()
       }
     }
 
+    let listTimer: number | undefined
     onMounted(() => {
       refresh()
       refreshChainTime()
       // Poll so "Checking…" clears soon after the wallet connects and the
       // countdown tracks the chain as blocks are mined.
       timer = window.setInterval(refreshChainTime, 5000)
+      // Re-read the stash list periodically so an auto-claim that
+      // succeeded in the background removes its row without the user
+      // having to refresh. Cheap (localStorage read) so 5s is fine.
+      listTimer = window.setInterval(refresh, 5000)
     })
-    onUnmounted(() => { if (timer) window.clearInterval(timer) })
+    onUnmounted(() => {
+      if (timer) window.clearInterval(timer)
+      if (listTimer) window.clearInterval(listTimer)
+    })
 
     return {
-      bets, busy, message,
+      bets, message,
       hasForfeit, isReady, isForfeitReady,
-      statusLabel, forfeitStatusLabel,
+      isClaiming, isAutoClaiming,
+      statusLabel, forfeitStatusLabel, claimBtnLabel,
       reclaim, claimForfeit,
     }
   },
@@ -176,6 +205,7 @@ export default defineComponent({
 .bet-info .penalty-amount { color: var(--green, #34d399); font-size: 0.95rem; }
 .bet-info .state { font-size: 0.72rem; color: var(--text-muted, #5c5c78); }
 .bet-info .state.ready { color: var(--green, #34d399); }
+.bet-info .state.auto { color: var(--gold, #f7c948); font-style: italic; }
 .bet-info .penalty-note { font-size: 0.70rem; color: var(--text-dim, #a0a0b8); margin-top: 2px; }
 .bet-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .reclaim-btn {

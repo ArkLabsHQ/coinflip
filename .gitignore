@@ -43,3 +43,6 @@ docker-compose.mutinynet.yml
 !/vendor/*.tgz
 
 .research/
+
+# Trust-model audit — local-only research doc, not part of the shipped repo.
+docs/TRUSTLESS-AUDIT.md

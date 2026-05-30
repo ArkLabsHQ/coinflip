@@ -637,22 +637,26 @@ async function rebuildResolvedResult(game: GameRow, deps: AppDeps): Promise<Trus
 }
 
 /**
- * Sign the covenant-sweep PSBT and post it to the emulator. The emulator
- * validates the covenant + co-signs the tweaked slot + forwards the
- * finalized tx to arkd. Returns the txid.
+ * Submit the covenant-sweep PSBT to the emulator. The operator does NOT
+ * sign anything: the covenant leaves are `[arkd_server, emu_tweaked]`
+ * — arkd is the only server-side signer, and the emulator cosigns the
+ * emu_tweaked slot AFTER running the arkade-script covenant. The
+ * emulator then forwards the finalized tx to arkd for the final
+ * co-signature. Returns the resolved txid.
+ *
+ * `deps` is unused but kept for symmetry with other handlers.
  */
 async function submitCovenantSweep(
   sweepTx: BuiltOffchainTx,
-  deps: AppDeps,
+  _deps: AppDeps,
 ): Promise<string> {
   const cfg = await loadEmulatorConfig()
   if (!cfg) throw new Error('Emulator not configured — required for covenant sweep')
-  const signed = await deps.identity.sign(sweepTx.arkTx, [0, 1])
   const resp = await fetch(`${cfg.url}/v1/tx`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      arkTx: base64.encode(signed.toPSBT()),
+      arkTx: base64.encode(sweepTx.arkTx.toPSBT()),
       checkpointTxs: sweepTx.checkpoints.map((c) => base64.encode(c.toPSBT())),
     }),
     signal: AbortSignal.timeout(20_000),

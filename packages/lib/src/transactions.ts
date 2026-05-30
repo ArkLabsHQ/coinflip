@@ -543,11 +543,16 @@ export function buildCovenantSweepTransaction(
 
   const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
 
-  // Condition witness — both revealed secrets, attached per input.
-  // Same flow as the legacy sweep: arkd's ConditionMultisig runs the
-  // win-determination predicate against [houseSecret, playerSecret].
+  // Condition witness — both revealed secrets, attached per input on
+  // BOTH the ark tx AND each checkpoint. The covenant-win leaves are
+  // ConditionMultisig closures, so arkd's predicate must evaluate on
+  // every signed psbt — checkpoint signatures are validated against the
+  // same condition witness as the ark tx.
   for (let i = 0; i < args.escrows.length; i++) {
     setArkPsbtField(arkTx, i, ConditionWitness, args.bothSecrets)
+  }
+  for (const cp of checkpoints) {
+    setArkPsbtField(cp, 0, ConditionWitness, args.bothSecrets)
   }
 
   // EmulatorPacket per input. Witness = [out_idx=0, other_in_idx=1-i].

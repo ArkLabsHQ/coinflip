@@ -296,6 +296,87 @@ describe('R1 forfeit through arkade-script playerForfeit leaf (HTTP integration)
     )
   }, 240_000)
 
+  it('full flow: /play → escrow → /commit settles via covenant (no client signing)', async () => {
+    if (!infraAvailable) return
+    if (!arkProvider || !serverUnroll) throw new Error('test infra not initialized')
+
+    // Player setup
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await makePlayerWallet(playerId)
+    await faucet(await playerW.getBoardingAddress(), PLAYER_FUND_BTC)
+    await waitFor(playerW, 'boarding', PLAYER_FUND_BTC * 1e8 * 0.9)
+    await settleWithRetry(playerW)
+    await waitFor(playerW, 'settled', BET)
+
+    const playerSecretBuf = Buffer.from(new Uint8Array(16))
+    crypto.getRandomValues(playerSecretBuf)
+    const playerHash = createHash('sha256').update(playerSecretBuf).digest('hex')
+    const playerPubHex = hex.encode(toXOnly(await playerId.compressedPublicKey()))
+    const playerChangeAddress = await playerW.getAddress()
+
+    // 1) /play
+    const play = await postJson<{
+      gameId: string
+      escrowAddress: string
+      houseEscrow: { txid: string; vout: number; value: number }
+      pot: number
+    }>(`/play`, { tier: BET, playerPubkey: playerPubHex, playerHash, playerChangeAddress })
+
+    // 2) player escrows their stake
+    const escrowPk = ArkAddress.decode(play.escrowAddress).pkScript
+    const pv = (await playerW.getVtxos())[0]
+    const change = pv.value - BET
+    const pOutputs: { script: Uint8Array; amount: bigint }[] = [
+      { script: escrowPk, amount: BigInt(BET) },
+    ]
+    if (change > 0) {
+      pOutputs.push({
+        script: ArkAddress.decode(playerChangeAddress).pkScript,
+        amount: BigInt(change),
+      })
+    }
+    const escrowTx = buildOffchainTx(
+      [{ txid: pv.txid, vout: pv.vout, value: pv.value, tapLeafScript: pv.forfeitTapLeafScript, tapTree: pv.tapTree }],
+      pOutputs,
+      serverUnroll,
+    )
+    const signed = await playerId.sign(escrowTx.arkTx, [0])
+    const { arkTxid, signedCheckpointTxs } = await arkProvider.submitTx(
+      base64.encode(signed.toPSBT()),
+      escrowTx.checkpoints.map((c) => base64.encode(c.toPSBT())),
+    )
+    const finals: string[] = []
+    for (const c of signedCheckpointTxs) {
+      const tx = Transaction.fromPSBT(base64.decode(c))
+      const idx = Array.from({ length: tx.inputsLength }, (_, i) => i)
+      finals.push(base64.encode((await playerId.sign(tx, idx)).toPSBT()))
+    }
+    await arkProvider.finalizeTx(arkTxid, finals)
+    const playerEscrow = { txid: arkTxid, vout: 0, value: BET }
+
+    // 3) /commit — server settles via covenant, returns a txid; no PSBT to sign.
+    const commit = await postJson<{
+      winner: 'house' | 'player'
+      houseSecret: string
+      playerSecret: string
+      payout: number
+      proof: string
+      txid?: string
+    }>(`/game/${play.gameId}/commit`, {
+      playerSecretHex: hex.encode(playerSecretBuf),
+      playerEscrow,
+    })
+
+    expect(['house', 'player']).toContain(commit.winner)
+    expect(commit.payout).toBe(2 * BET)
+    expect(commit.txid).toBeTruthy()
+    expect(typeof commit.txid).toBe('string')
+    expect((commit.txid as string).length).toBe(64) // hex-encoded txid
+    console.log(
+      `[r1-http] full flow OK: winner=${commit.winner} payout=${commit.payout} txid=${commit.txid?.slice(0, 16)}…`,
+    )
+  }, 240_000)
+
   it('forfeit endpoint 404s on unknown gameId (route wiring smoke)', async () => {
     if (!infraAvailable) return
     const r = await fetch(`${COINFLIP_API_URL}/game/00000000-0000-0000-0000-000000000000/forfeit`, {

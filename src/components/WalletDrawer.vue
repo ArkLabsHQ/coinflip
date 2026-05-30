@@ -253,6 +253,7 @@ import {
   type FeesResponse,
   type LimitsResponse,
 } from '@/services/boltz'
+import { copyToClipboard } from '@/utils/clipboard'
 
 type SendKind = 'empty' | 'lightning' | 'ark' | 'onchain' | 'unknown'
 interface SendTarget { kind: SendKind; amountSats: number; address: string }
@@ -568,8 +569,7 @@ export default defineComponent({
     }
 
     async function copyText(text: string) {
-      if (!text) return
-      try { await navigator.clipboard.writeText(text); showToast('Copied!') } catch { /* ignore */ }
+      if (await copyToClipboard(text)) showToast('Copied!')
     }
 
     function close() { emit('update:open', false) }

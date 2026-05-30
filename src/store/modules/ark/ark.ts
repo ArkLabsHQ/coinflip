@@ -180,12 +180,24 @@ export interface NetworkPreset {
   boltz: string
 }
 
+/**
+ * Same-origin host for regtest defaults. When the page is loaded from
+ * `localhost`, fall back to `localhost`; when it's loaded from a LAN IP
+ * (phone on the same wifi hitting `http://192.168.x.x:8080`), use that
+ * IP so arkd / esplora / emulator (all bound to 0.0.0.0 on the host)
+ * remain reachable.
+ */
+function regtestHost(): string {
+  if (typeof window === 'undefined') return 'localhost'
+  return window.location.hostname || 'localhost'
+}
+
 export const NETWORK_PRESETS: Record<string, NetworkPreset> = {
   regtest: {
     label: 'Regtest (local)',
-    server: 'http://localhost:7070',
-    esplora: 'http://localhost:3000',
-    boltz: 'http://localhost:9069',
+    server: `http://${regtestHost()}:7070`,
+    esplora: `http://${regtestHost()}:3000`,
+    boltz: `http://${regtestHost()}:9069`,
   },
   mutinynet: {
     label: 'Mutinynet',
@@ -270,8 +282,8 @@ const ark: Module<ArkState, RootState> = {
   namespaced: true,
 
   state: {
-    server: localStorage.getItem('ark_server') || 'http://localhost:7070',
-    esplora: localStorage.getItem('ark_esplora') || 'http://localhost:3000',
+    server: localStorage.getItem('ark_server') || `http://${regtestHost()}:7070`,
+    esplora: localStorage.getItem('ark_esplora') || `http://${regtestHost()}:3000`,
     networkPreset: localStorage.getItem('ark_network_preset') || 'regtest',
     status: 'disconnected',
     lastError: null,

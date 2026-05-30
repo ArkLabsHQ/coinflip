@@ -109,8 +109,25 @@ export interface NetworkResponse {
     version: string
   }
 }
-export function getNetwork(): Promise<NetworkResponse> {
-  return request('/api/network')
+export async function getNetwork(): Promise<NetworkResponse> {
+  const resp = await request<NetworkResponse>('/api/network')
+  // The server publishes `localhost:7073` for the emulator — fine when
+  // the browser runs on the same host, broken when the page is loaded
+  // from a LAN IP (phone on the same wifi). Rewrite `localhost` /
+  // `127.0.0.1` to the page's own hostname so the emulator stays
+  // reachable from any LAN client.
+  if (resp.emulator && typeof window !== 'undefined' && window.location.hostname) {
+    try {
+      const u = new URL(resp.emulator.url)
+      if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+        u.hostname = window.location.hostname
+        resp.emulator = { ...resp.emulator, url: u.toString().replace(/\/$/, '') }
+      }
+    } catch {
+      // leave the URL untouched on parse failure
+    }
+  }
+  return resp
 }
 
 export function play(

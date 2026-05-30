@@ -30,7 +30,9 @@ export default createStore<State>({
     walletBalance: 0,
     btcPrice: 0,
     ark: {
-      server: localStorage.getItem('ark_server') || 'http://localhost:7070',
+      server:
+        localStorage.getItem('ark_server') ||
+        `http://${typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'localhost'}:7070`,
       status: 'disconnected',
       lastError: null,
       info: null

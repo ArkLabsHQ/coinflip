@@ -8,13 +8,6 @@
       <span class="balance-unit">sats</span>
     </button>
 
-    <!-- Game-mode switch, top-left. Only the two game routes are modes; the
-         active link is highlighted so Rocket is discoverable from Flip and back. -->
-    <nav v-if="isInitialized && isGameRoute" class="mode-switch">
-      <router-link to="/" class="mode-link" exact-active-class="active">Flip</router-link>
-      <router-link to="/rocket" class="mode-link" active-class="active">Rocket</router-link>
-    </nav>
-
     <router-view v-slot="{ Component }">
       <transition name="fade" mode="out-in">
         <component :is="Component" @open-wallet="walletOpen = true" />
@@ -45,7 +38,6 @@ export default defineComponent({
     const route = useRoute()
     const router = useRouter()
     const isInitialized = computed(() => store.state.wallet?.isInitialized)
-    const isGameRoute = computed(() => route.path === '/' || route.path === '/rocket')
     const walletBalance = computed(() => {
       const settled = store.getters['ark/balance']
       return settled !== undefined ? Number(settled) : (store.state.walletBalance || 0)
@@ -78,7 +70,7 @@ export default defineComponent({
 
     function formatSats(n: number): string { return n.toLocaleString() }
 
-    return { isInitialized, isGameRoute, walletBalance, formatSats, walletOpen, arkStatus, connTitle }
+    return { isInitialized, walletBalance, formatSats, walletOpen, arkStatus, connTitle }
   },
 })
 </script>

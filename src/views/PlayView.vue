@@ -43,9 +43,18 @@
       />
     </div>
 
-    <!-- Centerpiece skin -->
+    <!-- Centerpiece skin. For skins that own their play gesture (Rocket),
+         pass the extra props the skin needs and bind its launch/cashout
+         events; non-gesture skins ignore the unknown props. -->
     <div class="skin-area" :class="{ playing: isFlipping }">
-      <component :is="currentSkin.component" :state="skinState" />
+      <component
+        :is="currentSkin.component"
+        :state="skinState"
+        :tier="selectedTier"
+        :odds-edge-bps="oddsEdgeBps"
+        @launch="onSkinLaunch"
+        @cashout="onSkinCashout"
+      />
     </div>
 
     <!-- Streak badge — appears at 3+ in a row. -->
@@ -94,31 +103,36 @@
         </div>
       </div>
 
-      <div class="auto-selector">
+      <!-- Auto-batch + FLIP button only when the skin doesn't own the
+           play gesture. Rocket renders its own LAUNCH / CASH OUT inside
+           the centerpiece. -->
+      <template v-if="!skinOwnsGesture">
+        <div class="auto-selector">
+          <button
+            v-for="opt in autoOptions"
+            :key="opt.label"
+            class="auto-chip"
+            :class="{ selected: autoCount === opt.value }"
+            :disabled="isAutoRunning"
+            @click="selectAuto(opt.value)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+
         <button
-          v-for="opt in autoOptions"
-          :key="opt.label"
-          class="auto-chip"
-          :class="{ selected: autoCount === opt.value }"
-          :disabled="isAutoRunning"
-          @click="selectAuto(opt.value)"
+          class="flip-btn"
+          :class="{ active: canFlip, stop: isAutoRunning }"
+          :disabled="!canFlip && !isAutoRunning"
+          @click="doFlip"
         >
-          {{ opt.label }}
+          <template v-if="isAutoRunning">STOP ({{ autoRemainingLabel }} LEFT)</template>
+          <template v-else-if="isAutoMode">{{ isFlipping ? 'FLIPPING...' : `AUTO ×${autoCountLabel}` }}</template>
+          <template v-else>{{ isFlipping ? 'FLIPPING...' : 'FLIP IT' }}</template>
         </button>
-      </div>
 
-      <button
-        class="flip-btn"
-        :class="{ active: canFlip, stop: isAutoRunning }"
-        :disabled="!canFlip && !isAutoRunning"
-        @click="doFlip"
-      >
-        <template v-if="isAutoRunning">STOP ({{ autoRemainingLabel }} LEFT)</template>
-        <template v-else-if="isAutoMode">{{ isFlipping ? 'FLIPPING...' : `AUTO ×${autoCountLabel}` }}</template>
-        <template v-else>{{ isFlipping ? 'FLIPPING...' : 'FLIP IT' }}</template>
-      </button>
-
-      <div class="hotkey-hint" v-if="!isAutoMode && !isFlipping && canFlip">Press Enter to flip</div>
+        <div class="hotkey-hint" v-if="!isAutoMode && !isFlipping && canFlip">Press Enter to flip</div>
+      </template>
     </div>
 
     <div v-if="error" class="error-toast">{{ error }}</div>
@@ -269,7 +283,10 @@ export default defineComponent({
     }
 
     // ── Flip lifecycle state ──────────────────────────────────────────
-    const phase = ref<'idle' | 'flipping' | 'resolved'>('idle')
+    // `climbing` and `settling` are for skins that own their play gesture
+    // (Rocket): launch → climb → cashout → settle. Standard skins only
+    // ever see idle / flipping / resolved.
+    const phase = ref<'idle' | 'flipping' | 'resolved' | 'climbing' | 'settling'>('idle')
     const outcome = ref<{ won: boolean; side: 'heads' | 'tails'; roll: number | null } | null>(null)
     const isFlipping = ref(false)
     const error = ref<string | null>(null)
@@ -291,9 +308,29 @@ export default defineComponent({
 
     // ── Skin selection ────────────────────────────────────────────────
     // (currentSkinId / currentSkin are declared above with the odds slider.)
+    const skinOwnsGesture = computed(() => currentSkin.value.ownsPlayGesture === true)
     function selectSkin(id: string) {
       currentSkinId.value = id
       saveSkinId(id)
+      // Reset to idle so a half-played gesture in the previous skin
+      // doesn't bleed into the new one.
+      phase.value = 'idle'
+      outcome.value = null
+    }
+
+    /** Skin emitted `launch` — start the climb. (Only the Rocket skin does this today.) */
+    function onSkinLaunch() {
+      if (isFlipping.value) return
+      phase.value = 'climbing'
+      outcome.value = null
+      error.value = null
+    }
+
+    /** Skin emitted `cashout` with the locked-in bet — commit it via flipOnce. */
+    async function onSkinCashout(bet: OddsBet) {
+      if (isFlipping.value) return
+      phase.value = 'settling'
+      await flipOnce(bet)
     }
 
     // ── History modal ─────────────────────────────────────────────────
@@ -409,15 +446,25 @@ export default defineComponent({
     }
 
     // ── Single flip ───────────────────────────────────────────────────
-    async function flipOnce(): Promise<boolean> {
+    /**
+     * Commit one game. `overrideBet` lets a skin that owns its play gesture
+     * (Rocket) pass the bet it locked in at cashout — which may differ from
+     * the parent slider's current step. When absent, falls back to
+     * `selectedBet.value` (the slider's current position).
+     */
+    async function flipOnce(overrideBet?: OddsBet): Promise<boolean> {
       if (!selectedTier.value) return false
 
       // Mark busy but DON'T animate yet — we only spin once the bet is
       // actually placed on the server, so a rejected bet (insufficient
       // balance, house busy, validation) never shows a phantom flip.
       isFlipping.value = true
-      phase.value = 'idle'
-      outcome.value = null
+      // For gesture-owning skins, keep the 'settling' phase so the skin
+      // doesn't flicker through 'idle' between cashout and flipping.
+      if (!skinOwnsGesture.value) {
+        phase.value = 'idle'
+        outcome.value = null
+      }
       error.value = null
 
       try {
@@ -433,7 +480,7 @@ export default defineComponent({
         // Trustless settlement: the store action escrows the player's stake,
         // reveals, and (on a win) sweeps the pot — all on-Ark. Keep animating
         // for at least MIN_FLIP_MS so a fast resolution still reads as a flip.
-        const bet = selectedBet.value
+        const bet = overrideBet ?? selectedBet.value
         const [result] = await Promise.all([
           store.dispatch('ark/playTrustlessGame', {
             tier: selectedTier.value,
@@ -568,6 +615,8 @@ export default defineComponent({
       autoCountLabel, autoRemainingLabel,
       // Skin
       skins: SKINS, currentSkinId, currentSkin, selectSkin,
+      skinOwnsGesture, onSkinLaunch, onSkinCashout,
+      oddsEdgeBps,
       // History modal
       historyOpen, historyGames, openHistory,
       // Stats

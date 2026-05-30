@@ -11,6 +11,8 @@ import type { SkinMeta, OddsBet } from './types'
 import CoinSkin from './CoinSkin.vue'
 import SlotSkin from './SlotSkin.vue'
 import DiceSkin from './DiceSkin.vue'
+import RocketSkin from './RocketSkin.vue'
+import { ROCKET_ODDS_N, ROCKET_LADDER } from '@/rocket'
 
 /** Slot: a fixed 3-reel machine of SLOT_BASE ranked symbols (index 0 lowest). */
 export const SLOT_BASE = 5
@@ -55,9 +57,21 @@ function diceLadder(): OddsBet[] {
   return out
 }
 
+// Rocket: each ladder step is a target multiplier M; the on-chain bet is the
+// variable-odds range [n − floor(n/M), n) so the player wins iff the roll
+// lands in the top 1/M of [0, n). Slider sets the AUTO-CASHOUT target; the
+// rocket skin owns its own LAUNCH/CASH OUT gesture (ownsPlayGesture: true).
+function rocketLadder(): OddsBet[] {
+  return ROCKET_LADDER.map((m) => {
+    const win = Math.min(ROCKET_ODDS_N - 1, Math.max(1, Math.floor(ROCKET_ODDS_N / m)))
+    return { n: ROCKET_ODDS_N, lo: ROCKET_ODDS_N - win, target: ROCKET_ODDS_N }
+  })
+}
+
 const coinBets = coinLadder()
 const slotBets = slotLadder()
 const diceBets = diceLadder()
+const rocketBets = rocketLadder()
 
 export const SKINS: SkinMeta[] = [
   {
@@ -74,6 +88,15 @@ export const SKINS: SkinMeta[] = [
     id: 'dice', name: 'Dice', icon: '⚅', component: DiceSkin,
     oddsLadder: diceBets, defaultStep: nearHalf(diceBets),
     stepLabel: (b) => `ROLL ${b.lo + 1}+`,
+  },
+  {
+    id: 'rocket', name: 'Rocket', icon: '🚀', component: RocketSkin,
+    oddsLadder: rocketBets, defaultStep: 0,
+    stepLabel: (b) => {
+      const m = b.n / (b.target - b.lo)
+      return `AUTO ${Number.isInteger(m) ? m : m.toFixed(1)}×`
+    },
+    ownsPlayGesture: true,
   },
 ]
 

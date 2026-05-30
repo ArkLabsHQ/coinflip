@@ -25,8 +25,13 @@ export interface OddsBet {
 }
 
 export interface SkinState {
-  /** Lifecycle phase of the current flip. */
-  phase: 'idle' | 'flipping' | 'resolved'
+  /**
+   * Lifecycle phase. `idle | flipping | resolved` covers the standard
+   * static-bet skins (Coin/Slot/Dice). `climbing | settling` are added
+   * for skins that own their own play gesture (Rocket) — the climb
+   * drives the bet selection rather than a parent slider.
+   */
+  phase: 'idle' | 'flipping' | 'resolved' | 'climbing' | 'settling'
   /** Final outcome — populated when phase === 'resolved'. */
   outcome: {
     won: boolean
@@ -62,6 +67,14 @@ export interface SkinMeta {
   defaultStep: number
   /** Themed label for a ladder step ("3 COINS", "LINE UP 2 ₿", "ROLL 4+"). */
   stepLabel: (bet: OddsBet, index: number) => string
+  /**
+   * True for skins whose play gesture isn't a single "FLIP" click but is owned
+   * by the skin itself (e.g. Rocket's launch → climb → cashout). When set,
+   * PlayView hides its own FLIP button and lets the skin call back via
+   * `onLockInBet` to commit a chosen bet (which may differ from the slider's
+   * current step — e.g. the rocket's locked-in M at cashout).
+   */
+  ownsPlayGesture?: boolean
 }
 
 /** Props all skin components must accept. */

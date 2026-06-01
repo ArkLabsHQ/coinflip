@@ -16,18 +16,22 @@ Branch: `feat/r1-via-arkade-script`. Last verified: `86d09fd`.
 | Coinflip server (public, proxied) | via `:8080/api/...` | built locally |
 | Emulator | `:7073` | `ghcr.io/arkade-os/emulator:v0.0.1` |
 | arkd | `:7070` | `ghcr.io/arkade-os/arkd:v0.9.5` |
-| Esplora | `:3000` | from nigiri |
-| Bitcoin Core | `:18443` | from nigiri |
+| Esplora | `:3000` | from the arkade-regtest stack |
+| Bitcoin Core | `:18443` | from the arkade-regtest stack |
 
-The emulator + arkd come from the `arkade-regtest` submodule (PR
-[ArkLabsHQ/arkade-regtest#26](https://github.com/ArkLabsHQ/arkade-regtest/pull/26)
-makes the emulator a default service).
+The emulator + arkd come from the `arkade-regtest` submodule, currently
+tracking PR
+[ArkLabsHQ/arkade-regtest#27](https://github.com/ArkLabsHQ/arkade-regtest/pull/27)
+which replaces the old nigiri + shell scripts with a pure-Node
+orchestrator (no Go toolchain, no WSL — runs the same on
+Windows / macOS / Linux).
 
 ## Bring it up
 
 ```bash
-# 1. Start arkade-regtest + emulator (one-time, from the submodule)
-./arkade-regtest/start-env.sh
+# 1. Start arkade-regtest + emulator (one-time, from the submodule).
+#    Replaced the old shell/nigiri scripts — pure Node, no Go/WSL.
+node arkade-regtest/regtest.mjs start
 
 # 2. Build + start the coinflip stack
 docker compose build server client

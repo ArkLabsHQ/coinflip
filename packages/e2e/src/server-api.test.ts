@@ -16,6 +16,7 @@ import request from 'supertest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { execFileSync } from 'child_process'
 import { createHash } from 'crypto'
 import { hex } from '@scure/base'
 import {
@@ -28,7 +29,9 @@ import {
 import { type VtxoInput } from 'arkade-coinflip'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
+const REGTEST_CLI =
+  process.env.REGTEST_CLI || path.resolve(__dirname, '../../../arkade-regtest/regtest.mjs')
 const HOUSE_FUND_BTC = 0.005 // 500_000 sats — covers tiers + change + fees
 const PLAYER_FUND_BTC = 0.002 // 200_000 sats — covers bet + change
 const BET_AMOUNT = 1000
@@ -42,12 +45,10 @@ function toXOnly(b: Uint8Array): Uint8Array {
 }
 
 async function faucet(address: string, amountBtc: number): Promise<void> {
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, amount: amountBtc }),
+  // arkade-regtest CLI faucet; --confirm mines 1 block so the send confirms.
+  execFileSync('node', [REGTEST_CLI, 'faucet', address, String(amountBtc), '--confirm'], {
+    stdio: 'inherit',
   })
-  if (!resp.ok) throw new Error(`Faucet failed: ${resp.status} ${await resp.text()}`)
 }
 
 async function waitForBoarding(wallet: Wallet, minSats: number, timeoutMs = 30_000): Promise<void> {

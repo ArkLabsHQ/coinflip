@@ -6,8 +6,8 @@ services:
     volumes:
       - server-data:/app/data
     environment:
-      - ARK_SERVER_URL=http://ark:7070
-      - ESPLORA_URL=http://chopsticks:3000
+      - ARK_SERVER_URL=http://arkd:7070
+      - ESPLORA_URL=http://mempool_web/api
       - PUBLIC_PORT=3001
       - ADMIN_PORT=3002
       # Bind admin listener inside the container to all interfaces so
@@ -19,7 +19,7 @@ services:
     ports:
       - "3002:3002"
     networks:
-      - nigiri
+      - arkade-regtest
     restart: unless-stopped
 
   client:
@@ -34,12 +34,17 @@ services:
     depends_on:
       - server
     networks:
-      - nigiri
+      - arkade-regtest
     restart: unless-stopped
 
 networks:
-  nigiri:
+  arkade-regtest:
+    # The arkade-regtest Node CLI (`node arkade-regtest/regtest.mjs start`) brings
+    # up its Docker Compose project under the name "arkade-regtest", which creates
+    # the default network "arkade-regtest_default". Join it so this server can reach
+    # arkd / mempool_web by service name.
     external: true
+    name: arkade-regtest_default
 
 volumes:
   server-data:

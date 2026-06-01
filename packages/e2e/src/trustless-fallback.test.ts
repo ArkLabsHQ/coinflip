@@ -18,6 +18,8 @@
 
 import { hex, base64 } from '@scure/base'
 import { createHash } from 'crypto'
+import { execFileSync } from 'child_process'
+import path from 'path'
 import {
   Wallet,
   SingleKey,
@@ -47,7 +49,9 @@ import {
 import { attemptAutoClaim } from 'arkade-coinflip-server/dist/auto-claim.js'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
+const REGTEST_CLI =
+  process.env.REGTEST_CLI || path.resolve(__dirname, '../../../arkade-regtest/regtest.mjs')
 const FUND_BTC = 0.005
 const BET = 10_000 // larger bet → more visible balance delta when auto-claim lands
 
@@ -82,12 +86,10 @@ function vtxoToInput(vtxo: ExtendedVirtualCoin): VtxoInput {
 }
 
 async function faucet(addr: string, btc: number): Promise<void> {
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: addr, amount: btc }),
+  // arkade-regtest CLI faucet; --confirm mines 1 block so the send confirms.
+  execFileSync('node', [REGTEST_CLI, 'faucet', addr, String(btc), '--confirm'], {
+    stdio: 'inherit',
   })
-  if (!resp.ok) throw new Error(`Faucet failed: ${resp.status} ${await resp.text()}`)
 }
 
 async function waitFor(test: () => Promise<boolean>, label: string, timeoutMs = 120_000): Promise<void> {

@@ -2,6 +2,8 @@
  * E2E test helpers for interacting with regtest infrastructure.
  */
 
+import { execFileSync } from 'child_process'
+import path from 'path'
 import {
   Wallet,
   SingleKey,
@@ -16,7 +18,18 @@ import {
 } from '@arkade-os/sdk'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
+
+// arkade-regtest is embedded as a git submodule at the repo root. Tests run
+// with cwd = packages/e2e, so the CLI lives two directories up. Override with
+// REGTEST_CLI if the submodule lives elsewhere.
+const REGTEST_CLI =
+  process.env.REGTEST_CLI || path.resolve(__dirname, '../../../arkade-regtest/regtest.mjs')
+
+/** Invoke the arkade-regtest Node CLI (replaces the old chopsticks HTTP faucet). */
+function regtestCli(args: string[]): void {
+  execFileSync('node', [REGTEST_CLI, ...args], { stdio: 'inherit' })
+}
 
 export async function createArkProvider(): Promise<ArkProvider> {
   return new RestArkProvider(ARK_SERVER_URL)
@@ -50,27 +63,17 @@ export async function createFundedWallet(): Promise<{
 }
 
 /**
- * Fund a wallet using the nigiri faucet + Ark settlement.
- * 1. Send BTC to the wallet's boarding address via faucet
- * 2. Mine blocks
- * 3. Settle to create VTXOs
+ * Fund a wallet using the regtest faucet + Ark settlement.
+ * 1. Send BTC to the wallet's boarding address via the arkade-regtest CLI
+ *    (`--confirm` mines 1 block so the send confirms immediately)
+ * 2. Settle to create VTXOs
  */
 export async function fundWallet(wallet: Wallet, amountSats: number): Promise<void> {
   const boardingAddress = await wallet.getBoardingAddress()
 
-  // Use nigiri faucet to send BTC
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: boardingAddress, amount: amountSats / 1e8 }),
-  })
-
-  if (!resp.ok) {
-    throw new Error(`Faucet failed: ${resp.status} ${await resp.text()}`)
-  }
-
-  // Mine a block to confirm
-  await mineBlock()
+  // Faucet no longer mines by default — pass --confirm to mine 1 block right
+  // after the send so the boarding UTXO confirms (old nigiri auto-mine behavior).
+  regtestCli(['faucet', boardingAddress, String(amountSats / 1e8), '--confirm'])
 
   // Wait for boarding UTXO to be detected
   await waitForBalance(wallet, 'boarding', amountSats, 30_000)
@@ -83,15 +86,7 @@ export async function fundWallet(wallet: Wallet, amountSats: number): Promise<vo
 }
 
 export async function mineBlock(count = 1): Promise<void> {
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: 'bcrt1qxyyy6ygnf7yzwfxlf8kp3y6aq4ey9y6rnr38uc', amount: 0.001 * count }),
-  })
-  if (!resp.ok) {
-    // Fallback: try mining endpoint
-    await fetch(`${ESPLORA_URL}/mine`, { method: 'POST' }).catch(() => {})
-  }
+  regtestCli(['mine', String(count)])
 }
 
 async function waitForBalance(

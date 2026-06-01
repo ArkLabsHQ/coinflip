@@ -10,6 +10,8 @@
 
 import { hex } from '@scure/base'
 import { createHash } from 'crypto'
+import { execFileSync } from 'child_process'
+import path from 'path'
 import {
   gameFromEvents,
   GameStatus,
@@ -52,7 +54,9 @@ import {
 // -- Config --
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
+const REGTEST_CLI =
+  process.env.REGTEST_CLI || path.resolve(__dirname, '../../../arkade-regtest/regtest.mjs')
 const BET_AMOUNT = 1000 // sats
 const FUND_AMOUNT = 0.001 // BTC (100,000 sats — enough for bet + fees)
 
@@ -70,18 +74,11 @@ function toXOnly(pubkey: Uint8Array): Uint8Array {
   return pubkey.length === 33 ? pubkey.slice(1) : pubkey
 }
 
-/** Fund a Bitcoin address via the nigiri/chopsticks faucet */
-async function faucet(address: string, amountBtc: number): Promise<string> {
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, amount: amountBtc }),
+/** Fund a Bitcoin address via the arkade-regtest CLI faucet (--confirm mines 1 block). */
+async function faucet(address: string, amountBtc: number): Promise<void> {
+  execFileSync('node', [REGTEST_CLI, 'faucet', address, String(amountBtc), '--confirm'], {
+    stdio: 'inherit',
   })
-  if (!resp.ok) {
-    throw new Error(`Faucet failed: ${resp.status} ${await resp.text()}`)
-  }
-  const txid = await resp.text()
-  return txid.replace(/"/g, '').trim()
 }
 
 /** Wait until wallet has settled VTXOs with at least minAmount sats */
@@ -232,10 +229,10 @@ describe('full game flow: P2P coinflip', () => {
     console.log('Player boarding:', playerBoardingAddr)
 
     // Fund both wallets via faucet
-    const creatorTxid = await faucet(creatorBoardingAddr, FUND_AMOUNT)
-    const playerTxid = await faucet(playerBoardingAddr, FUND_AMOUNT)
-    console.log('Creator funded:', creatorTxid)
-    console.log('Player funded:', playerTxid)
+    await faucet(creatorBoardingAddr, FUND_AMOUNT)
+    await faucet(playerBoardingAddr, FUND_AMOUNT)
+    console.log('Creator funded:', creatorBoardingAddr)
+    console.log('Player funded:', playerBoardingAddr)
 
     // Wait for boarding UTXOs to appear
     await waitForBoardingBalance(creatorWallet, BET_AMOUNT)

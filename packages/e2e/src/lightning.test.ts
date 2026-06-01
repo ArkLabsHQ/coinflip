@@ -18,7 +18,8 @@
  *   - `lnd` is the "user" LND that talks to boltz-lnd over a Lightning channel
  */
 
-import { execSync } from 'child_process'
+import { execSync, execFileSync } from 'child_process'
+import path from 'path'
 import { hex } from '@scure/base'
 import {
   Wallet,
@@ -64,7 +65,9 @@ class InMemorySwapRepository implements SwapRepository {
 }
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
+const REGTEST_CLI =
+  process.env.REGTEST_CLI || path.resolve(__dirname, '../../../arkade-regtest/regtest.mjs')
 // Boltz REST is at :9001 and WebSocket is at :9004; the SDK's BoltzSwapProvider
 // derives wsUrl from apiUrl by swapping `9069` → `9004` (the nginx convention).
 // Pointing apiUrl at the nginx proxy (:9069) makes both halves resolve cleanly.
@@ -84,12 +87,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function faucet(address: string, amountBtc: number): Promise<void> {
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, amount: amountBtc }),
+  // arkade-regtest CLI faucet; --confirm mines 1 block so the send confirms.
+  execFileSync('node', [REGTEST_CLI, 'faucet', address, String(amountBtc), '--confirm'], {
+    stdio: 'inherit',
   })
-  if (!resp.ok) throw new Error(`Faucet failed: ${resp.status} ${await resp.text()}`)
 }
 
 async function waitForBoarding(wallet: Wallet, minSats: number, timeoutMs = 60_000): Promise<void> {
@@ -176,7 +177,7 @@ beforeAll(async () => {
   if (boltzAvailable && !lnReady) {
     console.warn(
       '[lightning.test] boltz-lnd ↔ lnd channel is not active; skipping Lightning rail tests. ' +
-      'Run `clean-env.sh && start-env.sh` (or `docker exec boltz-lnd lncli connect <lnd-pubkey>@lnd:9735`) to restore.',
+      'Run `node arkade-regtest/regtest.mjs clean && node arkade-regtest/regtest.mjs start` (or `docker exec boltz-lnd lncli connect <lnd-pubkey>@lnd:9735`) to restore.',
     )
   }
 }, 15_000)

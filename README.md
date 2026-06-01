@@ -28,11 +28,21 @@ This is a monorepo:
 
 ## Running locally
 
-The full stack runs against a local Ark regtest (e.g. [arkade-regtest](https://github.com/arkade-os/arkade-regtest) on the external `nigiri` Docker network):
+The full stack runs against a local Ark regtest provided by the
+[arkade-regtest](https://github.com/ArkLabsHQ/arkade-regtest) submodule. Bring up the
+regtest stack first (a zero-dependency Node CLI, Node >= 18), then start the app — the
+`docker-compose.yml` here joins the regtest project's `arkade-regtest_default` network and
+reaches `arkd` / `mempool_web` by service name:
 
 ```bash
+git submodule update --init --recursive
+node arkade-regtest/regtest.mjs start --env .env.regtest   # boots Bitcoin Core + Fulcrum + mempool + arkd + …
 docker compose up --build
 ```
+
+Tear the regtest stack down with `node arkade-regtest/regtest.mjs stop` (or `clean` to also
+remove volumes). Fund an address with `node arkade-regtest/regtest.mjs faucet <addr> <btc> --confirm`
+(the `--confirm` flag mines a block so the send confirms immediately).
 
 - client → http://localhost:8080
 - admin dashboard → http://localhost:3002
@@ -53,7 +63,7 @@ Key server env vars:
 | Var | Default | Notes |
 |-----|---------|-------|
 | `ARK_SERVER_URL` | `https://mutinynet.arkade.sh` | Ark server to connect to. The detected network (regtest / mutinynet / …) flows from here. |
-| `ESPLORA_URL` | *(unset → SDK auto-default)* | Optional. Leave unset to let the SDK pick the network's default esplora; set it for regtest/docker where the host differs. |
+| `ESPLORA_URL` | *(unset → SDK auto-default)* | Optional. Leave unset to let the SDK pick the network's default esplora; set it for regtest/docker where the host differs. For arkade-regtest the Esplora REST API is mempool's `/api` (host: `http://localhost:3000/api`, in-network: `http://mempool_web/api`). |
 | `PUBLIC_PORT` | `3001` | Player-facing game API. |
 | `ADMIN_PORT` | `3002` | Admin dashboard + config API. |
 | `ADMIN_HOST` | `127.0.0.1` | Set `0.0.0.0` to expose the admin port behind a reverse proxy. |

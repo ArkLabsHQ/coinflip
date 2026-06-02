@@ -50,8 +50,6 @@ function vtxoToPlayerInput(v: ExtendedVirtualCoin): VtxoInput {
  * a self-submittable refund and can reclaim the stake after the CLTV with no
  * trust in the server. The stash is cleared once the game resolves.
  */
-const REFUNDS_KEY = 'trustlessRefunds'
-
 export interface StashedRefund {
   gameId: string
   tier: number
@@ -79,35 +77,15 @@ export interface StashedRefund {
   playerSecretHex?: string
 }
 
-function loadRefunds(): StashedRefund[] {
-  try {
-    const arr = JSON.parse(localStorage.getItem(REFUNDS_KEY) || '[]')
-    return Array.isArray(arr) ? arr : []
-  } catch {
-    return []
-  }
-}
-
-function saveRefunds(list: StashedRefund[]): void {
-  localStorage.setItem(REFUNDS_KEY, JSON.stringify(list))
-}
-
-function stashRefund(r: StashedRefund): void {
-  saveRefunds([...loadRefunds().filter((x) => x.gameId !== r.gameId), r])
-}
-
-function clearRefund(gameId: string): void {
-  saveRefunds(loadRefunds().filter((x) => x.gameId !== gameId))
-}
-
-/** Merge `patch` fields into an existing stash entry (no-op if entry not found). */
-function updateRefundStash(gameId: string, patch: Partial<StashedRefund>): void {
-  const list = loadRefunds()
-  const idx = list.findIndex((x) => x.gameId === gameId)
-  if (idx === -1) return
-  list[idx] = { ...list[idx], ...patch }
-  saveRefunds(list)
-}
+// Stash backend moved to IndexedDB via @/utils/stashStore. The shape and
+// reducer semantics are unchanged from the prior localStorage version;
+// these thin re-exports keep the call-site names familiar.
+import {
+  loadStashes as loadRefunds,
+  putStash as stashRefund,
+  deleteStash as clearRefund,
+  patchStash as updateRefundStash,
+} from '@/utils/stashStore'
 
 export interface ArkServerInfo {
   pubkey: string
@@ -751,7 +729,7 @@ const ark: Module<ArkState, RootState> = {
       // that will almost certainly resolve, but log it loudly.
       try {
         const r = await apiRefund(playRes.gameId, playerEscrow)
-        stashRefund({
+        await stashRefund({
           gameId: playRes.gameId, tier, playerEscrow,
           refundPsbt: r.refundPsbt, refundCheckpoints: r.refundCheckpoints,
           finalExpiration: r.finalExpiration, createdAt: Date.now(),
@@ -774,7 +752,7 @@ const ark: Module<ArkState, RootState> = {
         if (f.payoutAddress !== playerChangeAddress) {
           console.warn('[trustless] forfeit payoutAddress mismatch — refusing to stash')
         } else {
-          updateRefundStash(playRes.gameId, {
+          await updateRefundStash(playRes.gameId, {
             forfeitPsbt: f.forfeitPsbt,
             forfeitCheckpoints: f.forfeitCheckpoints,
             forfeitClaimableAt: f.forfeitClaimableAt,
@@ -796,7 +774,7 @@ const ark: Module<ArkState, RootState> = {
         // the player has revealed and a stalling server is now in the R1
         // forfeit scenario. The stash records this so the UI surfaces
         // "Claim full pot" (forfeit), not "Reclaim" (self-refund only).
-        updateRefundStash(playRes.gameId, { revealed: true })
+        await updateRefundStash(playRes.gameId, { revealed: true })
         result = await apiCommit(playRes.gameId, playerSecretHex, playerEscrow)
       } catch (e) {
         const when = new Date(playRes.finalExpiration * 1000).toLocaleString()
@@ -804,14 +782,14 @@ const ark: Module<ArkState, RootState> = {
           `${e instanceof Error ? e.message : 'Game failed to resolve'} — your ${tier} sat stake is safe and reclaimable after ${when} (see "Reclaim stalled bets").`,
         )
       }
-      clearRefund(playRes.gameId)
+      await clearRefund(playRes.gameId)
 
       await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
       return result
     },
 
     /** Locally-stashed stalled bets (escrows reclaimable if the server stalled). */
-    listStalledBets(): StashedRefund[] {
+    async listStalledBets(): Promise<StashedRefund[]> {
       return loadRefunds()
     },
 
@@ -841,7 +819,7 @@ const ark: Module<ArkState, RootState> = {
       if (!sdkWallet) throw new Error('Wallet not connected')
       const privateKey = rootState.wallet.privateKey
       if (!privateKey) throw new Error('No wallet key available')
-      const stash = loadRefunds().find((x) => x.gameId === gameId)
+      const stash = (await loadRefunds()).find((x) => x.gameId === gameId)
       if (!stash) throw new Error('No stashed refund for this game')
       commit('SET_CLAIMING', { gameId, info: { kind: 'refund', mode } })
       try {
@@ -874,7 +852,7 @@ const ark: Module<ArkState, RootState> = {
           }
           throw e
         }
-        clearRefund(gameId)
+        await clearRefund(gameId)
         await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
       } finally {
         commit('CLEAR_CLAIMING', gameId)
@@ -901,7 +879,7 @@ const ark: Module<ArkState, RootState> = {
       if (!sdkWallet) throw new Error('Wallet not connected')
       const privateKey = rootState.wallet.privateKey
       if (!privateKey) throw new Error('No wallet key available')
-      const stash = loadRefunds().find((x) => x.gameId === gameId)
+      const stash = (await loadRefunds()).find((x) => x.gameId === gameId)
       if (
         !stash || !stash.forfeitPsbt || !stash.forfeitCheckpoints ||
         !stash.forfeitEmulatorUrl || stash.forfeitClaimableAt === undefined
@@ -943,7 +921,7 @@ const ark: Module<ArkState, RootState> = {
           throw new Error(`Emulator rejected forfeit: ${text}`)
         }
 
-        clearRefund(gameId)
+        await clearRefund(gameId)
         await dispatch('refreshBalance').catch(() => { /* indexer lag */ })
       } finally {
         commit('CLEAR_CLAIMING', gameId)
@@ -959,7 +937,7 @@ const ark: Module<ArkState, RootState> = {
      */
     async runAutoClaim({ state, dispatch }) {
       if (!sdkWallet) return
-      const stashes = loadRefunds()
+      const stashes = await loadRefunds()
       if (!stashes.length) return
       const chainTime = await chainTipTime()
       if (chainTime === null) return // can't decide; try next tick

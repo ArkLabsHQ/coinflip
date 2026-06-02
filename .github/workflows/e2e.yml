@@ -37,15 +37,32 @@ jobs:
         working-directory: packages/server
         run: npx tsc --noEmit
 
+      - name: Build server
+        working-directory: packages/server
+        # The *.unit.test.ts files import the built server (dist/game-engine.js,
+        # dist/vtxo-pool.js) directly, so this job must emit dist — type-check
+        # alone (--noEmit) doesn't.
+        run: npm run build
+
       - name: Install E2E test dependencies
         working-directory: packages/e2e
         run: npm install --include=dev
 
-      - name: Run unit tests (no regtest needed)
+      - name: Run *.unit.test.ts (pure, no regtest)
         working-directory: packages/e2e
-        # Path anchored to `coinflip.test.ts` only — the broader `coinflip`
-        # substring matches every test file in this repo because the working
-        # directory itself contains "coinflip", which is not what we want.
+        # Every `*.unit.test.ts` is deterministic and stack-free (mocked deps /
+        # built dist). Run the whole set in the fast lane so a unit-level
+        # regression is caught without spinning up arkd+emulator. Previously
+        # these only ran in the slow e2e-tests job — slow feedback for a pure
+        # logic break.
+        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="\\.unit\\.test\\.ts$"
+
+      - name: Run coinflip.test.ts unit subset (no regtest)
+        working-directory: packages/e2e
+        # coinflip.test.ts mixes unit + integration cases in one file, so it's
+        # filtered by test NAME to the stack-free ones. Path anchored to the
+        # exact file — the broader `coinflip` substring matches every test file
+        # because the working directory itself contains "coinflip".
         run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="src/coinflip\\.test\\.ts$" -t "gameFromEvents|determineWinner|generateSecret|CoinflipSetupScript|CoinflipFinalScript|coinSelect|event type guards|server-as-counterparty|ContractHandler"
 
   e2e-tests:

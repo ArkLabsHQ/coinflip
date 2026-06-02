@@ -96,7 +96,9 @@ jobs:
         working-directory: packages/e2e
         env:
           ARK_SERVER_URL: http://localhost:7070
-          ESPLORA_URL: http://localhost:3000
+          # denigiri stack serves Esplora REST under the mempool /api prefix;
+          # the bare :3000 root is the mempool web UI (HTML).
+          ESPLORA_URL: http://localhost:3000/api
         run: npx jest --runInBand --forceExit --testTimeout=300000 --ci
 
       - name: Capture logs on failure

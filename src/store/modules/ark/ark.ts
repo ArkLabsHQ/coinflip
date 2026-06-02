@@ -182,11 +182,39 @@ function regtestHost(): string {
   return window.location.hostname || 'localhost'
 }
 
+/**
+ * One-time migration: a browser that cached the pre-denigiri regtest esplora
+ * URL holds a bare `http://<host>:3000`, which on the new stack is the mempool
+ * web UI (HTML), not the Esplora REST API (now under `/api`). The `|| fallback`
+ * default only applies when the key is ABSENT, so a cached bad value would
+ * survive — and `syncNetworkFromServer` only re-applies the preset when the
+ * network CHANGES, which it doesn't for an existing regtest user. Rewrite the
+ * known-bad shape in place so the SDK's esplora calls hit JSON, not HTML.
+ */
+function migrateCachedEsploraUrl(): void {
+  if (typeof window === 'undefined') return
+  try {
+    const cached = localStorage.getItem('ark_esplora')
+    if (!cached) return
+    // Match a bare `http(s)://<host>:3000` with no path (optional trailing /).
+    if (/^https?:\/\/[^/]+:3000\/?$/.test(cached)) {
+      localStorage.setItem('ark_esplora', cached.replace(/\/?$/, '') + '/api')
+    }
+  } catch {
+    /* private mode / storage disabled — nothing to migrate */
+  }
+}
+migrateCachedEsploraUrl()
+
 export const NETWORK_PRESETS: Record<string, NetworkPreset> = {
   regtest: {
     label: 'Regtest (local)',
     server: `http://${regtestHost()}:7070`,
-    esplora: `http://${regtestHost()}:3000`,
+    // The arkade-regtest (denigiri) stack serves the Esplora REST API
+    // under the mempool service's `/api` prefix on :3000 — the bare root
+    // is the mempool web UI (HTML), not the REST API. Omitting `/api`
+    // makes the SDK's esplora calls return HTML and fail to parse.
+    esplora: `http://${regtestHost()}:3000/api`,
     boltz: `http://${regtestHost()}:9069`,
   },
   mutinynet: {
@@ -280,7 +308,8 @@ const ark: Module<ArkState, RootState> = {
 
   state: {
     server: localStorage.getItem('ark_server') || `http://${regtestHost()}:7070`,
-    esplora: localStorage.getItem('ark_esplora') || `http://${regtestHost()}:3000`,
+    // Esplora REST under the mempool `/api` prefix — see NETWORK_PRESETS.
+    esplora: localStorage.getItem('ark_esplora') || `http://${regtestHost()}:3000/api`,
     networkPreset: localStorage.getItem('ark_network_preset') || 'regtest',
     status: 'disconnected',
     lastError: null,

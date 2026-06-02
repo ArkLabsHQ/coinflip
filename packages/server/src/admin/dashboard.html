@@ -309,12 +309,13 @@
       <input type="text" id="sendAddress" placeholder="Destination address (Ark or on-chain)" style="flex:1;min-width:280px">
     </div>
     <div class="config-row">
-      <input type="number" id="sendAmount" placeholder="Amount (sats)" style="width:160px" min="1">
+      <input type="number" id="sendAmount" placeholder="Amount (sats)" style="width:160px" min="1" step="1" oninput="updateSendBtc()">
       <label style="min-width:auto;display:flex;align-items:center;gap:6px">
         <input type="checkbox" id="sendForce" style="width:auto"> force (ignore reserved)
       </label>
       <button class="btn" onclick="doSend()">Send</button>
     </div>
+    <p class="op-hint" id="sendBtcReadout">Amount is in <strong>sats</strong> (whole numbers). 0.005 BTC = 500,000 sats.</p>
     <p class="op-hint">Withdrawals are capped at available − in-flight liability unless "force" is set, so funds owed to live games aren't drained.</p>
 
     <h3 class="op-label">Settle / Renew VTXOs</h3>
@@ -641,11 +642,34 @@
     }).join('');
   }
 
+  // Live BTC equivalent under the sats field, so a BTC-style entry (the classic
+  // "0.005" mistake — parseInt truncates it to 0) is caught by eye before Send.
+  function updateSendBtc() {
+    const el = document.getElementById('sendBtcReadout');
+    const raw = document.getElementById('sendAmount').value.trim();
+    if (raw === '') { el.innerHTML = 'Amount is in <strong>sats</strong> (whole numbers). 0.005 BTC = 500,000 sats.'; return; }
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) { el.textContent = 'Enter a positive whole number of sats.'; return; }
+    if (!Number.isInteger(n)) {
+      el.innerHTML = '⚠ Sats must be a whole number — looks like a BTC amount. ' +
+        Math.round(n * 1e8).toLocaleString() + ' sats?';
+      return;
+    }
+    el.textContent = '= ' + (n / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') + ' BTC';
+  }
+
   async function doSend() {
     const address = document.getElementById('sendAddress').value.trim();
-    const amount = parseInt(document.getElementById('sendAmount').value);
+    const raw = document.getElementById('sendAmount').value.trim();
+    const amountNum = Number(raw);
     const force = document.getElementById('sendForce').checked;
-    if (!address || !amount || amount <= 0) { showToast('Enter an address and amount'); return; }
+    if (!address) { showToast('Enter a destination address'); return; }
+    if (raw === '' || !Number.isFinite(amountNum) || amountNum <= 0) { showToast('Enter an amount in sats'); return; }
+    if (!Number.isInteger(amountNum)) {
+      showToast('Amount must be a whole number of sats (' + Math.round(amountNum * 1e8).toLocaleString() + ' for ' + raw + ' BTC?)');
+      return;
+    }
+    const amount = amountNum;
     if (!confirm(`Send ${fmt(amount)} sats to ${address.substring(0, 24)}…?`)) return;
     const res = await fetch('/api/wallet/send', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -656,6 +680,7 @@
     showToast('Sent! txid ' + String(data.txid || '').substring(0, 12) + '…');
     document.getElementById('sendAmount').value = '';
     document.getElementById('sendForce').checked = false;
+    updateSendBtc();
     refresh();
   }
 

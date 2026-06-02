@@ -25,7 +25,7 @@ function depsWithSettle(settle: (...args: any[]) => Promise<any>) {
 }
 
 describe('renewSettle (renewal settle path)', () => {
-  it('calls the SDK settle() with NO arguments (not an explicit empty-outputs set)', async () => {
+  it('calls settle() with undefined params (SDK default gathering, not explicit empty-outputs)', async () => {
     const calls: any[][] = []
     const deps = depsWithSettle(async (...args: any[]) => {
       calls.push(args)
@@ -34,10 +34,21 @@ describe('renewSettle (renewal settle path)', () => {
     const ok = await renewSettle(deps)
     expect(ok).toBe(true)
     expect(calls).toHaveLength(1)
-    // The load-bearing assertion: zero args. A regression to
-    // settle({ inputs, outputs: [] }) would put one object here and arkd
-    // would reject with "proof does not contain outputs".
-    expect(calls[0]).toEqual([])
+    // Load-bearing: the FIRST arg (settle params) must be undefined so the SDK
+    // does its own input gathering + fee + self-output math. A regression to
+    // settle({ inputs, outputs: [] }) would put an object here and arkd would
+    // reject with "proof does not contain outputs". (The 2nd arg is the
+    // batch-event handler — see below.)
+    expect(calls[0][0]).toBeUndefined()
+  })
+
+  it('passes a batch/round event handler as the settle eventCallback', async () => {
+    const calls: any[][] = []
+    const deps = depsWithSettle(async (...args: any[]) => { calls.push(args); return 'txid' })
+    await renewSettle(deps)
+    // 2nd arg is the SettlementEvent handler (function) — the per-phase
+    // observability layer wired in for every party's settle.
+    expect(typeof calls[0][1]).toBe('function')
   })
 
   it('treats "No inputs found" as a graceful no-op (returns false, does not throw)', async () => {

@@ -17,6 +17,7 @@ import {
 } from 'arkade-coinflip'
 import { isVtxoExpiringSoon, isExpired, isSpendable, VtxoScript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
+import { makeSettlementHandler } from './settlement-events.js'
 import { createGameContracts, markGameContractsInactive } from './contract-manager.js'
 import {
   reservations,
@@ -206,9 +207,13 @@ export function selectableHouseVtxos(
  * that a wallet resync/wipe resolves — not something the renewal path can
  * filter around, since the phantom looks confirmed in the wallet's own view.
  */
-export async function renewSettle(deps: AppDeps): Promise<boolean> {
+export async function renewSettle(deps: AppDeps, label = 'renewal'): Promise<boolean> {
   try {
-    await deps.wallet.settle()
+    // First arg stays undefined → SDK does its default input gathering + fee +
+    // self-output math (do NOT pass an explicit empty-outputs set). Second arg
+    // is the batch/round event handler: per-phase visibility for this party's
+    // settle, and a loud BatchFailed line if the round dies mid-flight.
+    await deps.wallet.settle(undefined, makeSettlementHandler(label))
     houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
     return true
   } catch (err) {
@@ -229,7 +234,7 @@ export async function renewExpiringHouseVtxos(deps: AppDeps): Promise<boolean> {
   const { dropped } = selectableHouseVtxos(all)
   if (dropped.length === 0) return false
   console.log(`[house wallet] renewing ${dropped.length} expiring VTXOs via settle()`)
-  return renewSettle(deps)
+  return renewSettle(deps, 'play-fallback')
 }
 
 /**

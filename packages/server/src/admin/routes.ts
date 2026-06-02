@@ -3,6 +3,7 @@ import path from 'path'
 import { isVtxoExpiringSoon } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
 import { reservations, ensureHouseVtxoPool } from '../vtxo-pool.js'
+import { makeSettlementHandler } from '../settlement-events.js'
 
 /** Same buffer the game-engine uses to treat a VTXO as "expiring soon". */
 const VTXO_EXPIRING_BUFFER_MS = 30 * 60_000
@@ -269,7 +270,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
   // finish in the background rather than hanging the HTTP request.
   router.post('/api/wallet/settle', async (_req: Request, res: Response) => {
     try {
-      const settlePromise = deps.wallet.settle()
+      const settlePromise = deps.wallet.settle(undefined, makeSettlementHandler('admin'))
       // Ensure a late rejection (after we've already responded) can't surface as
       // an unhandled rejection and crash the process.
       settlePromise.catch((e) =>

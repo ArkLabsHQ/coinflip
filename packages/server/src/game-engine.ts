@@ -15,7 +15,7 @@ import {
   type Game,
   type VtxoInput,
 } from 'arkade-coinflip'
-import { isVtxoExpiringSoon, isExpired, isSpendable, VtxoScript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { isVtxoExpiringSoon, isExpired, isSpendable, VtxoScript, type ExtendedVirtualCoin, type ExtendedCoin } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
 import { createGameContracts, markGameContractsInactive } from './contract-manager.js'
 import {
@@ -185,6 +185,52 @@ export function selectableHouseVtxos(
 }
 
 /**
+ * Assemble an EXPLICIT settle-input set instead of letting `wallet.settle()`
+ * auto-include everything the wallet knows about.
+ *
+ * Why: the SDK's no-arg `settle()` pulls in every wallet input, including
+ * boarding UTXOs whose underlying tx arkd no longer has (e.g. after a regtest
+ * chain reset where the house wallet's persisted DB outlived the chain it
+ * described). arkd then rejects the whole settle with TX_NOT_FOUND / a missing
+ * intent-proof signature, and the renewal worker retries the same doomed
+ * settle every tick forever. Filtering to inputs arkd can actually resolve —
+ * spendable VTXOs + CONFIRMED boarding UTXOs — quarantines the phantom input
+ * so the rest still settles.
+ *
+ * Returns the input set (possibly empty). An empty set means "nothing safe to
+ * settle right now" — callers should skip the settle rather than fall back to
+ * the all-inputs path.
+ */
+export async function buildRenewalInputs(deps: AppDeps): Promise<ExtendedCoin[]> {
+  const [vtxos, boarding] = await Promise.all([
+    deps.wallet.getVtxos(),
+    deps.wallet.getBoardingUtxos(),
+  ])
+  // Spendable VTXOs only — `isSpendable` filters spent; we still WANT the
+  // expiring-soon ones here (renewing them is the whole point), so we don't
+  // run them through selectableHouseVtxos' expiry drop.
+  const spendableVtxos = vtxos.filter((v) => isSpendable(v)) as unknown as ExtendedCoin[]
+  // Boarding inputs only if arkd can resolve them: confirmed on-chain. An
+  // unconfirmed or chain-reset-orphaned boarding UTXO is exactly the phantom
+  // that wedges the settle, so exclude it.
+  const confirmedBoarding = boarding.filter((b) => b.status?.confirmed === true)
+  return [...spendableVtxos, ...confirmedBoarding]
+}
+
+/**
+ * Settle an explicit, arkd-resolvable input set (see buildRenewalInputs).
+ * No-op + returns false when there's nothing safe to settle. Throws on a
+ * genuine settle failure (caller logs).
+ */
+export async function renewSettle(deps: AppDeps): Promise<boolean> {
+  const inputs = await buildRenewalInputs(deps)
+  if (inputs.length === 0) return false
+  await deps.wallet.settle({ inputs, outputs: [] })
+  houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
+  return true
+}
+
+/**
  * Try to renew house VTXOs by joining a settlement batch. Returns true if
  * a settle round was triggered, false if the wallet has no expiring VTXOs
  * to renew. Called from `handlePlay` when the selectable house balance
@@ -195,9 +241,7 @@ export async function renewExpiringHouseVtxos(deps: AppDeps): Promise<boolean> {
   const { dropped } = selectableHouseVtxos(all)
   if (dropped.length === 0) return false
   console.log(`[house wallet] renewing ${dropped.length} expiring VTXOs via settle()`)
-  await deps.wallet.settle()
-  houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
-  return true
+  return renewSettle(deps)
 }
 
 /**
@@ -628,8 +672,18 @@ export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.T
       const { dropped } = selectableHouseVtxos(all) // VTXOs expiring within the buffer
       if (!shouldRenew(dropped.length, balance.boarding.total)) return
       console.log(`[renewal] settling: ${dropped.length} expiring VTXO(s), boarding ${balance.boarding.total} sats`)
-      await deps.wallet.settle()
-      houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
+      // Settle an explicit arkd-resolvable input set (spendable VTXOs +
+      // CONFIRMED boarding). A no-arg settle() would also pull in any phantom
+      // boarding input the wallet DB remembers but arkd has lost (e.g. after a
+      // chain reset) and wedge every tick with TX_NOT_FOUND.
+      const settled = await renewSettle(deps)
+      if (!settled) {
+        // boarding.total > 0 but nothing confirmed/resolvable → the balance is
+        // a phantom the wallet can't actually settle. Don't retry blindly.
+        console.warn(
+          `[renewal] nothing arkd-resolvable to settle (boarding ${balance.boarding.total} sats may be a stale/unconfirmed phantom); skipping`,
+        )
+      }
     } catch (err) {
       console.warn('[renewal] tick failed:', err instanceof Error ? err.message : err)
     } finally {

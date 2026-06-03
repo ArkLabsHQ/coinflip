@@ -181,7 +181,7 @@ export const NETWORK_PRESETS: Record<string, NetworkPreset> = {
   regtest: {
     label: 'Regtest (local)',
     server: 'http://localhost:7070',
-    esplora: 'http://localhost:3000',
+    esplora: 'http://localhost:3000/api',
     boltz: 'http://localhost:9069',
   },
   mutinynet: {
@@ -268,7 +268,7 @@ const ark: Module<ArkState, RootState> = {
 
   state: {
     server: localStorage.getItem('ark_server') || 'http://localhost:7070',
-    esplora: localStorage.getItem('ark_esplora') || 'http://localhost:3000',
+    esplora: localStorage.getItem('ark_esplora') || 'http://localhost:3000/api',
     networkPreset: localStorage.getItem('ark_network_preset') || 'regtest',
     status: 'disconnected',
     lastError: null,

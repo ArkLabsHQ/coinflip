@@ -55,29 +55,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-
-      - uses: actions/cache@v4
-        with:
-          path: arkade-regtest/_build
-          key: nigiri-${{ hashFiles('arkade-regtest/.env.defaults', '.env.regtest') }}
+          submodules: recursive
 
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Start regtest environment
-        run: |
-          chmod +x arkade-regtest/*.sh arkade-regtest/helpers/*.sh
-          ./arkade-regtest/start-env.sh
+        # In-house arkade-regtest Node CLI (replaces nigiri). AUTOMINE_INTERVAL=0
+        # keeps block production explicit — the tests mine on demand via the CLI,
+        # so VTXO expiry / block heights stay deterministic.
+        run: AUTOMINE_INTERVAL=0 node arkade-regtest/regtest.mjs start --env .env.regtest
         timeout-minutes: 15
-
-      - name: Add nigiri to PATH
-        run: echo "${{ github.workspace }}/arkade-regtest/_build/nigiri/build" >> $GITHUB_PATH
 
       - name: Diagnostic - dump regtest env state
         run: |
@@ -112,18 +101,16 @@ jobs:
         working-directory: packages/e2e
         env:
           ARK_SERVER_URL: http://localhost:7070
-          ESPLORA_URL: http://localhost:3000
+          ESPLORA_URL: http://localhost:3000/api
         run: npx jest --runInBand --forceExit --testTimeout=300000 --ci
 
       - name: Capture logs on failure
         if: failure()
         run: |
           docker logs arkd 2>&1 | tail -200 || true
-          docker logs ark-wallet 2>&1 | tail -200 || true
+          docker logs arkd-wallet 2>&1 | tail -200 || true
           docker logs boltz 2>&1 | tail -100 || true
 
       - name: Cleanup
         if: always()
-        run: |
-          chmod +x arkade-regtest/clean-env.sh 2>/dev/null || true
-          ./arkade-regtest/clean-env.sh || true
+        run: node arkade-regtest/regtest.mjs clean --env .env.regtest || true

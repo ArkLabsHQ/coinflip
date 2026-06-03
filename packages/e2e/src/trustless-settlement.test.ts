@@ -15,6 +15,7 @@
  */
 
 import { base64, hex } from '@scure/base'
+import { cliFaucet } from './helpers'
 import { createHash } from 'crypto'
 import {
   buildGameTransactions,
@@ -42,7 +43,7 @@ import {
 } from '@arkade-os/sdk'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 const NETWORK_HRP = 'rark'
 const BET = 1000
 const FUND_BTC = 0.001 // 100k sats
@@ -52,11 +53,7 @@ const toXOnly = (p: Uint8Array) => (p.length === 33 ? p.slice(1) : p)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 async function faucet(address: string, amountBtc: number): Promise<void> {
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, amount: amountBtc }),
-  })
-  if (!resp.ok) throw new Error(`Faucet failed: ${resp.status} ${await resp.text()}`)
+  cliFaucet(address, amountBtc)
 }
 
 async function makeWallet(identity: SingleKey): Promise<Wallet> {

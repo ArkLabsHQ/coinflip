@@ -7,7 +7,7 @@ const express = require('express')
 const cors = require('cors')
 
 process.env.ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-process.env.ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+process.env.ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 process.env.DATA_DIR = process.env.DATA_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'coinflip-regtest-'))
 
 const ESPLORA = process.env.ESPLORA_URL

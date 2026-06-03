@@ -20,9 +20,10 @@ import {
   buildOffchainTx, decodeTapscript, CSVMultisigTapscript, ConditionWitness, setArkPsbtField,
   Transaction, ArkAddress, SingleKey, type ArkProvider, type Identity, type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
+import { faucet } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 const HOUSE_FUND_BTC = 0.005
 const BET = 1000
 
@@ -30,12 +31,6 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const toXOnly = (b: Uint8Array) => (b.length === 33 ? b.slice(1) : b)
 const sha = (b: Uint8Array) => new Uint8Array(createHash('sha256').update(b).digest())
 
-async function faucet(address: string, amountBtc: number): Promise<void> {
-  const r = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address, amount: amountBtc }),
-  })
-  if (!r.ok) throw new Error(`Faucet failed: ${r.status} ${await r.text()}`)
-}
 async function waitForBoarding(w: { getBalance: () => Promise<{ boarding: { total: number } }> }, min: number, t = 30_000) {
   const start = Date.now()
   while (Date.now() - start < t) { if ((await w.getBalance()).boarding.total >= min) return; await sleep(2000) }

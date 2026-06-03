@@ -40,9 +40,10 @@ import {
   type Identity,
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
+import { faucet } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 const NETWORK_HRP = 'rark'
 const BET = 1000
 const FUND_BTC = 0.001 // 100k sats
@@ -51,13 +52,6 @@ const sha = (b: Uint8Array) => new Uint8Array(createHash('sha256').update(b).dig
 const toXOnly = (p: Uint8Array) => (p.length === 33 ? p.slice(1) : p)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-async function faucet(address: string, amountBtc: number): Promise<void> {
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, amount: amountBtc }),
-  })
-  if (!resp.ok) throw new Error(`Faucet failed: ${resp.status} ${await resp.text()}`)
-}
 
 async function makeWallet(identity: SingleKey): Promise<Wallet> {
   return Wallet.create({

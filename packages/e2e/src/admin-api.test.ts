@@ -20,22 +20,16 @@ import path from 'path'
 import { createHash } from 'crypto'
 import { hex } from '@scure/base'
 import { SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository } from '@arkade-os/sdk'
+import { faucet } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 const HOUSE_FUND_BTC = 0.005
 const BET = 1000
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const toXOnly = (b: Uint8Array) => (b.length === 33 ? b.slice(1) : b)
 
-async function faucet(address: string, amountBtc: number): Promise<void> {
-  const r = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, amount: amountBtc }),
-  })
-  if (!r.ok) throw new Error(`Faucet failed: ${r.status} ${await r.text()}`)
-}
 
 async function waitForBoarding(w: Wallet, min: number, t = 30_000): Promise<void> {
   const start = Date.now()

@@ -24,9 +24,10 @@ import {
   Transaction, ArkAddress,
   type ArkInfo, type ArkProvider, type ArkTxInput, type Identity, type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
+import { faucet } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 const HRP = 'tark' // cosmetic — we escrow into pkScript, which is HRP-independent
 const BET = 1000
 const FUND_BTC = 0.01 // generous so several cases can run off one funding
@@ -36,12 +37,6 @@ const toXOnly = (p: Uint8Array) => (p.length === 33 ? p.slice(1) : p)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const secretOfDigit = (digit: number) => new Uint8Array(randomBytes(VARIABLE_ODDS_BASE_LEN + digit))
 
-async function faucet(address: string, amountBtc: number): Promise<void> {
-  const r = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address, amount: amountBtc }),
-  })
-  if (!r.ok) throw new Error(`Faucet failed: ${r.status} ${await r.text()}`)
-}
 async function makeWallet(identity: SingleKey): Promise<Wallet> {
   return Wallet.create({
     identity, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,

@@ -35,9 +35,10 @@ import {
   InMemoryContractRepository,
   type ArkProvider,
 } from '@arkade-os/sdk'
+import { faucet } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 const EMULATOR_URL = process.env.EMULATOR_URL || 'http://localhost:7073'
 // :8080/api is the client proxy mapping to coinflip-server-1's :3001.
 const COINFLIP_API_URL = process.env.COINFLIP_API_URL || 'http://localhost:8080/api'
@@ -56,14 +57,6 @@ async function probe(url: string): Promise<boolean> {
   }
 }
 
-async function faucet(address: string, amountBtc: number): Promise<void> {
-  const r = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, amount: amountBtc }),
-  })
-  if (!r.ok) throw new Error(`Faucet failed: ${r.status} ${await r.text()}`)
-}
 
 async function makePlayerWallet(id: SingleKey): Promise<Wallet> {
   return Wallet.create({

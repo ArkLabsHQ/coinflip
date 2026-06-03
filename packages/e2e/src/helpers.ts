@@ -2,6 +2,8 @@
  * E2E test helpers for interacting with regtest infrastructure.
  */
 
+import { execSync } from 'child_process'
+import path from 'path'
 import {
   Wallet,
   SingleKey,
@@ -16,7 +18,7 @@ import {
 } from '@arkade-os/sdk'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 
 export async function createArkProvider(): Promise<ArkProvider> {
   return new RestArkProvider(ARK_SERVER_URL)
@@ -58,19 +60,10 @@ export async function createFundedWallet(): Promise<{
 export async function fundWallet(wallet: Wallet, amountSats: number): Promise<void> {
   const boardingAddress = await wallet.getBoardingAddress()
 
-  // Use nigiri faucet to send BTC
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: boardingAddress, amount: amountSats / 1e8 }),
-  })
-
-  if (!resp.ok) {
-    throw new Error(`Faucet failed: ${resp.status} ${await resp.text()}`)
-  }
-
-  // Mine a block to confirm
-  await mineBlock()
+  // denigiri arkade-regtest has no HTTP faucet (the old nigiri esplora /faucet
+  // is gone) — funding is bitcoin-cli sendtoaddress via the orchestrator CLI.
+  // `--confirm` mines a block so the boarding UTXO confirms immediately.
+  regtestCli(['faucet', boardingAddress, String(amountSats / 1e8), '--confirm'])
 
   // Wait for boarding UTXO to be detected
   await waitForBalance(wallet, 'boarding', amountSats, 30_000)
@@ -83,15 +76,34 @@ export async function fundWallet(wallet: Wallet, amountSats: number): Promise<vo
 }
 
 export async function mineBlock(count = 1): Promise<void> {
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: 'bcrt1qxyyy6ygnf7yzwfxlf8kp3y6aq4ey9y6rnr38uc', amount: 0.001 * count }),
-  })
-  if (!resp.ok) {
-    // Fallback: try mining endpoint
-    await fetch(`${ESPLORA_URL}/mine`, { method: 'POST' }).catch(() => {})
-  }
+  regtestCli(['mine', String(count)])
+}
+
+/**
+ * Fund a (boarding) address with `amountBtc` and confirm it in a block.
+ * Shared by every live e2e test — replaces the per-file `fetch(ESPLORA/faucet)`
+ * copies that targeted the old nigiri HTTP faucet (gone on the denigiri stack).
+ * Returns the orchestrator's stdout (informational; callers that logged a txid
+ * still get a non-undefined string).
+ */
+export async function faucet(address: string, amountBtc: number): Promise<string> {
+  return regtestCli(['faucet', address, String(amountBtc), '--confirm'])
+}
+
+/**
+ * Shell the arkade-regtest Node orchestrator (the denigiri stack's control
+ * plane) for faucet/mine. Resolves the script relative to the jest working
+ * dir (packages/e2e → repo root is two up); override the whole command with
+ * REGTEST_CLI if the layout differs. Synchronous because funding/mining must
+ * complete before the test proceeds, and these are short bitcoin-cli calls.
+ * Returns trimmed stdout.
+ */
+function regtestCli(args: string[]): string {
+  const joined = args.map((a) => JSON.stringify(a)).join(' ')
+  const cmd = process.env.REGTEST_CLI
+    ? `${process.env.REGTEST_CLI} ${joined}`
+    : `node ${JSON.stringify(path.resolve(process.cwd(), '../../arkade-regtest/regtest.mjs'))} ${joined}`
+  return execSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim()
 }
 
 async function waitForBalance(

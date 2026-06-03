@@ -5,9 +5,15 @@
 const fs = require('fs')
 const path = require('path')
 
-const src = path.join(__dirname, '..', 'src', 'admin', 'dashboard.html')
+const srcDir = path.join(__dirname, '..', 'src', 'admin')
 const destDir = path.join(__dirname, '..', 'dist', 'admin')
 
+// Non-TS admin assets tsc doesn't emit. amount-validate.js is a dual-target
+// (browser global + Node require) classifier shared with the unit test.
+const assets = ['dashboard.html', 'amount-validate.js']
+
 fs.mkdirSync(destDir, { recursive: true })
-fs.copyFileSync(src, path.join(destDir, 'dashboard.html'))
-console.log('[build] copied admin/dashboard.html -> dist/admin/')
+for (const f of assets) {
+  fs.copyFileSync(path.join(srcDir, f), path.join(destDir, f))
+  console.log(`[build] copied admin/${f} -> dist/admin/`)
+}

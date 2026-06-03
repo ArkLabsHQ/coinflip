@@ -59,68 +59,11 @@ function wipeLegacyLocalStorageOnce(): void {
   try { localStorage.removeItem(LEGACY_LOCALSTORAGE_KEY) } catch { /* private mode etc */ }
 }
 
-/**
- * Decide which stashes are safe to drop on load.
- *
- * This is a UX policy call — drop too aggressively and a user who
- * re-opened the tab after a long break loses an auto-claim they might
- * have wanted; drop too leniently and stashes from failed auto-claims
- * accumulate forever (the console spam in this session is a live
- * example of the latter).
- *
- * Knobs to consider when writing the body:
- *   - `finalExpiration` (unix seconds) is the hard limit. Past this
- *     plus a grace window, the leaves are no longer spendable via the
- *     server-cooperative paths. Only the unilateral CSV exits remain,
- *     which the client doesn't auto-fire today.
- *   - `revealed === true` stashes (forfeit eligible) are higher-value
- *     to keep than refund-only stashes (player gets back the same
- *     money via on-chain settlement either way).
- *   - A max-count cap (e.g. 100 most-recent) is belt-and-suspenders
- *     against catastrophic growth even if the time filter misses an
- *     edge case.
- *
- * Example policies (pick one and write it):
- *   - "drop anything past finalExpiration + 7 days, AND cap at 100
- *      most-recent by createdAt"
- *   - "keep only revealed stashes past expiry; drop unrevealed past
- *      expiry; no count cap"
- *   - "no time filter, just a hard cap at N entries"
- */
-export function pruneOnLoad(stashes: StashedRefund[], nowSec: number): StashedRefund[] {
-  // Grace measured FROM finalExpiration, not from createdAt. Both the
-  // refund and playerForfeit leaves unlock AT finalExpiration (same
-  // absolute CLTV in CoinflipEscrowScript), so that timestamp is when a
-  // stash becomes *claimable*, not when it expires. Dropping at
-  // finalExpiration would evict a stash exactly when it turns useful —
-  // the grace gives the 15s auto-claim loop ample time to fire against
-  // the now-open window. A successful claim clears its own stash, so any
-  // entry still here past `finalExpiration + grace` is one the auto-claim
-  // has been *failing* to land (dead emulator, drifted arkd state); we
-  // give up on it to stop the doomed-retry spam and reclaim space.
-  //
-  // Revealed stashes get a longer grace: they can sweep the full pot via
-  // the forfeit leaf, vs an unrevealed stash only reclaiming the player's
-  // own stake — higher-value recovery is worth holding onto longer.
-  const REVEALED_GRACE_SEC = 30 * 24 * 60 * 60   // 30 days
-  const UNREVEALED_GRACE_SEC = 7 * 24 * 60 * 60  //  7 days
-  // Catastrophic-growth backstop: even if the time filter misses an edge
-  // case (e.g. a malformed finalExpiration), never let the set exceed this.
-  // Keep the most-recently-created entries.
-  const MAX_ENTRIES = 200
-
-  const live = stashes.filter((s) => {
-    // Defensive: a missing/insane finalExpiration shouldn't make a stash
-    // immortal — treat it as expired-now so the count cap can reap it.
-    if (!Number.isFinite(s.finalExpiration)) return false
-    const grace = s.revealed === true ? REVEALED_GRACE_SEC : UNREVEALED_GRACE_SEC
-    return nowSec < s.finalExpiration + grace
-  })
-
-  if (live.length <= MAX_ENTRIES) return live
-  // Over the cap: keep the newest MAX_ENTRIES by createdAt (ms).
-  return [...live].sort((a, b) => b.createdAt - a.createdAt).slice(0, MAX_ENTRIES)
-}
+// Eviction policy lives in a zero-dependency module so it's unit-testable
+// without instantiating the IndexedDB adapter. Re-exported for callers that
+// imported it from here.
+export { pruneOnLoad } from './stashPrune'
+import { pruneOnLoad } from './stashPrune'
 
 /**
  * Read every stash from IDB, run the eviction policy, persist back if

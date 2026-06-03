@@ -414,6 +414,9 @@
 
   <div class="toast" id="toast"></div>
 
+<!-- Shared amount classifier (single source of truth with the unit test).
+     Classic script: attaches window.AmountValidate before the inline code runs. -->
+<script src="amount-validate.js"></script>
 <script>
   let currentTiers = [];
 
@@ -644,32 +647,33 @@
 
   // Live BTC equivalent under the sats field, so a BTC-style entry (the classic
   // "0.005" mistake — parseInt truncates it to 0) is caught by eye before Send.
+  // Classification logic lives in amount-validate.js (loaded as a global) so
+  // it's a single source of truth shared with the unit test.
   function updateSendBtc() {
     const el = document.getElementById('sendBtcReadout');
-    const raw = document.getElementById('sendAmount').value.trim();
-    if (raw === '') { el.innerHTML = 'Amount is in <strong>sats</strong> (whole numbers). 0.005 BTC = 500,000 sats.'; return; }
-    const n = Number(raw);
-    if (!Number.isFinite(n) || n <= 0) { el.textContent = 'Enter a positive whole number of sats.'; return; }
-    if (!Number.isInteger(n)) {
+    const c = AmountValidate.classifySendAmount(document.getElementById('sendAmount').value);
+    if (c.state === 'empty') { el.innerHTML = 'Amount is in <strong>sats</strong> (whole numbers). 0.005 BTC = 500,000 sats.'; return; }
+    if (c.state === 'invalid') { el.textContent = 'Enter a positive whole number of sats.'; return; }
+    if (c.state === 'fractional') {
       el.innerHTML = '⚠ Sats must be a whole number — looks like a BTC amount. ' +
-        Math.round(n * 1e8).toLocaleString() + ' sats?';
+        c.suggestedSats.toLocaleString() + ' sats?';
       return;
     }
-    el.textContent = '= ' + (n / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') + ' BTC';
+    el.textContent = '= ' + c.btc + ' BTC';
   }
 
   async function doSend() {
     const address = document.getElementById('sendAddress').value.trim();
     const raw = document.getElementById('sendAmount').value.trim();
-    const amountNum = Number(raw);
+    const c = AmountValidate.classifySendAmount(raw);
     const force = document.getElementById('sendForce').checked;
     if (!address) { showToast('Enter a destination address'); return; }
-    if (raw === '' || !Number.isFinite(amountNum) || amountNum <= 0) { showToast('Enter an amount in sats'); return; }
-    if (!Number.isInteger(amountNum)) {
-      showToast('Amount must be a whole number of sats (' + Math.round(amountNum * 1e8).toLocaleString() + ' for ' + raw + ' BTC?)');
+    if (c.state === 'empty' || c.state === 'invalid') { showToast('Enter an amount in sats'); return; }
+    if (c.state === 'fractional') {
+      showToast('Amount must be a whole number of sats (' + c.suggestedSats.toLocaleString() + ' for ' + raw + ' BTC?)');
       return;
     }
-    const amount = amountNum;
+    const amount = c.sats;
     if (!confirm(`Send ${fmt(amount)} sats to ${address.substring(0, 24)}…?`)) return;
     const res = await fetch('/api/wallet/send', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

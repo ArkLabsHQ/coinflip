@@ -5,7 +5,9 @@
   "scripts": {
     "serve": "vue-cli-service serve src/main.ts",
     "build": "vue-cli-service build",
-    "lint": "vue-cli-service lint"
+    "lint": "vue-cli-service lint",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest"
   },
   "dependencies": {
     "@3d-dice/dice-box-threejs": "^0.0.12",
@@ -41,8 +43,10 @@
     "@vue/eslint-config-typescript": "^11.0.3",
     "eslint": "^8.42.0",
     "eslint-plugin-vue": "^9.14.1",
+    "jsdom": "^29.1.1",
     "sass": "^1.63.4",
-    "sass-loader": "^13.3.2"
+    "sass-loader": "^13.3.2",
+    "vitest": "^4.1.8"
   },
   "eslintConfig": {
     "root": true,

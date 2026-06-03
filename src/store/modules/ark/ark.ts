@@ -13,6 +13,7 @@ import {
   type Outpoint,
 } from '@/services/api'
 import { createHash } from '@/utils/crypto'
+import { upgradeEsploraUrl } from '@/utils/esploraUrl'
 
 /** VtxoInput shape expected by the server's /api/play endpoint. */
 export interface VtxoInput {
@@ -195,11 +196,8 @@ function migrateCachedEsploraUrl(): void {
   if (typeof window === 'undefined') return
   try {
     const cached = localStorage.getItem('ark_esplora')
-    if (!cached) return
-    // Match a bare `http(s)://<host>:3000` with no path (optional trailing /).
-    if (/^https?:\/\/[^/]+:3000\/?$/.test(cached)) {
-      localStorage.setItem('ark_esplora', cached.replace(/\/?$/, '') + '/api')
-    }
+    const upgraded = upgradeEsploraUrl(cached)
+    if (upgraded && upgraded !== cached) localStorage.setItem('ark_esplora', upgraded)
   } catch {
     /* private mode / storage disabled — nothing to migrate */
   }

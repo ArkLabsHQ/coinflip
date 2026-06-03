@@ -57,6 +57,7 @@ COPY --from=builder /app/packages/server/dist ./packages/server/dist
 COPY --from=builder /app/packages/server/package.json ./packages/server/
 COPY --from=builder /app/packages/server/node_modules ./packages/server/node_modules
 COPY --from=builder /app/packages/server/src/admin/dashboard.html ./packages/server/dist/admin/
+COPY --from=builder /app/packages/server/src/admin/amount-validate.js ./packages/server/dist/admin/
 
 # Create data directory
 RUN mkdir -p /app/data

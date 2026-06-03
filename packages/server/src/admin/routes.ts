@@ -30,6 +30,13 @@ export function createAdminRoutes(deps: AppDeps): Router {
     res.sendFile(path.join(__dirname, 'dashboard.html'))
   })
 
+  // GET /amount-validate.js — the dashboard's shared amount classifier
+  // (single source of truth with the unit test). Served as a classic script.
+  router.get('/amount-validate.js', (_req: Request, res: Response) => {
+    res.type('application/javascript')
+    res.sendFile(path.join(__dirname, 'amount-validate.js'))
+  })
+
   // GET /api/status — balance, game counts, profit
   router.get('/api/status', async (_req: Request, res: Response) => {
     try {

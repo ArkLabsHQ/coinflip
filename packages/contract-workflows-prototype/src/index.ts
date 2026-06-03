@@ -44,7 +44,5 @@ export {
   EmulatorPacket,
   Extension,
   P2A,
-  type ArkadeLeaf,
-  type ArkadeVtxoInput,
   type ExtensionPacket,
 } from '@arkade-os/sdk'

@@ -413,7 +413,7 @@ export interface CoinflipEscrowOptions {
  * VTXO is on-chain checkpointed; in practice `exitDelay` ≫ game window,
  * so the exits naturally fire only when collab paths have stalled.
  */
-export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
+export class CoinflipEscrowScript extends VtxoScript {
   readonly playerWinCovenantScriptHex: string
   readonly creatorWinCovenantScriptHex: string
   readonly playerForfeitScriptHex: string
@@ -464,46 +464,27 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
       playerPayoutPkScript, pot, otherStake,
     )
 
-    // Leaves. ArkadeVtxoScript appends the emulator-tweaked key after
-    // hashing each arkade script — we mirror that to compute findLeaf
-    // hexes.
+    // Each covenant leaf is an ordinary tapscript whose multisig pubkeys
+    // include the EMULATOR-TWEAKED key (pubkey + taggedHash("ArkScriptHash",
+    // arkadeScript)·G). The emulator holds the untweaked key and only derives
+    // the tweaked secret AFTER running the arkade script — so its signature on
+    // that slot is equivalent to "the covenant passed". (ts-sdk 0.4.32 removed
+    // the ArkadeVtxoScript/ArkadeLeaf abstraction; we now assemble the taptree
+    // from these raw tapscript bodies directly via VtxoScript. The arkade
+    // script bytes themselves travel at spend time in the EmulatorPacket.)
     const tweakedEmuKey = (script: Uint8Array) =>
       arkade.computeArkadeScriptPublicKey(emulatorPubkey, script)
 
-    const playerWinCovenantLeaf: arkade.ArkadeLeaf = {
-      arkadeScript: playerWinCovenantArkadeScript,
-      emulators: [emulatorPubkey],
-      tapscript: ConditionMultisigTapscript.encode({
-        conditionScript: playerWinsCondition,
-        pubkeys: [serverPubkey],
-      }),
-    }
     const playerWinCovenantScript = ConditionMultisigTapscript.encode({
       conditionScript: playerWinsCondition,
       pubkeys: [serverPubkey, tweakedEmuKey(playerWinCovenantArkadeScript)],
     }).script
 
-    const creatorWinCovenantLeaf: arkade.ArkadeLeaf = {
-      arkadeScript: creatorWinCovenantArkadeScript,
-      emulators: [emulatorPubkey],
-      tapscript: ConditionMultisigTapscript.encode({
-        conditionScript: houseWinsCondition,
-        pubkeys: [serverPubkey],
-      }),
-    }
     const creatorWinCovenantScript = ConditionMultisigTapscript.encode({
       conditionScript: houseWinsCondition,
       pubkeys: [serverPubkey, tweakedEmuKey(creatorWinCovenantArkadeScript)],
     }).script
 
-    const forfeitLeaf: arkade.ArkadeLeaf = {
-      arkadeScript: forfeitArkadeScript,
-      emulators: [emulatorPubkey],
-      tapscript: CLTVMultisigTapscript.encode({
-        absoluteTimelock: finalExpiration,
-        pubkeys: [playerPubkey, serverPubkey],
-      }),
-    }
     const forfeitLeafScript = CLTVMultisigTapscript.encode({
       absoluteTimelock: finalExpiration,
       pubkeys: [playerPubkey, serverPubkey, tweakedEmuKey(forfeitArkadeScript)],
@@ -527,45 +508,18 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
     // makes sense), so the leaf is a raw `CSVMultisig[funder]`. This
     // is also the FINAL fallback when arkd AND the emu are both
     // unavailable — every other leaf requires the emu.
-    const playerWinExitLeaf: arkade.ArkadeLeaf = {
-      arkadeScript: playerWinCovenantArkadeScript,
-      emulators: [emulatorPubkey],
-      tapscript: ConditionCSVMultisigTapscript.encode({
-        conditionScript: playerWinsCondition,
-        timelock: { value: exitDelay, type: 'seconds' },
-        pubkeys: [playerPubkey],
-      }),
-    }
     const playerWinExitScript = ConditionCSVMultisigTapscript.encode({
       conditionScript: playerWinsCondition,
       timelock: { value: exitDelay, type: 'seconds' },
       pubkeys: [playerPubkey, tweakedEmuKey(playerWinCovenantArkadeScript)],
     }).script
 
-    const creatorWinExitLeaf: arkade.ArkadeLeaf = {
-      arkadeScript: creatorWinCovenantArkadeScript,
-      emulators: [emulatorPubkey],
-      tapscript: ConditionCSVMultisigTapscript.encode({
-        conditionScript: houseWinsCondition,
-        timelock: { value: exitDelay, type: 'seconds' },
-        pubkeys: [creatorPubkey],
-      }),
-    }
     const creatorWinExitScript = ConditionCSVMultisigTapscript.encode({
       conditionScript: houseWinsCondition,
       timelock: { value: exitDelay, type: 'seconds' },
       pubkeys: [creatorPubkey, tweakedEmuKey(creatorWinCovenantArkadeScript)],
     }).script
 
-    const playerForfeitExitLeaf: arkade.ArkadeLeaf = {
-      arkadeScript: forfeitArkadeScript,
-      emulators: [emulatorPubkey],
-      tapscript: ConditionCSVMultisigTapscript.encode({
-        conditionScript: buildHashCheckScript(playerHash),
-        timelock: { value: exitDelay, type: 'seconds' },
-        pubkeys: [playerPubkey],
-      }),
-    }
     const playerForfeitExitScript = ConditionCSVMultisigTapscript.encode({
       conditionScript: buildHashCheckScript(playerHash),
       timelock: { value: exitDelay, type: 'seconds' },
@@ -577,14 +531,19 @@ export class CoinflipEscrowScript extends arkade.ArkadeVtxoScript {
       pubkeys: [refundPubkey],
     })
 
+    // Assemble the 8-leaf taptree from the raw tapscript bodies. The 6
+    // covenant leaves carry the emulator-tweaked key in their multisig; the
+    // two refund leaves (refund / refundExit) are plain (no covenant). Order
+    // is preserved by VtxoScript.encode()/findLeaf(), so the *ScriptHex
+    // lookups below resolve to these exact bodies.
     super([
-      playerWinCovenantLeaf,
-      creatorWinCovenantLeaf,
-      forfeitLeaf,
+      playerWinCovenantScript,
+      creatorWinCovenantScript,
+      forfeitLeafScript,
       refundTapscript.script,
-      playerWinExitLeaf,
-      creatorWinExitLeaf,
-      playerForfeitExitLeaf,
+      playerWinExitScript,
+      creatorWinExitScript,
+      playerForfeitExitScript,
       refundExitTapscript.script,
     ])
 

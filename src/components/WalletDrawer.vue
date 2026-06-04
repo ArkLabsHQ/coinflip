@@ -325,6 +325,11 @@ export default defineComponent({
       if (!isOpen) return
       if (arkStatus.value !== 'connected' && arkStatus.value !== 'connecting') {
         await reconnect()
+      } else if (arkStatus.value === 'connected') {
+        // Watcher-driven refreshes are light (balance only), so do one full
+        // refresh on open to bring the drawer's vtxo list / history / boarding
+        // UTXOs current.
+        store.dispatch('ark/refreshBalance').catch(() => { /* transient */ })
       }
     })
 

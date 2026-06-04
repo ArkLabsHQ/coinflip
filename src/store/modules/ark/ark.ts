@@ -299,13 +299,30 @@ const AUTO_CLAIM_INTERVAL_MS = 15_000
 // wallet's active contracts + the SDK's own 60s failsafe poll. Push-based
 // balance updates replace our manual refreshBalance polling.
 let incomingFundsStop: (() => void) | null = null
-let refreshDebounce: ReturnType<typeof setTimeout> | null = null
-// Coalesce watcher-driven refreshes: a single on-chain change emits several
-// events (e.g. vtxo_spent + vtxo_received in a sweep), so debounce into one
-// refreshBalance instead of one per event.
-function scheduleRefresh(dispatch: (type: string) => Promise<unknown>): void {
-  if (refreshDebounce) clearTimeout(refreshDebounce)
-  refreshDebounce = setTimeout(() => { refreshDebounce = null; dispatch('refreshBalance').catch(() => { /* transient */ }) }, 400)
+// Coalesce watcher-driven refreshes. A single settlement (e.g. a game's sweep)
+// emits several vtxo_spent / vtxo_received events spread over a few seconds; a
+// naive per-event refresh hammers the indexer. Leading edge fires immediately
+// (snappy first update), then we collapse the rest of the burst into one
+// trailing refresh after it goes quiet, capped at REFRESH_MAX_WAIT_MS so a long
+// burst still updates periodically. All of these are LIGHT refreshes (balance
+// only — see refreshBalance({ light })).
+const REFRESH_QUIET_MS = 1200
+const REFRESH_MAX_WAIT_MS = 2500
+let refreshTrailing: ReturnType<typeof setTimeout> | null = null
+let refreshMaxWait: ReturnType<typeof setTimeout> | null = null
+let refreshQuiet = true
+function scheduleRefresh(dispatch: (type: string, payload?: unknown) => Promise<unknown>): void {
+  const fireLight = () => { dispatch('refreshBalance', { light: true }).catch(() => { /* transient */ }) }
+  const flush = () => {
+    if (refreshTrailing) { clearTimeout(refreshTrailing); refreshTrailing = null }
+    if (refreshMaxWait) { clearTimeout(refreshMaxWait); refreshMaxWait = null }
+    refreshQuiet = true
+    fireLight()
+  }
+  if (refreshQuiet) { refreshQuiet = false; fireLight() } // leading edge — immediate
+  if (refreshTrailing) clearTimeout(refreshTrailing)
+  refreshTrailing = setTimeout(flush, REFRESH_QUIET_MS) // trailing once the burst goes quiet
+  if (!refreshMaxWait) refreshMaxWait = setTimeout(flush, REFRESH_MAX_WAIT_MS) // cap for long bursts
 }
 
 export function getSDKWallet(): Wallet | null {
@@ -639,7 +656,7 @@ const ark: Module<ArkState, RootState> = {
       await dispatch('checkConnection')
     },
 
-    async refreshBalance({ commit, state, dispatch }) {
+    async refreshBalance({ commit, state, dispatch }, payload?: { light?: boolean }) {
       if (!sdkWallet || state.status !== 'connected') return
 
       try {
@@ -653,10 +670,16 @@ const ark: Module<ArkState, RootState> = {
           settling = true
           const w = sdkWallet
           w.settle()
-            .then(() => dispatch('refreshBalance'))
+            .then(() => dispatch('refreshBalance', { light: true }))
             .catch((e) => console.warn('boarding settle failed:', e))
             .finally(() => { settling = false })
         }
+
+        // Hot-path (watcher-driven) refreshes are LIGHT: the balance is all the
+        // play UI needs. The heavier vtxo / boarding / history fetch below is for
+        // the wallet drawer + explicit actions, so skip it here — this is what
+        // keeps a settlement burst from hammering the indexer.
+        if (payload?.light) return
 
         // Also fetch VTXOs for detailed display
         const vtxos = await sdkWallet.getVtxos()
@@ -750,7 +773,7 @@ const ark: Module<ArkState, RootState> = {
      * Returns the commit result { winner, payout, houseSecret, playerSecret, proof }.
      */
     async playTrustlessGame(
-      { state, rootState, dispatch },
+      { state, rootState },
       { tier, side, oddsN, oddsTarget, oddsLo }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
     ) {
       if (!sdkWallet) throw new Error('Wallet not connected')
@@ -873,7 +896,8 @@ const ark: Module<ArkState, RootState> = {
       }
       await clearRefund(playRes.gameId)
 
-      await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
+      // No manual refresh — the contract watcher fires on the sweep's vtxo
+      // events and pushes a (coalesced, light) balance update.
       return result
     },
 
@@ -897,7 +921,7 @@ const ark: Module<ArkState, RootState> = {
      * that we surface a clear "not yet" message. Clears the stash on success.
      */
     async reclaimStalledBet(
-      { state, rootState, dispatch, commit },
+      { state, rootState, commit },
       payload: string | { gameId: string; mode?: ClaimMode },
     ) {
       const { gameId, mode = 'manual' } =
@@ -942,7 +966,7 @@ const ark: Module<ArkState, RootState> = {
           throw e
         }
         await clearRefund(gameId)
-        await dispatch('refreshBalance').catch(() => { /* deferred for indexer lag */ })
+        // Balance update is push-based via the contract watcher (refund vtxo event).
       } finally {
         commit('CLEAR_CLAIMING', gameId)
       }
@@ -957,7 +981,7 @@ const ark: Module<ArkState, RootState> = {
      * `chainTipTime >= forfeitClaimableAt`. Clears the stash on success.
      */
     async claimForfeit(
-      { state, rootState, dispatch, commit },
+      { state, rootState, commit },
       payload: string | { gameId: string; mode?: ClaimMode },
     ) {
       const { gameId, mode = 'manual' } =
@@ -1011,7 +1035,7 @@ const ark: Module<ArkState, RootState> = {
         }
 
         await clearRefund(gameId)
-        await dispatch('refreshBalance').catch(() => { /* indexer lag */ })
+        // Balance update is push-based via the contract watcher (claim vtxo event).
       } finally {
         commit('CLEAR_CLAIMING', gameId)
       }

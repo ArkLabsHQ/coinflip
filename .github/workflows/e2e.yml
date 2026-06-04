@@ -151,6 +151,12 @@ jobs:
           # denigiri stack serves Esplora REST under the mempool /api prefix;
           # the bare :3000 root is the mempool web UI (HTML).
           ESPLORA_URL: http://localhost:3000/api
+          # The arkade-regtest stack starts the emulator by default at :7073
+          # (confirmed in the start logs). The trustless /play + escrow paths
+          # REQUIRE it — tell the in-process test server where it is, or
+          # handleTrustlessPlay throws "Emulator not configured".
+          EMULATOR_URL: http://localhost:7073
+          EMULATOR_PUBLIC_URL: http://localhost:7073
         run: npx jest --runInBand --forceExit --testTimeout=300000 --ci
 
       - name: Capture logs on failure

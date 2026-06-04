@@ -11,7 +11,12 @@
  *      math it already knows how to do. (commit 60ca445)
  *
  *   2. "No inputs found" (the SDK's empty-eligible-set signal) is a graceful
- *      no-op → returns false, NOT a thrown failure. Any other error rethrows
+ *      no-op → returns false, NOT a thrown failure.
+ *
+ *   3. The phantom-boarding failure (a cached boarding UTXO arkd can't resolve →
+ *      TX_NOT_FOUND / "failed to (get|validate) boarding input") is also a
+ *      graceful skip → returns false, with an actionable RESYNC_WALLET_ON_BOOT
+ *      log, instead of a stack trace every tick. Any OTHER error still rethrows
  *      so the renewal worker logs a real problem.
  *
  * Imports the BUILT server (dist) directly, like the sibling unit tests.
@@ -68,8 +73,22 @@ describe('renewSettle (renewal settle path)', () => {
     await expect(renewSettle(deps)).rejects.toThrow('proof does not contain outputs')
   })
 
-  it('rethrows TX_NOT_FOUND (the stale-wallet phantom-boarding failure)', async () => {
+  it('treats the phantom-boarding failure as a graceful skip (returns false, no rethrow)', async () => {
+    // A boarding UTXO whose funding tx arkd can't resolve poisons every settle.
+    // It looks confirmed locally so it can't be filtered; renewSettle skips the
+    // tick (with an actionable RESYNC_WALLET_ON_BOOT log) instead of throwing a
+    // stack trace each interval.
     const deps = depsWithSettle(async () => { throw new Error('TX_NOT_FOUND (19): failed to get boarding input tx') })
+    await expect(renewSettle(deps)).resolves.toBe(false)
+  })
+
+  it('also skips the "failed to validate boarding input" variant', async () => {
+    const deps = depsWithSettle(async () => { throw new Error('INVALID_PSBT_INPUT (5): failed to validate boarding input: failed to get tx abc') })
+    await expect(renewSettle(deps)).resolves.toBe(false)
+  })
+
+  it('still rethrows a non-boarding TX_NOT_FOUND (the phantom-boarding match stays narrow)', async () => {
+    const deps = depsWithSettle(async () => { throw new Error('TX_NOT_FOUND (19): some other tx') })
     await expect(renewSettle(deps)).rejects.toThrow('TX_NOT_FOUND')
   })
 })

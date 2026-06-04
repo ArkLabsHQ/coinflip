@@ -55,6 +55,12 @@ export default defineComponent({
     tier: { type: Number as PropType<number | null>, default: null },
     /** Per-leg house-edge bps — for cashout sats math (mirror server's edge). */
     oddsEdgeBps: { type: Number, default: 300 },
+    /**
+     * House dust threshold (sats). Cash-out is disabled below the multiplier
+     * whose house stake clears this floor, so a committed bet can never be
+     * sub-dust (which the server / on-chain escrow would reject).
+     */
+    dust: { type: Number, default: 546 },
   },
   emits: {
     launch: () => true,
@@ -87,7 +93,17 @@ export default defineComponent({
       Math.min(ROCKET_ODDS_N - 1, Math.max(1, Math.floor(ROCKET_ODDS_N / Math.min(rawMult.value, ROCKET_ODDS_N)))),
     )
     const displayMult = computed(() => ROCKET_ODDS_N / liveWin.value)
-    const minMult = computed(() => 1.01)
+    // Lowest multiplier the player may cash out at. The house stake at a
+    // multiplier M is exactly floor(tier·(M−1)·(1−edge)); since dust is an
+    // integer, floor(x) ≥ dust ⟺ x ≥ dust, so this threshold is the EXACT
+    // dust-safe floor (not an approximation). Below it the CASH OUT button stays
+    // disabled, so a manual cash-out can never commit a sub-dust house side.
+    const minMult = computed(() => {
+      const tier = props.tier
+      if (!tier) return 1.01
+      const dustSafe = 1 + props.dust / (tier * (1 - props.oddsEdgeBps / 10000))
+      return Math.max(1.01, dustSafe)
+    })
     const canCashOut = computed(() => props.state.phase === 'climbing' && displayMult.value >= minMult.value)
     const canLaunch = computed(() => targetBet.value !== null && (props.state.phase === 'idle' || props.state.phase === 'resolved'))
 

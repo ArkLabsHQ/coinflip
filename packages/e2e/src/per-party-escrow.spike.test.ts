@@ -75,6 +75,20 @@ async function waitFor(w: Wallet, kind: 'boarding' | 'settled', min: number, tim
   throw new Error(`Timeout waiting for ${kind} >= ${min}`)
 }
 
+// settle() can throw a transient "No inputs found" when arkd hasn't yet indexed
+// the just-fauceted boarding UTXO — waitFor's balance probe sees it before the
+// settle's input gathering does. Retry ONLY that signal (rethrow anything else
+// immediately so real failures aren't masked). Mirrors the sibling e2e tests.
+async function settleWithRetry(w: Wallet, tries = 3): Promise<void> {
+  for (let i = 0; i < tries; i++) {
+    try { await w.settle(); return } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (!msg.includes('No inputs found') || i === tries - 1) throw e
+      await sleep(5000)
+    }
+  }
+}
+
 function vtxoToInput(v: ExtendedVirtualCoin): VtxoInput {
   const fullScript = VtxoScript.decode(v.tapTree)
   const tapscripts = fullScript.scripts.map((s) => hex.encode(s))
@@ -157,7 +171,7 @@ describe('spike: per-party escrow + winner sweep', () => {
     await faucet(await houseW.getBoardingAddress(), FUND_BTC)
     await faucet(await playerW.getBoardingAddress(), FUND_BTC)
     await waitFor(houseW, 'boarding', BET); await waitFor(playerW, 'boarding', BET)
-    await houseW.settle(); await playerW.settle()
+    await settleWithRetry(houseW); await settleWithRetry(playerW)
     await waitFor(houseW, 'settled', BET); await waitFor(playerW, 'settled', BET)
 
     const housePub = await houseId.xOnlyPublicKey()
@@ -211,7 +225,7 @@ describe('spike: per-party escrow + winner sweep', () => {
     const playerW = await makeWallet(playerId)
     await faucet(await playerW.getBoardingAddress(), FUND_BTC)
     await waitFor(playerW, 'boarding', BET)
-    await playerW.settle()
+    await settleWithRetry(playerW)
     await waitFor(playerW, 'settled', BET)
 
     const housePub = await houseId.xOnlyPublicKey()

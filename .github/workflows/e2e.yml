@@ -36,6 +36,14 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install & build contract-workflows-prototype
+        working-directory: packages/contract-workflows-prototype
+        # lib depends on this package via file: (symlinked) and consumes its
+        # types from dist/, which is gitignored — so a clean checkout has no
+        # dist. tsc/build of lib resolves the symlink target, so cwp must be
+        # built first or `tsc --noEmit` fails with "Cannot find module".
+        run: npm install --include=dev && npm run build
+
       - name: Install lib dependencies
         working-directory: packages/lib
         run: npm install --include=dev
@@ -107,6 +115,14 @@ jobs:
           curl -s http://localhost:7070/v1/info | head -50 || true
           echo "=== docker ps ==="
           docker ps --format "table {{.Names}}\t{{.Status}}" || true
+
+      - name: Install & build contract-workflows-prototype
+        working-directory: packages/contract-workflows-prototype
+        # lib depends on this package via file: (symlinked) and consumes its
+        # types from dist/, which is gitignored — so a clean checkout has no
+        # dist. tsc/build of lib resolves the symlink target, so cwp must be
+        # built first or `tsc --noEmit` fails with "Cannot find module".
+        run: npm install --include=dev && npm run build
 
       - name: Install lib dependencies
         working-directory: packages/lib

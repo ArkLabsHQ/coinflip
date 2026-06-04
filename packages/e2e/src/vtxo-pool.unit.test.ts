@@ -118,6 +118,37 @@ describe('rebuildReservations', () => {
       reservations.release('tl-1'); reservations.release('lg-1')
     }
   })
+
+  it('reserves the escrowed HOUSE STAKE for variable-odds games, not the player tier', async () => {
+    // Variable-odds: the house escrows a multiple of the player tier. The
+    // escrowed amount lives in houseEscrow.value (6000), well above tier (1000).
+    // rebuildReservations must restore 6000 of liability, or concurrent
+    // post-restart plays would under-count and over-commit the house.
+    const rows = [
+      { id: 'tl-var', tier: 1000, house_vtxos_json: JSON.stringify({ finalExpiration: 1, setupExpiration: 1, houseEscrow: { txid: 'bb', vout: 0, value: 6000 } }) },
+    ]
+    const before = reservations.totalLiability()
+    const restored = await rebuildReservations(fakeDeps(rows))
+    try {
+      expect(restored).toBe(1)
+      expect(reservations.totalLiability() - before).toBe(6000) // houseStake, not tier
+    } finally {
+      reservations.release('tl-var')
+    }
+  })
+
+  it('falls back to tier when an older row has no houseEscrow.value', async () => {
+    const rows = [
+      { id: 'tl-old', tier: 1500, house_vtxos_json: JSON.stringify({ finalExpiration: 1, setupExpiration: 1, houseEscrow: { txid: 'cc', vout: 0 } }) },
+    ]
+    const before = reservations.totalLiability()
+    await rebuildReservations(fakeDeps(rows))
+    try {
+      expect(reservations.totalLiability() - before).toBe(1500) // fallback = tier
+    } finally {
+      reservations.release('tl-old')
+    }
+  })
 })
 
 describe('pickEscrowVtxo (dust-safe house VTXO selection)', () => {

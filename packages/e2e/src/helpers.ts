@@ -80,6 +80,28 @@ export async function mineBlock(count = 1): Promise<void> {
 }
 
 /**
+ * Fast-forward the regtest chain's block time so an absolute (time-based) CLTV
+ * timelock matures without a real wall-clock wait. Sets bitcoind's mocktime to
+ * `toUnixSeconds`, then mines `blocks` (>= 12) so the median-time-past (median of
+ * the last 11 block timestamps) — the value consensus uses to evaluate CLTV —
+ * advances past the target.
+ *
+ * Shells `docker exec bitcoin bitcoin-cli` directly (the same container + RPC
+ * creds the orchestrator's chain helpers use) rather than the regtest.mjs CLI,
+ * because the orchestrator is a pinned submodule we don't extend. Override the
+ * container name with REGTEST_BTC_CONTAINER if the stack renames it.
+ *
+ * NOTE: mocktime freezes the node clock; after using this, restart the regtest
+ * stack before relying on real-time behaviour again.
+ */
+export async function setChainTime(toUnixSeconds: number, blocks = 12): Promise<void> {
+  const container = process.env.REGTEST_BTC_CONTAINER || 'bitcoin'
+  const cli = `docker exec ${container} bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123`
+  execSync(`${cli} setmocktime ${Math.floor(toUnixSeconds)}`, { stdio: ['ignore', 'pipe', 'pipe'] })
+  await mineBlock(blocks)
+}
+
+/**
  * Fund a (boarding) address with `amountBtc` and confirm it in a block.
  * Shared by every live e2e test — replaces the per-file `fetch(ESPLORA/faucet)`
  * copies that targeted the old nigiri HTTP faucet (gone on the denigiri stack).

@@ -419,9 +419,18 @@ export async function rebuildReservations(deps: AppDeps): Promise<number> {
       // in-flight liability MUST be restored, or concurrent post-restart plays
       // would over-commit the house (the bug: this branch used to be skipped
       // because TrustlessState is an object, not an array). Mirror
-      // handleTrustlessPlay's reservation: liability = the escrowed stake (tier),
-      // no outpoints.
-      reservations.reserve(g.id, [], g.tier)
+      // handleTrustlessPlay's reservation, which reserves the HOUSE STAKE — for
+      // variable-odds games that's a multiple of `tier`, so reserving `tier`
+      // here would under-restore liability and let the house over-commit. The
+      // escrowed house stake is exactly `houseEscrow.value` (the amount the
+      // house sent into the escrow), so read it back; fall back to `tier` only
+      // if an older row predates the value field.
+      const houseEscrow = (parsed as { houseEscrow?: { value?: number } }).houseEscrow
+      const liability =
+        houseEscrow && typeof houseEscrow.value === 'number' && houseEscrow.value > 0
+          ? houseEscrow.value
+          : g.tier
+      reservations.reserve(g.id, [], liability)
       restored++
     }
   }

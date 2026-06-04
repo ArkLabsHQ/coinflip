@@ -689,12 +689,47 @@ export function determineWinner(
 }
 
 /**
+ * Cryptographically-uniform integer in `[0, n)`. Uses `crypto.randomBytes`
+ * (CSPRNG) with rejection sampling to avoid modulo bias.
+ *
+ * This matters for game-outcome selection: `Math.random()` is a non-crypto PRNG
+ * whose internal state can be recovered from a sequence of observed outputs. The
+ * house's chosen coin side / odds digit is revealed at settlement, so a stream of
+ * `Math.random()`-derived choices would leak the PRNG state and let a player
+ * predict (and match) the next house pick. A CSPRNG closes that channel.
+ */
+export function randomUniformInt(n: number): number {
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`randomUniformInt: n must be a positive integer (got ${n})`)
+  }
+  if (n === 1) return 0
+  const bytes = Math.ceil(Math.log2(n) / 8) || 1
+  const max = 256 ** bytes
+  const limit = max - (max % n) // largest multiple of n that fits in `bytes` bytes
+  // Rejection-sample: discard draws in the non-uniform tail [limit, max).
+  for (;;) {
+    const buf = randomBytes(bytes)
+    let x = 0
+    for (const b of buf) x = x * 256 + b
+    if (x < limit) return x % n
+  }
+}
+
+/**
  * Generate a random secret for choosing heads or tails.
  * Heads = 15 bytes, Tails = 16 bytes.
  */
 export function generateSecret(choice: 'heads' | 'tails'): Uint8Array {
   const length = choice === 'heads' ? 15 : 16
   return randomBytes(length)
+}
+
+/**
+ * Pick a coin side uniformly with a CSPRNG (not `Math.random`) and return the
+ * corresponding secret. Used by the house when minting a 50/50 game.
+ */
+export function generateRandomCoinSecret(): Uint8Array {
+  return generateSecret(randomUniformInt(2) === 0 ? 'heads' : 'tails')
 }
 
 /**
@@ -741,7 +776,7 @@ export function computeVariableRoll(
  * byte length (`base + digit`). Choosing uniformly makes the summed roll uniform.
  */
 export function generateVariableSecret(n: number): Uint8Array {
-  const digit = Math.floor(Math.random() * n)
+  const digit = randomUniformInt(n)
   return randomBytes(VARIABLE_ODDS_BASE_LEN + digit)
 }
 

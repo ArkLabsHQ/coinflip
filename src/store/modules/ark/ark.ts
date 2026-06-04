@@ -45,6 +45,28 @@ function vtxoToPlayerInput(v: ExtendedVirtualCoin): VtxoInput {
 }
 
 /**
+ * Cryptographically-uniform integer in `[0, n)` via `crypto.getRandomValues`
+ * (CSPRNG) with rejection sampling. The variable-odds digit the player picks is
+ * encoded into its revealed secret length, so a `Math.random()`-derived digit
+ * would leak the non-crypto PRNG's state across games and let an observer
+ * predict the next pick. Mirrors the lib's server-side `randomUniformInt`.
+ */
+function uniformRandomInt(n: number): number {
+  if (!Number.isInteger(n) || n < 1) throw new Error(`uniformRandomInt: n must be a positive integer (got ${n})`)
+  if (n === 1) return 0
+  const bytes = Math.ceil(Math.log2(n) / 8) || 1
+  const max = 256 ** bytes
+  const limit = max - (max % n)
+  const buf = new Uint8Array(bytes)
+  for (;;) {
+    crypto.getRandomValues(buf)
+    let x = 0
+    for (const b of buf) x = x * 256 + b
+    if (x < limit) return x % n
+  }
+}
+
+/**
  * Stalled-bet refunds. When the player escrows a stake we immediately fetch the
  * server-built refund tx and persist it locally — BEFORE revealing/committing.
  * If the server then stalls (or the tab closes mid-game), the player still holds
@@ -722,7 +744,7 @@ const ark: Module<ArkState, RootState> = {
       let secretBytes: Uint8Array
       if (isVariable) {
         const VARIABLE_ODDS_BASE_LEN = 16 // must match arkade-coinflip's constant
-        secretBytes = new Uint8Array(VARIABLE_ODDS_BASE_LEN + Math.floor(Math.random() * (oddsN as number)))
+        secretBytes = new Uint8Array(VARIABLE_ODDS_BASE_LEN + uniformRandomInt(oddsN as number))
       } else {
         secretBytes = new Uint8Array(side === 'tails' ? 16 : 15)
       }
@@ -737,11 +759,22 @@ const ark: Module<ArkState, RootState> = {
 
       // 2. Escrow the player's stake into the shared escrow address (single-party).
       const escrowPk = ArkAddress.decode(playRes.escrowAddress).pkScript
-      const pv = (await sdkWallet.getVtxos())
-        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
+      const dust = state.info?.dust ? parseInt(state.info.dust) : 546
+      const candidates = (await sdkWallet.getVtxos())
+        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent' && v.value >= tier)
         .sort((a, b) => Number(b.value - a.value))
-        .find((v) => v.value >= tier)
-      if (!pv) throw new Error(`No spendable VTXO covering ${tier} sats`)
+      if (candidates.length === 0) throw new Error(`No spendable VTXO covering ${tier} sats`)
+      // Avoid minting a sub-dust change VTXO (unspendable): the escrow tx must
+      // leave either exact change or >= dust. Mirrors the server's
+      // pickEscrowVtxo. If every candidate would leave dust, refuse rather than
+      // burn the change — the player consolidates (settles) and retries.
+      const pv = candidates.find((v) => { const c = v.value - tier; return c === 0 || c >= dust })
+      if (!pv) {
+        throw new Error(
+          `No dust-safe VTXO for ${tier} sats — every candidate would leave sub-dust change (< ${dust}). ` +
+          `Consolidate your balance (settle) and try again.`,
+        )
+      }
       const change = pv.value - tier
       const outputs: { script: Uint8Array; amount: bigint }[] = [{ script: escrowPk, amount: BigInt(tier) }]
       if (change > 0) outputs.push({ script: ArkAddress.decode(playerChangeAddress).pkScript, amount: BigInt(change) })

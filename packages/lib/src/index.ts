@@ -69,6 +69,8 @@ export {
   type RefundArgs,
   determineWinner,
   generateSecret,
+  generateRandomCoinSecret,
+  randomUniformInt,
   determineVariableWinner,
   generateVariableSecret,
   computeVariableRoll,

@@ -15,7 +15,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { createHash } from 'crypto'
 import { base64, hex } from '@scure/base'
 import {
-  generateSecret,
+  generateRandomCoinSecret,
   determineWinner,
   generateVariableSecret,
   determineVariableWinner,
@@ -42,8 +42,9 @@ import {
   RestIndexerProvider,
   type ArkTxInput,
   type ExtendedVirtualCoin,
+  type IndexerProvider,
 } from '@arkade-os/sdk'
-import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
+import { hashSecret, networkHrpFromArkInfo, ARK_SERVER_URL } from './house-wallet.js'
 import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, BetExceedsCapacityError, KeyedMutex, outpointKey, pickEscrowVtxo, houseVtxoCache } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import { loadEmulatorConfig } from './emulator.js'
@@ -361,7 +362,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
 
   const houseSecret = isVariable
     ? generateVariableSecret(req.oddsN as number)
-    : generateSecret(Math.random() < 0.5 ? 'heads' : 'tails')
+    : generateRandomCoinSecret()
   const houseHash = hashSecret(houseSecret)
   const housePubkey = Buffer.from(await deps.identity.compressedPublicKey()).toString('hex')
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
@@ -913,20 +914,68 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
 }
 
 /**
- * Reconcile games stuck `pending` because the server crashed AFTER submitting a
- * house-win sweep but BEFORE persisting the result. A player win is persisted
- * `resolved` BEFORE the client ever spends the escrow, so a `pending` game whose
- * HOUSE escrow is already spent on-Ark can ONLY be a crashed house-win sweep —
- * we mark it resolved (winner = house, pot to the house). Detection is a direct
- * indexer lookup of the escrow outpoint's `isSpent`; no hot-path write-ahead
- * needed. Returns the number reconciled.
+ * Decide whether the tx that spent the house escrow paid the pot to the PLAYER
+ * (an R1 forfeit) rather than to the house (a crashed house-win covenant sweep).
+ * BOTH paths atomically spend both escrows; they differ only in the payout
+ * destination, so the only reliable signal is the output script of the resulting
+ * Arkade transaction.
+ *
+ * Decodes the arkTx that spent the escrow (`arkTxId`, the final virtual tx — the
+ * checkpoint output it goes through is a connector, not the payout) and matches
+ * any output against the player's persisted payout script. Returns false on ANY
+ * uncertainty (missing arkTxId, fetch/decode failure, no match) so the caller
+ * keeps the safe house-win default and a transient hiccup never mislabels a real
+ * house win as a player win.
  */
-export async function reconcilePendingSweeps(deps: AppDeps): Promise<number> {
+async function sweepPaidPlayer(
+  indexer: IndexerProvider,
+  houseEscrowVtxo: { arkTxId?: string; spentBy?: string },
+  state: TrustlessState,
+): Promise<boolean> {
+  const playerScriptHex = state.arkadeForfeit?.playerPayoutPkScriptHex
+  // The payout output lives in the arkTx, not the intermediate checkpoint, so
+  // decoding `spentBy` (the checkpoint) would never see the player script.
+  const txid = houseEscrowVtxo.arkTxId
+  if (!playerScriptHex || !txid) return false
+  try {
+    const { txs } = await indexer.getVirtualTxs([txid])
+    if (!txs?.length) return false
+    const tx = Transaction.fromPSBT(base64.decode(txs[0]))
+    for (let i = 0; i < tx.outputsLength; i++) {
+      const out = tx.getOutput(i)
+      if (out?.script && hex.encode(out.script) === playerScriptHex) return true
+    }
+    return false
+  } catch (err) {
+    console.warn(`[reconcile] could not decode sweep tx ${txid}:`, err instanceof Error ? err.message : err)
+    return false
+  }
+}
+
+/**
+ * Reconcile games stuck `pending` because the server crashed AFTER a covenant
+ * sweep was submitted but BEFORE the result was persisted. A `pending` trustless
+ * game whose HOUSE escrow is already spent on-Ark was resolved by one of two
+ * atomic sweeps:
+ *   - the crashed HOUSE-WIN sweep (pot → house), or
+ *   - the player's R1 FORFEIT (pot → player) after the server stalled past
+ *     `forfeitClaimableAt`.
+ * Both spend the house escrow, so we decode the spending arkTx and check who the
+ * pot was paid to (`sweepPaidPlayer`) — labelling the winner accordingly instead
+ * of always assuming house. Detection is a direct indexer lookup of the escrow
+ * outpoint's `isSpent`; no hot-path write-ahead needed. The optional
+ * `indexerOverride` is for tests; production builds its own. Returns the count
+ * reconciled.
+ */
+export async function reconcilePendingSweeps(
+  deps: AppDeps,
+  indexerOverride?: IndexerProvider,
+): Promise<number> {
   const pending = await deps.repos.games.list({ status: 'pending', limit: 500 })
   const trustless = pending.filter((g) => g.player_choice === 'trustless' && g.house_vtxos_json)
   if (trustless.length === 0) return 0
 
-  const indexer = new RestIndexerProvider(process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh')
+  const indexer = indexerOverride ?? new RestIndexerProvider(ARK_SERVER_URL)
   let reconciled = 0
   for (const game of trustless) {
     let state: TrustlessState
@@ -942,16 +991,21 @@ export async function reconcilePendingSweeps(deps: AppDeps): Promise<number> {
       if (!v || !v.isSpent) continue // not swept → still genuinely pending
 
       const pot = state.houseEscrow.value + game.tier // house stake + player stake
+      const winner: 'house' | 'player' = (await sweepPaidPlayer(indexer, v, state)) ? 'player' : 'house'
       await deps.repos.games.update(game.id, {
-        winner: 'house',
+        winner,
         rakeAmount: 0,
         payoutAmount: pot,
         status: 'resolved',
-        houseVtxosJson: JSON.stringify({ ...state, resolveTxid: v.spentBy ?? state.resolveTxid } as TrustlessState),
+        houseVtxosJson: JSON.stringify({ ...state, resolveTxid: v.arkTxId ?? v.spentBy ?? state.resolveTxid } as TrustlessState),
       })
       reservations.release(game.id)
       reconciled++
-      console.log(`[reconcile] crash-mid-sweep house win ${game.id} resolved (escrow spent by ${v.spentBy ?? 'unknown'})`)
+      console.log(
+        winner === 'player'
+          ? `[reconcile] R1 forfeit player win ${game.id} resolved (player swept the pot, tx ${v.arkTxId})`
+          : `[reconcile] crash-mid-sweep house win ${game.id} resolved (escrow spent by ${v.spentBy ?? 'unknown'})`,
+      )
     } catch (err) {
       console.warn(`[reconcile] spent-check failed for game ${game.id}:`, err instanceof Error ? err.message : err)
     }

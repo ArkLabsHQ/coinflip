@@ -272,27 +272,49 @@ describe('CoinflipFinalScript', () => {
 })
 
 describe('CoinflipEscrowScript', () => {
-  const creatorPubkey = new Uint8Array(32).fill(1)
-  const playerPubkey = new Uint8Array(32).fill(2)
-  const serverPubkey = new Uint8Array(32).fill(3)
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { schnorr } = require('@noble/curves/secp256k1.js')
+  // Real x-only keys: the arkade-script covenant tweaks the emulator key
+  // (computeArkadeScriptPublicKey), so it must be a valid curve point.
+  const key = (seed: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(seed))
+  const creatorPubkey = key(0x10)
+  const playerPubkey = key(0x20)
+  const serverPubkey = key(0x30)
+  const emulatorPubkey = key(0x40)
   const creatorHash = new Uint8Array(32).fill(0xaa)
   const playerHash = new Uint8Array(32).fill(0xbb)
-  const base = { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration: 2000n, penaltyTimelockSeconds: 1024n }
+  const playerPayoutPkScript = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x77)])
+  const housePayoutPkScript = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x88)])
+  const base = {
+    creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash,
+    finalExpiration: 2000n,
+    exitDelay: 86_528n, // multiple of 512, ≥ 512 (BIP68 seconds)
+    arkadeForfeit: {
+      emulatorPubkey, playerPayoutPkScript, housePayoutPkScript,
+      playerStake: 50_000n, houseStake: 30_000n,
+    },
+  }
 
   const playerEscrow = new CoinflipEscrowScript({ ...base, refundPubkey: playerPubkey })
   const houseEscrow = new CoinflipEscrowScript({ ...base, refundPubkey: creatorPubkey })
 
-  it('has 4 leaves (creatorWin / playerWin / refund / playerPenalty)', () => {
-    expect(playerEscrow.leaves.length).toBe(4)
-    expect(playerEscrow.creatorWin()).toBeTruthy()
-    expect(playerEscrow.playerWin()).toBeTruthy()
+  it('has 8 leaves: 4 collab covenants + 4 unilateral exit mirrors', () => {
+    expect(playerEscrow.leaves.length).toBe(8)
+    expect(playerEscrow.playerWinCovenant()).toBeTruthy()
+    expect(playerEscrow.creatorWinCovenant()).toBeTruthy()
+    expect(playerEscrow.playerForfeit()).toBeTruthy()
     expect(playerEscrow.refund()).toBeTruthy()
-    expect(playerEscrow.playerPenalty()).toBeTruthy()
+    expect(playerEscrow.playerForfeitExit()).toBeTruthy()
   })
 
-  it('shares identical win leaves so the winner sweeps both escrows via one leaf', () => {
-    expect(playerEscrow.creatorWinScriptHex).toBe(houseEscrow.creatorWinScriptHex)
-    expect(playerEscrow.playerWinScriptHex).toBe(houseEscrow.playerWinScriptHex)
+  it('player and creator win covenants are distinct covenant-gated leaves (no winner signature)', () => {
+    // Each win path is ConditionMultisig[server, emulator_tweaked]; the emulator
+    // key is tweaked by that leaf's arkade script, so the two win covenants
+    // differ. The server settles either via its covenant — the client signs
+    // nothing on a win.
+    expect(playerEscrow.playerWinCovenantScriptHex).not.toBe(playerEscrow.creatorWinCovenantScriptHex)
+    expect(playerEscrow.playerWinCovenantArkadeScript).toBeDefined()
+    expect(playerEscrow.creatorWinCovenantArkadeScript).toBeDefined()
   })
 
   it('owner-scopes the refund leaf — player vs house escrow addresses differ (no cross-theft)', () => {

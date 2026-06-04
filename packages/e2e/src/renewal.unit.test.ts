@@ -27,3 +27,5 @@ describe('shouldRenew (renewal gating)', () => {
     expect(shouldRenew(3, 20000)).toBe(true)
   })
 })
+
+export {}

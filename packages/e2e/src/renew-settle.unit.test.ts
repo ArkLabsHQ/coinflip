@@ -73,3 +73,5 @@ describe('renewSettle (renewal settle path)', () => {
     await expect(renewSettle(deps)).rejects.toThrow('TX_NOT_FOUND')
   })
 })
+
+export {}

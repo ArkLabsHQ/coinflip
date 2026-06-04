@@ -185,3 +185,5 @@ describe('CoinflipEscrowScript: 8 leaves — collab + unilateral mirrors', () =>
     )
   })
 })
+
+export {}

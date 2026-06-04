@@ -65,3 +65,5 @@ describe('makeSettlementHandler (batch/round event handler)', () => {
     expect(b.observation.phases).toHaveLength(0)
   })
 })
+
+export {}

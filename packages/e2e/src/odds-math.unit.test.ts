@@ -37,3 +37,5 @@ describe('computeHouseStake (variable-odds house stake with edge)', () => {
     expect(computeHouseStake(5000, 6, 1, 0, 300)).toBe(5 * computeHouseStake(1000, 6, 1, 0, 300))
   })
 })
+
+export {}

@@ -42,3 +42,5 @@ describe('classifySendAmount (admin Send field)', () => {
     expect(classifySendAmount('50000000').btc).toBe('0.5')
   })
 })
+
+export {}

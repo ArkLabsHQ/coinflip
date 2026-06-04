@@ -176,3 +176,5 @@ describe('arkade-forfeit: witness encoders', () => {
     expect(Array.from(w)).toEqual([0x01, 0x01, 0x01])
   })
 })
+
+export {}

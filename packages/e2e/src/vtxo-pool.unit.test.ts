@@ -177,3 +177,5 @@ describe('pickEscrowVtxo (dust-safe house VTXO selection)', () => {
     expect(pickEscrowVtxo([], 1000, DUST)).toBeUndefined()
   })
 })
+
+export {}

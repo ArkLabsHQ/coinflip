@@ -25,6 +25,7 @@
           <span class="pnl-amount mono">{{ formattedPnl }}</span>
         </div>
         <button class="history-btn" title="Game history" @click="openHistory">&#9827;</button>
+        <router-link to="/how-it-works" class="history-btn help-btn" title="How it works">?</router-link>
       </div>
     </div>
 

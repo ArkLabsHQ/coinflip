@@ -1,332 +1,568 @@
 <template>
-  <div class="how-it-works">
-    <div class="content">
-      <section>
-        <h2>Trustless coinflip</h2>
+  <div class="how page">
+    <div class="hiw-wrap">
+      <router-link to="/" class="back-link">&laquo; back to play</router-link>
 
-        <p>
-          Coinflip is a game of chance with two players. The first player (A) chooses "Heads" or "Tails" and the second player (B) tries to guess the coin's side.
-          If the second player guesses the coin's side correctly, he wins and the first player loses. Otherwise, the first player wins and the second player loses.
-          <br>
-          <br>
-          The game is built on Bitcoin's Taproot and multisignature capabilities. The emulation of coinflip is made with secret generation of predetermined sizes. 
-          Both players generate a secret of 15 or 16 bytes. 15 is "Heads" and 16 is "Tails". This method is inspired by <a href="https://arxiv.org/pdf/1612.05390v3">https://arxiv.org/pdf/1612.05390v3</a>.
+      <header class="hiw-header">
+        <h1>How It Works</h1>
+        <p class="lede">
+          A <strong class="text-gold">trustless</strong> coinflip: the fairness and the payout are
+          enforced by <strong>Bitcoin script</strong> and an <strong>Arkade&nbsp;Script</strong>
+          covenant — not by trusting the operator. Everything below is taken directly from this
+          repo's code; expand any spend path to see its exact opcodes, step by step.
+        </p>
+      </header>
+
+      <!-- 30-second version -->
+      <section class="tldr casino-card">
+        <h2 class="tldr-title">The 30-second version</h2>
+        <ol class="tldr-steps">
+          <li>Both sides <strong>commit</strong> to a hidden secret (only its hash is shared).</li>
+          <li>Each side <strong>escrows</strong> its own stake into a shared contract.</li>
+          <li>You <strong>reveal</strong> your secret. The two secrets together decide the winner.</li>
+          <li>An <strong>Arkade&nbsp;Script covenant</strong> pays the full pot to the winner — the
+            winner never signs, and the loser has no spend path.</li>
+          <li>If the operator goes silent, the contract still lets you <strong>reclaim or sweep</strong>
+            on your own.</li>
+        </ol>
+      </section>
+
+      <!-- The layers -->
+      <section class="hiw-section">
+        <h2>The building blocks</h2>
+        <div class="layer-grid">
+          <article class="layer-card">
+            <div class="layer-badge arkade">ARKADE</div>
+            <h3>Arkade — the execution layer</h3>
+            <p>
+              Arkade is a <strong>programmable Bitcoin execution layer</strong>. Coins are held as
+              <strong>VTXOs</strong> (Virtual Transaction Outputs) — self-custodial, off-chain
+              Bitcoin coins that move <strong>instantly at near-zero fees</strong>, with no changes
+              to Bitcoin required. The coinflip stakes are VTXOs.
+            </p>
+            <p>
+              Two of its properties make this game possible: a VTXO can be locked by <strong>any
+              valid Tapscript</strong> (so the escrow's spend paths below are enforceable), and you
+              keep <strong>unilateral exit</strong> — funds are always withdrawable on-chain without
+              the operator's cooperation. More at
+              <a href="https://docs.arkadeos.com" target="_blank" rel="noopener">docs.arkadeos.com</a>.
+            </p>
+          </article>
+
+          <article class="layer-card">
+            <div class="layer-badge script">ARKADE&nbsp;SCRIPT</div>
+            <h3>Arkade Script — the covenant</h3>
+            <p>
+              Plain Bitcoin script can't say <em>"this may only be spent to address X for exactly
+              amount Y."</em> That rule — a <strong>covenant</strong> — is what makes the trustless
+              payout possible.
+            </p>
+            <p>
+              In the code it works through an <strong>emulator</strong> co-signer. A covenant leaf is
+              an ordinary multisig whose emulator pubkey is <em>tweaked</em> by
+              <span class="mono">pubkey + tagged_hash("ArkScriptHash", arkadeScript)·G</span>. The
+              emulator produces that tweaked signature <strong>only after running the arkade
+              script</strong> — so a signature on the <span class="mono">&lt;emu✦&gt;</span> slot
+              <em>is</em> the proof the covenant held. The script bytes travel at spend time in the
+              <span class="mono">EmulatorPacket</span>.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <!-- Commit / reveal -->
+      <section class="hiw-section">
+        <h2>The commit–reveal coin</h2>
+        <p class="section-intro">
+          The randomness comes from two secrets neither side can see in advance. The trick: the
+          <strong>length</strong> of the secret encodes the choice.
+        </p>
+        <div class="cr-grid">
+          <div class="cr-card">
+            <div class="cr-step">1 · Commit</div>
+            <p>Each side shares only the <strong>SHA-256 hash</strong> of a random secret — hiding both the bytes and the length, so neither can react to the other's choice.</p>
+          </div>
+          <div class="cr-card">
+            <div class="cr-step">2 · Encode</div>
+            <p>Coin: <span class="chip">15 bytes = Heads</span> <span class="chip">16 bytes = Tails</span>. Variable-odds: length is <span class="mono">16 + digit</span>, <span class="mono">digit ∈ [0, n)</span>.</p>
+          </div>
+          <div class="cr-card">
+            <div class="cr-step">3 · Reveal</div>
+            <p>Coin: you win when your secret's length <strong>matches</strong> the house's. Odds: <span class="mono">roll = (d_house + d_player) mod n</span>; you win when <span class="mono">lo ≤ roll &lt; target</span>.</p>
+          </div>
+        </div>
+        <p class="note">
+          <span class="note-tag">Fair RNG</span>
+          The coin side and the odds digit are drawn from a <strong>CSPRNG</strong>; the committed
+          hash binds each side to its choice <em>before</em> any reveal. The
+          <span class="mono">‹win condition›</span> tapscript below verifies exactly this on-chain.
+        </p>
+      </section>
+
+      <!-- The escrow contract -->
+      <section class="hiw-section">
+        <h2>The escrow contract — 8 spend paths</h2>
+        <p class="section-intro">
+          Stakes go into a Taproot contract (<span class="mono">CoinflipEscrowScript</span>). It's
+          <strong>per-party</strong> — house funds the house escrow, you fund the player escrow — so
+          neither side can abort and steal the other's stake. Each escrow has eight tapscript leaves:
+          four <strong>collaborative</strong> covenant paths and four <strong>unilateral exit</strong>
+          mirrors. Click <span class="mono">show script ▸</span> on any leaf for its opcodes,
+          explained step by step.
         </p>
 
-        <br>
-        <p>
-          The game involves three transactions:
-          <br>
-          <br>
-        </p>
-        <ul>
-          <li>The <b>setup transaction</b> is forcing the first player to reveal his secret.</li>
-          <li>The <b>final transaction</b> is forcing the second player to reveal his secret.</li>
-          <li>The <b>cashout transaction</b> is made by the winner of the game to get his funds.</li>
-        </ul>
-        <br>
-        <p>
-          The <b>final transaction</b> is signed BEFORE the <b>setup transaction</b>.
-          Thus, once the <b>setup transaction</b> is submitted, the funds can only be spent through the <b>final transaction</b>.
-        </p>
+        <!-- Shared win condition (coin / variable-odds) -->
+        <div class="subscript">
+          <button class="sub-toggle" @click="toggle('cond')">
+            <span class="caret" :class="{ open: open.cond }">▸</span>
+            <span class="mono">‹win condition›</span>
+            <span class="sub-hint">the on-chain script that decides the winner</span>
+          </button>
+          <div v-if="open.cond" class="sub-body">
+            <div class="variant-tabs">
+              <button :class="['variant-tab', { active: condVariant === 'coin' }]" @click="condVariant = 'coin'">Coin (50/50)</button>
+              <button :class="['variant-tab', { active: condVariant === 'odds' }]" @click="condVariant = 'odds'">Variable odds</button>
+            </div>
+            <p class="variant-note" v-if="condVariant === 'odds'">
+              Example shown: <span class="mono">n = 6, lo = 0, target = 3</span> — a "roll under 3 on a d6" bet (player wins ~50%). Other skins just change <span class="mono">n / lo / target</span>.
+            </p>
+            <StepList :steps="condVariant === 'coin' ? WIN_COIN : WIN_ODDS" />
+            <p class="ops-note">Result: <span class="mono">1</span> → player wins, <span class="mono">0</span> → house wins. <span class="mono">creatorWin*</span> leaves wrap this in <span class="mono">OP_NOT</span>. An invalid secret length <em>loses</em> (it can't void the game).</p>
+          </div>
+        </div>
 
-
-        <div class="game-flow">
-          <div class="flow-diagram">
-            <div class="tx funding-tx">
-              <div class="tx-header">
-                <h4>Setup Transaction</h4>
-              </div>
-              <div class="tx-body">
-                <div class="inputs">
-                  <div class="input">
-                    <h5>Inputs</h5>
-                    <p>VTXO 1</p>
-                    <small>Signed by A</small>
-                  </div>
-                  <div class="input">
-                    <p>VTXO 2</p>
-                    <small>Signed by B</small>
-                  </div>
-                </div>
-                <div class="arrow">→</div>
-                <div class="outputs">
-                  <div class="output">
-                    <h5>Output</h5>
-                    <p>(A + B + secret A) OR (B after timeout)</p>
-                    <small>force reveal secret A</small>
-                  </div>
-                </div>
+        <div class="leaf-cols">
+          <div class="leaf-col">
+            <div class="leaf-col-head collab">Collaborative (operator + emulator)</div>
+            <div v-for="leaf in collabLeaves" :key="leaf.key" class="leaf">
+              <div class="leaf-name" :class="leaf.cls">{{ leaf.name }}</div>
+              <div class="leaf-kind mono">{{ leaf.kind }}</div>
+              <p>{{ leaf.desc }}</p>
+              <button class="show-script" @click="toggle(leaf.key)">
+                <span class="caret" :class="{ open: open[leaf.key] }">▸</span> show script
+              </button>
+              <div v-if="open[leaf.key]" class="script-detail">
+                <div class="script-label">Tapscript — spend path</div>
+                <StepList :steps="leaf.steps" />
+                <template v-if="leaf.payout">
+                  <div class="script-label arkade-label">Arkade covenant — run by the emulator for <span class="mono">&lt;emu✦&gt;</span></div>
+                  <StepList :steps="arkadeSteps(leaf.payout)" />
+                </template>
               </div>
             </div>
+          </div>
 
-            <div class="tx-separator">↓</div>
-
-            <div class="tx payout-tx">
-              <div class="tx-header">
-                <h4>Final Transaction</h4>
-              </div>
-              <div class="tx-body">
-                <div class="inputs">
-                  <div class="input">
-                    <h5>Input</h5>
-                    <p>Setup transaction output</p>
-                    <small>Presigned by A & B</small>
-                  </div>
-                </div>
-                <div class="arrow">→</div>
-                <div class="outputs split">
-                  <div class="output">
-                    <h5>Output</h5>
-                    <h4>If len(secret A) == len(secret B)</h4>
-                    <p>B + secret B</p>
-                    <h4>Else if len(secret A) != len(secret B)</h4>
-                    <p>A + secret B</p>
-                    <h4>Else</h4>
-                    <p>A after timeout</p>
-                    <small>force reveal secret B</small>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="tx-separator">↓</div>
-
-            <div class="tx cashout-tx">
-              <div class="tx-header">
-                <h4>Cashout Transaction</h4>
-              </div>
-              <div class="tx-body">
-                <div class="inputs">
-                  <div class="input">
-                    <h5>Input</h5>
-                    <p>Final transaction output</p>
-                    <small>Signed by winner</small>
-                  </div>
-                </div>
-                <div class="arrow">→</div>
-                <div class="outputs split">
-                  <div class="output">
-                    <h5>Output</h5>
-                    <p>Winner's address</p>
-                    <small>Both player's funds</small>
-                  </div>
-                </div>
+          <div class="leaf-col">
+            <div class="leaf-col-head exit">Unilateral exit (no operator needed)</div>
+            <div v-for="leaf in exitLeaves" :key="leaf.key" class="leaf">
+              <div class="leaf-name" :class="leaf.cls">{{ leaf.name }}</div>
+              <div class="leaf-kind mono">{{ leaf.kind }}</div>
+              <p>{{ leaf.desc }}</p>
+              <button class="show-script" @click="toggle(leaf.key)">
+                <span class="caret" :class="{ open: open[leaf.key] }">▸</span> show script
+              </button>
+              <div v-if="open[leaf.key]" class="script-detail">
+                <div class="script-label">Tapscript — spend path</div>
+                <StepList :steps="leaf.steps" />
+                <template v-if="leaf.payout">
+                  <div class="script-label arkade-label">Arkade covenant — run by the emulator for <span class="mono">&lt;emu✦&gt;</span></div>
+                  <StepList :steps="arkadeSteps(leaf.payout)" />
+                </template>
               </div>
             </div>
           </div>
         </div>
+        <p class="legend mono">
+          <span class="tok tok-var">&lt;emu✦&gt;</span> emulator key tweaked by that leaf's arkade script ·
+          <span class="tok tok-arkade">OP_INSPECT…</span> Arkade-extension opcodes (tx introspection) ·
+          ‹win condition› expands above
+        </p>
       </section>
+
+      <!-- Flow -->
+      <section class="hiw-section">
+        <h2>A game, end to end</h2>
+        <div class="flow">
+          <div class="flow-step">
+            <div class="flow-num">1</div>
+            <div class="flow-body"><h4>Play &amp; commit</h4><p>You commit your secret's hash; the house commits its own. The server returns a shared escrow address derived from both commitments.</p></div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">2</div>
+            <div class="flow-body"><h4>Escrow the stakes</h4><p>You fund the player escrow, the house funds the house escrow — two single-party transactions into the same contract.</p></div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">3</div>
+            <div class="flow-body"><h4>Reveal</h4><p>You send your secret to the server. Combined with the house secret, it deterministically decides the winner.</p></div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">4</div>
+            <div class="flow-body"><h4>Covenant settlement</h4><p>The server builds one atomic sweep of <em>both</em> escrows to the winner's address and hands it to the emulator. The emulator runs the arkade script, confirms the payout matches, co-signs the <span class="mono">&lt;emu✦&gt;</span> slot, and forwards it on. <strong>The winner signs nothing.</strong></p></div>
+          </div>
+          <div class="flow-step recovery">
+            <div class="flow-num">!</div>
+            <div class="flow-body"><h4>If the operator goes dark</h4><p>Revealed but unpaid? Sweep the whole pot via <span class="mono">playerForfeit</span> after the deadline. Never revealed? <span class="mono">refund</span>. Operator censoring? Take a unilateral <span class="mono">*Exit</span> after the CSV delay.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Trust model -->
+      <section class="hiw-section trust">
+        <h2>What you have to trust</h2>
+        <ul class="trust-list">
+          <li><span class="tick">✓</span><span class="t"><strong>Not the outcome.</strong> It's fixed by the committed hashes before any reveal.</span></li>
+          <li><span class="tick">✓</span><span class="t"><strong>Not the payout.</strong> The covenant only authorizes the full pot to the rightful winner's key; the loser has no spendable leaf.</span></li>
+          <li><span class="tick">✓</span><span class="t"><strong>Not the operator's uptime.</strong> The forfeit, refund, and exit leaves recover your funds without it.</span></li>
+          <li><span class="cross">·</span><span class="t"><strong>You do rely on</strong> the emulator running the published arkade script honestly for the <em>fast</em> path — and on Arkade itself (<a href="https://docs.arkadeos.com" target="_blank" rel="noopener">docs</a>). If the emulator misbehaves or vanishes, <span class="mono">refundExit</span> still returns your stake with no operator and no emulator.</span></li>
+        </ul>
+      </section>
+
+      <footer class="hiw-footer">
+        <router-link to="/" class="btn-gold">Start playing</router-link>
+        <span class="footer-cite text-muted">Secret-length coin scheme inspired by <a href="https://arxiv.org/pdf/1612.05390v3" target="_blank" rel="noopener">arxiv.org/pdf/1612.05390v3</a></span>
+      </footer>
     </div>
   </div>
 </template>
 
-<style lang="scss" scoped>
-.how-it-works {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 2rem 1rem;
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import StepList from '@/components/StepList.vue'
 
-  .content {
-    background: var(--card);
-    border-radius: 1rem;
-    padding: 2rem;
-    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
+// Expand state, keyed by leaf name (+ 'cond' for the shared win-condition).
+const open = ref<Record<string, boolean>>({})
+const toggle = (k: string) => { open.value = { ...open.value, [k]: !open.value[k] } }
+const condVariant = ref<'coin' | 'odds'>('coin')
 
-    h1 {
-      text-align: center;
-      margin-bottom: 2rem;
-      color: var(--primary);
+interface Step { ops: string[]; explain: string }
+
+// ── Byte-accurate opcodes, disassembled from the real CoinflipEscrowScript
+//    (packages/lib), grouped into steps with plain-language explanations. ──
+
+// Coin win-determination condition (buildCoinflipConditionScript).
+const WIN_COIN: Step[] = [
+  { ops: ['OP_2DUP', 'OP_SHA256', '<playerHash>', 'OP_EQUALVERIFY', 'OP_SHA256', '<houseHash>', 'OP_EQUALVERIFY'],
+    explain: 'Verify both reveals: SHA-256 each secret and require it to equal the hash committed at /play. A wrong secret fails here.' },
+  { ops: ['OP_SIZE', 'OP_DUP', 'OP_16', 'OP_EQUAL', 'OP_SWAP', 'OP_15', 'OP_EQUAL', 'OP_BOOLOR', 'OP_NOTIF', 'OP_2DROP', 'OP_0', 'OP_ELSE'],
+    explain: "Validate the player's secret length — it must be 15 (heads) or 16 (tails). If neither, push 0 → house wins (a bad length loses)." },
+  { ops: ['OP_SWAP', 'OP_SIZE', 'OP_DUP', 'OP_16', 'OP_EQUAL', 'OP_SWAP', 'OP_15', 'OP_EQUAL', 'OP_BOOLOR', 'OP_NOTIF', 'OP_2DROP', 'OP_1', 'OP_ELSE'],
+    explain: "Same length check on the house's secret. If the house's length is invalid, push 1 → player wins." },
+  { ops: ['OP_SIZE', 'OP_SWAP', 'OP_DROP', 'OP_SWAP', 'OP_SIZE', 'OP_SWAP', 'OP_DROP', 'OP_EQUAL', 'OP_ENDIF', 'OP_ENDIF'],
+    explain: 'Both lengths valid → compare them. Equal → 1 (player wins); different → 0 (house wins). That is the coin flip.' },
+]
+
+// Variable-odds condition (buildVariableOddsConditionScript), shown for n=6, lo=0, target=3.
+const WIN_ODDS: Step[] = [
+  { ops: ['OP_2DUP', 'OP_SHA256', '<playerHash>', 'OP_EQUALVERIFY', 'OP_SHA256', '<houseHash>', 'OP_EQUALVERIFY'],
+    explain: 'Verify both reveals against their committed hashes — identical to the coin.' },
+  { ops: ['OP_SIZE', 'OP_DUP', 'OP_16', 'OP_GREATERTHANOREQUAL', 'OP_SWAP', '22', 'OP_LESSTHAN', 'OP_BOOLAND', 'OP_NOTIF', 'OP_2DROP', 'OP_0', 'OP_ELSE'],
+    explain: "Player's length must be in [16, 16+n) — here [16, 22). The length minus 16 is the player's digit in [0, n). Out of range → 0, house wins." },
+  { ops: ['OP_SWAP', 'OP_SIZE', 'OP_DUP', 'OP_16', 'OP_GREATERTHANOREQUAL', 'OP_SWAP', '22', 'OP_LESSTHAN', 'OP_BOOLAND', 'OP_NOTIF', 'OP_2DROP', 'OP_1', 'OP_ELSE'],
+    explain: "Same range check on the house's secret. House out of range → 1, player wins." },
+  { ops: ['OP_SIZE', 'OP_NIP', 'OP_16', 'OP_SUB', 'OP_SWAP', 'OP_SIZE', 'OP_NIP', 'OP_16', 'OP_SUB', 'OP_ADD'],
+    explain: 'Decode both digits (digit = length − 16) and add them: sum = digit_house + digit_player, which lands in [0, 2n−2].' },
+  { ops: ['OP_DUP', 'OP_6', 'OP_GREATERTHANOREQUAL', 'OP_IF', 'OP_6', 'OP_SUB', 'OP_ENDIF'],
+    explain: 'roll = sum mod n. OP_MOD is disabled in Script, but since sum < 2n one conditional subtract does it: if sum ≥ n (6), subtract n.' },
+  { ops: ['OP_DUP', 'OP_0', 'OP_GREATERTHANOREQUAL', 'OP_SWAP', 'OP_3', 'OP_LESSTHAN', 'OP_BOOLAND', 'OP_ENDIF', 'OP_ENDIF'],
+    explain: 'Player wins iff lo ≤ roll < target — here 0 ≤ roll < 3. Pushes 1 (player) or 0 (house). Win probability = (target − lo) / n.' },
+]
+
+// The arkade covenant (covenants.atomicSweep) the emulator runs before signing <emu✦>.
+function arkadeSteps(payout: 'player' | 'house'): Step[] {
+  const payKey = payout === 'player' ? '<playerPayoutKey>' : '<housePayoutKey>'
+  return [
+    { ops: ['OP_INSPECTINPUTVALUE', '<otherEscrowStake>', 'OP_EQUALVERIFY'],
+      explain: 'Atomicity: the spending tx must also include the OTHER escrow as an input, its value pinned. Neither escrow can be swept on its own.' },
+    { ops: ['OP_DUP', 'OP_INSPECTOUTPUTSCRIPTPUBKEY', 'OP_1', 'OP_EQUALVERIFY', payKey, 'OP_EQUALVERIFY'],
+      explain: "Destination is forced: output #1's scriptPubKey must be exactly the winner's payout key (P2TR)." },
+    { ops: ['OP_INSPECTOUTPUTVALUE', '<fullPot>', 'OP_EQUAL'],
+      explain: 'Amount is forced: that output must carry the full pot. The emulator co-signs <emu✦> only if all three checks pass.' },
+  ]
+}
+
+const COND: string[] = ['‹win condition›']
+const VERIFY = 'OP_VERIFY'
+
+// Reusable step fragments.
+const winStep = (negate = false): Step => ({
+  ops: negate ? [...COND, 'OP_NOT', VERIFY] : [...COND, VERIFY],
+  explain: negate
+    ? 'Evaluate the win condition and negate it — require the HOUSE won.'
+    : 'Evaluate the win condition — require the PLAYER won (true).',
+})
+const cltvStep: Step = {
+  ops: ['<finalExpiration>', 'OP_CHECKLOCKTIMEVERIFY', 'OP_DROP'],
+  explain: 'Absolute timelock: this path is unspendable until finalExpiration.',
+}
+const csvStep: Step = {
+  ops: ['<exitDelay>', 'OP_CHECKSEQUENCEVERIFY', 'OP_DROP'],
+  explain: 'Relative timelock (CSV): spendable alone after exitDelay — survives an operator outage.',
+}
+
+interface Leaf {
+  key: string; name: string; group: 'collab' | 'exit'; cls: string
+  kind: string; desc: string; steps: Step[]; payout?: 'player' | 'house'
+}
+
+const LEAVES: Leaf[] = [
+  {
+    key: 'playerWinCovenant', name: 'playerWinCovenant', group: 'collab', cls: 'text-green',
+    kind: 'ConditionMultisig[server, emu✦]',
+    desc: 'Player won → the operator settles the full pot to the player. The player signs nothing.',
+    payout: 'player',
+    steps: [winStep(false),
+      { ops: ['<serverKey>', 'OP_CHECKSIGVERIFY', '<emu✦>', 'OP_CHECKSIG'],
+        explain: '2-of-2: the operator signs, and <emu✦> is the emulator key tweaked by this leaf’s arkade covenant — signed only after the covenant (below) passes. So the pot can only land where the covenant says.' }],
+  },
+  {
+    key: 'creatorWinCovenant', name: 'creatorWinCovenant', group: 'collab', cls: 'text-green',
+    kind: 'ConditionMultisig[server, emu✦]',
+    desc: 'House won (win condition negated) → the pot settles to the house.',
+    payout: 'house',
+    steps: [winStep(true),
+      { ops: ['<serverKey>', 'OP_CHECKSIGVERIFY', '<emu✦>', 'OP_CHECKSIG'],
+        explain: '2-of-2 [operator, emu✦]: same covenant binding, paying the house key.' }],
+  },
+  {
+    key: 'playerForfeit', name: 'playerForfeit', group: 'collab', cls: 'text-gold',
+    kind: 'CLTVMultisig[player, server, emu✦]',
+    desc: 'If the operator stalls after you revealed, you sweep the entire pot after the deadline.',
+    payout: 'player',
+    steps: [cltvStep,
+      { ops: ['<playerKey>', 'OP_CHECKSIGVERIFY', '<serverKey>', 'OP_CHECKSIGVERIFY', '<emu✦>', 'OP_CHECKSIG'],
+        explain: '3-of-3 [player, operator, emu✦]: after the deadline the player sweeps the full pot — the covenant forces the payout to the player. This is the penalty for a stalling house.' }],
+  },
+  {
+    key: 'refund', name: 'refund', group: 'collab', cls: 'text-blue',
+    kind: 'CLTVMultisig[funder, server]',
+    desc: 'If the game never resolved, each funder reclaims their own stake after the deadline.',
+    steps: [cltvStep,
+      { ops: ['<funderKey>', 'OP_CHECKSIGVERIFY', '<serverKey>', 'OP_CHECKSIG'],
+        explain: '2-of-2 [funder, operator]: the funder reclaims only their own stake — no covenant, no payout binding. No winner, no loss.' }],
+  },
+  {
+    key: 'playerWinExit', name: 'playerWinExit', group: 'exit', cls: '',
+    kind: 'ConditionCSVMultisig[player, emu✦]',
+    desc: 'The player-win payout, spendable alone after a CSV delay — survives an operator outage.',
+    payout: 'player',
+    steps: [winStep(false), csvStep,
+      { ops: ['<playerKey>', 'OP_CHECKSIGVERIFY', '<emu✦>', 'OP_CHECKSIG'],
+        explain: '2-of-2 [player, emu✦]: no operator signature needed; the emulator still enforces the covenant payout.' }],
+  },
+  {
+    key: 'creatorWinExit', name: 'creatorWinExit', group: 'exit', cls: '',
+    kind: 'ConditionCSVMultisig[creator, emu✦]',
+    desc: 'The house win path, as a self-spendable CSV mirror.',
+    payout: 'house',
+    steps: [winStep(true), csvStep,
+      { ops: ['<houseKey>', 'OP_CHECKSIGVERIFY', '<emu✦>', 'OP_CHECKSIG'],
+        explain: '2-of-2 [house, emu✦]: the house exits its win without the operator.' }],
+  },
+  {
+    key: 'playerForfeitExit', name: 'playerForfeitExit', group: 'exit', cls: '',
+    kind: 'ConditionCSVMultisig[player, emu✦]',
+    desc: 'The forfeit sweep as a CSV mirror, gated by a hash-check on your revealed secret.',
+    payout: 'player',
+    steps: [
+      { ops: ['OP_SHA256', '<playerHash>', 'OP_EQUAL', VERIFY],
+        explain: 'Hash-lock: prove you know the secret behind your commitment (you revealed).' },
+      csvStep,
+      { ops: ['<playerKey>', 'OP_CHECKSIGVERIFY', '<emu✦>', 'OP_CHECKSIG'],
+        explain: '2-of-2 [player, emu✦]: sweep the pot to the player without the operator.' }],
+  },
+  {
+    key: 'refundExit', name: 'refundExit', group: 'exit', cls: 'text-blue',
+    kind: 'CSVMultisig[funder]',
+    desc: 'Last resort — no operator, no emulator. The funder reclaims their stake after the CSV delay.',
+    steps: [csvStep,
+      { ops: ['<funderKey>', 'OP_CHECKSIG'],
+        explain: 'Just the funder’s signature — no operator, no emulator. The final fallback if everything else is down.' }],
+  },
+]
+
+const collabLeaves = computed(() => LEAVES.filter((l) => l.group === 'collab'))
+const exitLeaves = computed(() => LEAVES.filter((l) => l.group === 'exit'))
+</script>
+
+<style scoped lang="scss">
+.how { align-items: stretch; }
+.hiw-wrap { width: 100%; max-width: 880px; margin: 0 auto; }
+
+.back-link {
+  display: inline-block; color: var(--text-muted); text-decoration: none;
+  font-size: 0.72rem; letter-spacing: 1.5px; text-transform: uppercase;
+  margin-bottom: 18px; transition: color 0.18s;
+  &:hover { color: var(--gold); }
+}
+
+.hiw-header {
+  margin-bottom: 28px;
+  h1 { font-size: 2.1rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 12px; }
+  .lede { font-size: 1.05rem; color: var(--text-dim); line-height: 1.65; max-width: 66ch; }
+}
+
+h2 { font-size: 1.25rem; font-weight: 700; margin-bottom: 6px; }
+.section-intro { color: var(--text-dim); line-height: 1.65; margin: 4px 0 18px; max-width: 72ch; }
+.hiw-section { margin: 34px 0; }
+
+/* TL;DR */
+.tldr { border-color: var(--gold-dim); background: linear-gradient(180deg, rgba(247, 201, 72, 0.05), var(--bg-card)); }
+.tldr-title { color: var(--gold); margin-bottom: 14px; }
+.tldr-steps {
+  list-style: none; counter-reset: tldr; display: flex; flex-direction: column; gap: 10px;
+  li {
+    counter-increment: tldr; position: relative; padding-left: 38px; color: var(--text-dim); line-height: 1.55;
+    &::before {
+      content: counter(tldr); position: absolute; left: 0; top: -1px;
+      width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+      background: rgba(247, 201, 72, 0.12); color: var(--gold); border-radius: 50%;
+      font-size: 0.8rem; font-weight: 700; font-family: var(--font-mono);
     }
-
-    section {
-      margin-bottom: 3rem;
-
-      &:last-child {
-        margin-bottom: 0;
-      }
-
-      h2 {
-        margin-bottom: 1.5rem;
-        padding-bottom: 0.5rem;
-        border-bottom: 2px solid var(--border);
-      }
-
-      p {
-        color: var(--text-light);
-        line-height: 1.6;
-      }
-
-      .features {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-        gap: 2rem;
-        margin-top: 1.5rem;
-
-        .feature {
-          text-align: center;
-          padding: 1.5rem;
-          background: var(--background);
-          border-radius: 0.5rem;
-          
-          .material-icons {
-            font-size: 2.5rem;
-            color: var(--primary);
-            margin-bottom: 1rem;
-          }
-
-          h3 {
-            margin-bottom: 0.75rem;
-            font-size: 1.25rem;
-          }
-
-          p {
-            font-size: 0.95rem;
-          }
-        }
-      }
-
-      ul {
-        list-style: disc;
-        padding-left: 1.5rem;
-        color: var(--text-light);
-        
-        li {
-          margin-bottom: 0.75rem;
-          line-height: 1.6;
-
-          &:last-child {
-            margin-bottom: 0;
-          }
-        }
-      }
-    }
+    strong { color: var(--text); }
   }
 }
 
-.game-flow {
-  margin-top: 2rem;
-  
-  h3 {
-    margin-bottom: 1.5rem;
-    font-size: 1.2rem;
-  }
-
-  .flow-diagram {
-    display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-    padding: 1.5rem;
-    background: var(--background);
-    border-radius: 0.5rem;
-
-    .tx {
-      background: var(--card);
-      border-radius: 0.5rem;
-      overflow: hidden;
-      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-
-      .tx-header {
-        background: var(--primary);
-        padding: 0.75rem;
-        
-        h4 {
-          color: white;
-          font-size: 1.1rem;
-          text-align: center;
-        }
-      }
-
-      .tx-body {
-        padding: 1rem;
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-
-        .inputs, .outputs {
-          flex: 1;
-          
-          h5 {
-            color: var(--primary);
-            margin-bottom: 0.5rem;
-            font-size: 0.9rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-          }
-
-          h4 {
-            color: var(--text);
-            font-size: 0.85rem;
-            margin-top: 0.75rem;
-            margin-bottom: 0.25rem;
-            font-weight: 600;
-            padding-left: 0.5rem;
-            border-left: 2px solid var(--primary);
-          }
-
-          p {
-            font-size: 1rem;
-            color: var(--text);
-            margin-bottom: 0.25rem;
-            padding-left: 0.5rem;
-          }
-
-          small {
-            color: var(--text-light);
-            font-size: 0.8rem;
-            display: block;
-            margin-top: 0.5rem;
-          }
-        }
-
-        .outputs.split {
-          display: flex;
-          flex-direction: column;
-          gap: 1rem;
-
-          .output {
-            padding: 0.75rem;
-            border-radius: 0.25rem;
-
-            &.win {
-              background: rgba(0, 255, 0, 0.1);
-            }
-
-            &.lose {
-              background: rgba(255, 0, 0, 0.1);
-            }
-          }
-        }
-
-        .arrow {
-          color: var(--primary);
-          font-size: 1.5rem;
-          font-weight: bold;
-        }
-      }
-    }
-
-    .tx-separator {
-      color: var(--primary);
-      font-size: 1.5rem;
-      font-weight: bold;
-      text-align: center;
-    }
-  }
+/* Layer cards */
+.layer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 8px; }
+.layer-card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 22px; box-shadow: var(--shadow-card);
+  h3 { font-size: 1.05rem; margin: 12px 0 8px; }
+  p { color: var(--text-dim); line-height: 1.6; font-size: 0.92rem; margin-bottom: 10px; &:last-child { margin-bottom: 0; } }
+  strong { color: var(--text); } a { color: var(--blue); }
+}
+.layer-badge {
+  display: inline-block; font-size: 0.62rem; font-weight: 800; letter-spacing: 2px;
+  padding: 4px 10px; border-radius: 999px; font-family: var(--font-mono);
+  &.arkade { color: var(--blue); background: var(--blue-glow); }
+  &.script { color: var(--gold); background: var(--gold-glow); }
 }
 
-@media (max-width: 768px) {
-  .flow-diagram {
-    .tx {
-      .tx-body {
-        flex-direction: column;
-        text-align: center;
+/* Commit/reveal */
+.cr-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+.cr-card {
+  background: var(--bg-elevated); border: 1px solid var(--border-light); border-radius: var(--radius-sm); padding: 18px;
+  p { color: var(--text-dim); font-size: 0.9rem; line-height: 1.6; }
+  strong { color: var(--text); }
+}
+.cr-step { font-size: 0.72rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--blue); margin-bottom: 10px; }
+.chip {
+  display: inline-block; font-family: var(--font-mono); font-size: 0.78rem;
+  background: rgba(56, 189, 248, 0.1); color: var(--blue); border: 1px solid var(--border-light);
+  padding: 2px 8px; border-radius: 6px; margin: 2px 4px 2px 0;
+}
+.note {
+  margin-top: 16px; background: var(--bg-subtle); border: 1px solid var(--border);
+  border-left: 3px solid var(--green); border-radius: var(--radius-sm); padding: 14px 16px;
+  color: var(--text-dim); font-size: 0.9rem; line-height: 1.6;
+  strong { color: var(--text); }
+}
+.note-tag {
+  display: inline-block; margin-right: 8px; font-size: 0.66rem; font-weight: 800; letter-spacing: 1px;
+  text-transform: uppercase; color: var(--green); background: var(--green-glow); padding: 2px 8px; border-radius: 6px;
+}
 
-        .arrow {
-          transform: rotate(90deg);
-        }
-      }
-    }
+/* Shared sub-scripts */
+.subscript { margin-bottom: 16px; }
+.sub-toggle {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  background: var(--bg-elevated); border: 1px solid var(--border-light); border-radius: var(--radius-sm);
+  padding: 10px 14px; cursor: pointer; color: var(--text); text-align: left;
+  &:hover { border-color: var(--gold); }
+}
+.sub-hint { color: var(--text-muted); font-size: 0.78rem; }
+.sub-body {
+  margin-top: 10px; padding: 14px; background: var(--bg-subtle);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.variant-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.variant-tab {
+  background: var(--bg-elevated); border: 1px solid var(--border-light); color: var(--text-muted);
+  font-size: 0.78rem; font-weight: 600; padding: 6px 14px; border-radius: 999px; cursor: pointer;
+  transition: all 0.18s;
+  &:hover { color: var(--text); }
+  &.active { background: rgba(56, 189, 248, 0.12); border-color: var(--blue); color: var(--blue); }
+}
+.variant-note { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 12px; }
+
+/* Leaves */
+.leaf-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.leaf-col { display: flex; flex-direction: column; gap: 10px; }
+.leaf-col-head {
+  font-size: 0.72rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  padding: 8px 12px; border-radius: var(--radius-xs);
+  &.collab { color: var(--green); background: var(--green-glow); }
+  &.exit { color: var(--text-dim); background: var(--bg-elevated); }
+}
+.leaf {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px;
+  .leaf-name { font-weight: 700; font-size: 0.92rem; }
+  .leaf-kind { font-size: 0.7rem; color: var(--text-muted); margin: 3px 0 7px; }
+  p { font-size: 0.84rem; color: var(--text-dim); line-height: 1.5; }
+  strong { color: var(--text); }
+}
+.show-script {
+  margin-top: 9px; background: none; border: none; color: var(--blue);
+  font-size: 0.74rem; font-weight: 600; cursor: pointer; padding: 0; display: inline-flex; align-items: center; gap: 5px;
+  &:hover { color: var(--gold); }
+}
+.caret { display: inline-block; transition: transform 0.18s; font-size: 0.7rem; &.open { transform: rotate(90deg); } }
+
+.script-detail { margin-top: 10px; }
+.script-label {
+  font-size: 0.64rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--text-muted); margin: 12px 0 6px;
+  &.arkade-label { color: var(--gold); .mono { color: var(--gold); } }
+}
+
+/* Step chips live in StepList.vue; these .tok rules are for the legend below. */
+.ops-note { font-size: 0.78rem; color: var(--text-muted); margin-top: 10px; line-height: 1.5; }
+.tok {
+  font-family: var(--font-mono); font-size: 0.72rem; padding: 3px 6px; border-radius: 4px; line-height: 1.5;
+  &.tok-op { color: var(--text-dim); background: var(--bg-elevated); }
+  &.tok-var { color: var(--blue); background: rgba(56, 189, 248, 0.1); }
+  &.tok-arkade { color: var(--gold); background: var(--gold-glow); font-weight: 600; }
+}
+.legend { font-size: 0.72rem; color: var(--text-muted); margin-top: 12px; line-height: 1.9; .tok { font-size: 0.66rem; } }
+
+/* Flow */
+.flow { display: flex; flex-direction: column; gap: 0; }
+.flow-step {
+  display: flex; gap: 16px; padding: 4px 0;
+  &:not(:last-child) .flow-num::after {
+    content: ''; position: absolute; top: 32px; left: 50%; transform: translateX(-50%);
+    width: 2px; height: calc(100% - 20px); background: var(--border-light);
   }
 }
-</style> 
+.flow-num {
+  position: relative; flex-shrink: 0; width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-elevated); border: 1px solid var(--border-light); border-radius: 50%;
+  font-family: var(--font-mono); font-weight: 700; font-size: 0.85rem; color: var(--blue);
+}
+.flow-body {
+  padding-bottom: 18px;
+  h4 { font-size: 0.98rem; margin-bottom: 4px; }
+  p { color: var(--text-dim); font-size: 0.9rem; line-height: 1.6; }
+  strong { color: var(--text); }
+}
+.flow-step.recovery .flow-num { color: var(--gold); border-color: var(--gold-dim); background: var(--gold-glow); }
+
+/* Trust */
+.trust-list {
+  list-style: none; display: flex; flex-direction: column; gap: 12px;
+  li { display: flex; gap: 10px; color: var(--text-dim); line-height: 1.6; font-size: 0.95rem; }
+  .t { flex: 1; min-width: 0; strong { color: var(--text); } a { color: var(--blue); } .mono { color: var(--text); } }
+  .tick { color: var(--green); font-weight: 800; flex-shrink: 0; }
+  .cross { color: var(--text-muted); font-weight: 800; flex-shrink: 0; }
+}
+
+/* Footer */
+.hiw-footer { margin: 40px 0 8px; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.footer-cite { font-size: 0.78rem; a { color: var(--blue); } }
+
+@media (max-width: 640px) {
+  .leaf-cols { grid-template-columns: 1fr; }
+  .hiw-header h1 { font-size: 1.7rem; }
+}
+</style>

@@ -3,6 +3,7 @@ import PlayView from '../views/PlayView.vue'
 import WalletView from '../views/WalletView.vue'
 import SetupView from '../views/SetupView.vue'
 import HistoryView from '../views/HistoryView.vue'
+import HowItWorksView from '../views/HowItWorksView.vue'
 import store from '../store'
 
 const routes: Array<RouteRecordRaw> = [
@@ -28,6 +29,12 @@ const routes: Array<RouteRecordRaw> = [
     path: '/setup',
     name: 'setup',
     component: SetupView
+  },
+  {
+    // Public docs — no wallet required, reachable from the play-screen HUD.
+    path: '/how-it-works',
+    name: 'how-it-works',
+    component: HowItWorksView
   },
   // Backward-compat: the rocket game used to live at /rocket; it's now the
   // Rocket SKIN on the unified play view. Redirect old bookmarks home.

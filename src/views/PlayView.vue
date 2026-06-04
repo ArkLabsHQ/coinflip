@@ -215,6 +215,8 @@ export default defineComponent({
     // rejects it). Defaults mirror the server.
     const dust = ref(546)
     const oddsEdgeBps = ref(300)
+    const rakeType = ref<'percentage' | 'flat'>('percentage')
+    const rakeValue = ref(2)
     const houseReady = ref(false)
     const selectedTier = ref<number | null>(null)
 
@@ -277,11 +279,20 @@ export default defineComponent({
       const p = ((b.target - b.lo) / b.n) * 100
       return (p >= 10 ? Math.round(p) : Math.round(p * 10) / 10) + '%'
     })
-    // Fair payout multiple (the house edge trims the actual payout, never the
-    // win probability — so the win% shown is exact, the multiple is pre-edge).
+    // ACTUAL payout multiple — what the player really receives, after the house
+    // edge trims the house stake (computeHouseStake) AND the rake is taken off
+    // the pot (calculateRake). The win% is exact (fees never touch probability);
+    // this multiple is below the fair n/win because of the fees. Mirrors the
+    // server economics so the slider shows the honest payout — e.g. a 50% coin
+    // at 300 bps edge + 2% rake pays ~1.93×, not a fair 2×.
     function payoutMult(bet: OddsBet): string {
-      const m = bet.n / (bet.target - bet.lo)
-      return (Number.isInteger(m) ? String(m) : m.toFixed(1)) + '×'
+      const tier = selectedTier.value ?? 0
+      if (!tier) return '—'
+      const pot = tier + houseStakeAt(tier, bet)
+      let rake = rakeType.value === 'percentage' ? Math.floor((pot * rakeValue.value) / 100) : rakeValue.value
+      if (pot - rake < dust.value) rake = 0 // server waives a rake that would dust the payout
+      const m = (pot - rake) / tier
+      return m.toFixed(2).replace(/\.?0+$/, '') + '×'
     }
 
     // ── Flip lifecycle state ──────────────────────────────────────────
@@ -392,6 +403,8 @@ export default defineComponent({
         houseBankroll.value = data.houseBankroll ?? data.maxAvailable
         if (data.dust) dust.value = data.dust
         if (data.oddsEdgeBps !== undefined) oddsEdgeBps.value = data.oddsEdgeBps
+        if (data.rakeType === 'percentage' || data.rakeType === 'flat') rakeType.value = data.rakeType
+        if (data.rakeValue !== undefined) rakeValue.value = data.rakeValue
         houseReady.value = data.houseReady
         // Pre-select the cheapest affordable tier so getting started is one
         // click. Only set on first load (don't override a manual pick).

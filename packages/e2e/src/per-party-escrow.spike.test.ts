@@ -220,11 +220,25 @@ describe('spike: per-party escrow + winner sweep', () => {
     // finalExpiration in the PAST so the refund's CLTV is already satisfiable.
     const past = Math.floor(Date.now() / 1000) - 3600
 
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { schnorr } = require('@noble/curves/secp256k1.js')
+    const playerPkScript = ArkAddress.decode(await playerW.getAddress()).pkScript
     const playerEscrowScript = new CoinflipEscrowScript({
       creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey,
       creatorHash: sha(generateSecret('heads')), playerHash: sha(generateSecret('tails')),
-      finalExpiration: BigInt(past), penaltyTimelockSeconds: 1024n,
-      refundPubkey: playerPub, // player-only refund
+      finalExpiration: BigInt(past),
+      exitDelay: 86_528n, // BIP68 seconds, multiple of 512
+      refundPubkey: playerPub, // player-only refund — the leaf this test exercises
+      // arkadeForfeit is required by the type. The covenant leaves are present
+      // but unused here: only the CLTVMultisig[player, server] refund leaf is
+      // spent, which needs no emulator — so this test still runs on arkd alone.
+      arkadeForfeit: {
+        emulatorPubkey: schnorr.getPublicKey(new Uint8Array(32).fill(0x40)),
+        playerPayoutPkScript: playerPkScript,
+        housePayoutPkScript: playerPkScript,
+        playerStake: BigInt(BET),
+        houseStake: BigInt(BET),
+      },
     })
     const escrowAddr = playerEscrowScript.address(NETWORK_HRP, serverPubkey)
 

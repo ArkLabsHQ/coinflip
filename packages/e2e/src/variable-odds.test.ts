@@ -1,50 +1,57 @@
 /**
- * Variable-odds on-chain condition e2e. The win condition is hand-assembled
- * Bitcoin Script (roll = (digitC + digitP) mod n, player wins iff roll < target;
- * mod via a conditional OP_SUB since OP_MOD is disabled). It can only be
- * verified by having arkd actually execute it, so we escrow real stakes into a
- * variable-odds CoinflipEscrowScript and sweep via the winner's leaf:
+ * Variable-odds resolution e2e — covenant flow (server + emulator settle).
  *
- *   - the winner (per determineVariableWinner) CAN sweep — covering player/house
- *     wins, the mod wraparound (sum ≥ n), and the roll == target boundary;
- *   - the loser CANNOT (the condition pushes the other result → VERIFY fails).
+ * In the covenant design the winner signs nothing: the server resolves the game
+ * via the emulator-bound win covenant (the odds condition is enforced by the
+ * arkade-script the emulator runs). So we drive the real production path over
+ * HTTP — POST /play with odds, escrow the stake, POST /commit — and assert the
+ * server-settled outcome is consistent with the off-chain odds math
+ * (determineVariableWinner) on the REVEALED secrets, and that the full pot was
+ * paid out.
  *
- * A green run is proof the off-chain mirror and the on-chain script agree and
- * that the script is sound (no one sweeps a leaf they didn't win).
+ * The house digit is chosen server-side (CSPRNG), so we can't force a specific
+ * roll; instead we play several games per odds config and check each resolved
+ * outcome matches the math for its revealed secret lengths.
+ *
+ * GATED: needs arkd (:7070), the emulator (:7073) and the coinflip server
+ * (:8080/api) all reachable (the covenant settlement requires the emulator, so
+ * this skips on the arkd-only CI stack — like arkade-forfeit-integration).
  */
 
 import { base64, hex } from '@scure/base'
-import { createHash, randomBytes } from 'crypto'
+import { createHash } from 'crypto'
 import {
-  CoinflipEscrowScript, determineVariableWinner, VARIABLE_ODDS_BASE_LEN,
-} from 'arkade-coinflip'
-import {
-  Wallet, SingleKey, RestArkProvider, InMemoryWalletRepository, InMemoryContractRepository,
-  ConditionWitness, setArkPsbtField, decodeTapscript, buildOffchainTx, CSVMultisigTapscript,
-  Transaction, ArkAddress,
-  type ArkInfo, type ArkProvider, type ArkTxInput, type Identity, type ExtendedVirtualCoin,
+  buildOffchainTx, decodeTapscript, CSVMultisigTapscript, Transaction, ArkAddress,
+  Wallet, SingleKey, InMemoryWalletRepository, InMemoryContractRepository,
+  type ArkProvider,
 } from '@arkade-os/sdk'
+import { determineVariableWinner, VARIABLE_ODDS_BASE_LEN } from 'arkade-coinflip'
 import { faucet } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
-const HRP = 'tark' // cosmetic — we escrow into pkScript, which is HRP-independent
+const EMULATOR_URL = process.env.EMULATOR_URL || 'http://localhost:7073'
+const COINFLIP_API_URL = process.env.COINFLIP_API_URL || 'http://localhost:8080/api'
 const BET = 1000
-const FUND_BTC = 0.01 // generous so several cases can run off one funding
+const PLAYER_FUND_BTC = 0.01
 
 const sha = (b: Uint8Array) => new Uint8Array(createHash('sha256').update(b).digest())
-const toXOnly = (p: Uint8Array) => (p.length === 33 ? p.slice(1) : p)
+const toXOnly = (b: Uint8Array) => (b.length === 33 ? b.slice(1) : b)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-const secretOfDigit = (digit: number) => new Uint8Array(randomBytes(VARIABLE_ODDS_BASE_LEN + digit))
 
-async function makeWallet(identity: SingleKey): Promise<Wallet> {
+async function probe(url: string): Promise<boolean> {
+  try { return (await fetch(url, { signal: AbortSignal.timeout(10000) })).ok } catch { return false }
+}
+
+async function makePlayerWallet(id: SingleKey): Promise<Wallet> {
   return Wallet.create({
-    identity, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    identity: id, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
     storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
     settlementConfig: false,
   })
 }
-async function waitFor(w: Wallet, kind: 'boarding' | 'settled', min: number, t = 90_000): Promise<void> {
+
+async function waitFor(w: Wallet, kind: 'boarding' | 'settled', min: number, t = 120_000): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < t) {
     const b = await w.getBalance()
@@ -54,148 +61,139 @@ async function waitFor(w: Wallet, kind: 'boarding' | 'settled', min: number, t =
   throw new Error(`Timeout waiting for ${kind} >= ${min}`)
 }
 
-let arkAvailable = false
+async function settleWithRetry(w: Wallet, tries = 3): Promise<void> {
+  for (let i = 0; i < tries; i++) {
+    try { await w.settle(); return } catch (e) { if (i === tries - 1) throw e; await sleep(5000) }
+  }
+}
 
-describe('variable-odds on-chain condition', () => {
-  let arkProvider: ArkProvider
-  let arkInfo: ArkInfo
-  let serverUnroll: CSVMultisigTapscript.Type
-  let serverPubkey: Uint8Array
-  let houseId: SingleKey, playerId: SingleKey
-  let houseW: Wallet, playerW: Wallet
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(`${COINFLIP_API_URL}${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  })
+  if (!r.ok) throw new Error(`${path} ${r.status}: ${await r.text()}`)
+  return (await r.json()) as T
+}
 
-  beforeAll(async () => {
-    try {
-      arkProvider = new RestArkProvider(ARK_SERVER_URL)
-      arkInfo = await arkProvider.getInfo()
-      arkAvailable = !!arkInfo?.signerPubkey
-    } catch { arkAvailable = false }
-    if (!arkAvailable) return
-    serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
-    serverPubkey = toXOnly(hex.decode(arkInfo.signerPubkey))
-    houseId = SingleKey.fromRandomBytes(); playerId = SingleKey.fromRandomBytes()
-    houseW = await makeWallet(houseId); playerW = await makeWallet(playerId)
-    await faucet(await houseW.getBoardingAddress(), FUND_BTC)
-    await faucet(await playerW.getBoardingAddress(), FUND_BTC)
-    await waitFor(houseW, 'boarding', BET); await waitFor(playerW, 'boarding', BET)
-    await houseW.settle(); await playerW.settle()
-    await waitFor(houseW, 'settled', BET * 3); await waitFor(playerW, 'settled', BET * 3)
-  }, 180_000)
+let ready = false
+let arkProvider: ArkProvider | null = null
+let serverUnroll: CSVMultisigTapscript.Type | null = null
 
-  async function spend(arkTx: Transaction, checkpoints: Transaction[], signer: Identity, signInputs: number[], witness?: Uint8Array[]): Promise<string> {
-    if (witness) for (const i of signInputs) setArkPsbtField(arkTx, i, ConditionWitness, witness)
-    const signed = await signer.sign(arkTx, signInputs)
+beforeAll(async () => {
+  const [ark, emu, srv] = await Promise.all([
+    probe(`${ARK_SERVER_URL}/v1/info`),
+    probe(`${EMULATOR_URL}/v1/info`),
+    probe(`${COINFLIP_API_URL}/network`),
+  ])
+  ready = ark && emu && srv
+  if (!ready) {
+    console.warn(`[skip] arkd=${ark} emulator=${emu} coinflip-server=${srv} — variable-odds covenant test needs all three`)
+    return
+  }
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { RestArkProvider } = require('@arkade-os/sdk')
+  arkProvider = new RestArkProvider(ARK_SERVER_URL)
+  const info = await (arkProvider as ArkProvider).getInfo()
+  serverUnroll = decodeTapscript(hex.decode(info.checkpointTapscript)) as CSVMultisigTapscript.Type
+}, 30_000)
+
+interface PlayResp {
+  gameId: string
+  escrowAddress: string
+  houseEscrow: { txid: string; vout: number; value: number }
+  pot: number
+}
+interface CommitResp {
+  winner: 'house' | 'player'
+  houseSecret: string
+  playerSecret: string
+  payout: number
+  roll: number | null
+  txid?: string
+}
+
+describe('variable-odds resolution via covenant settlement (HTTP)', () => {
+  // Play one variable-odds game end-to-end and return the asserted outcome.
+  async function playOne(player: { id: SingleKey; w: Wallet }, n: number, target: number, lo: number): Promise<void> {
+    if (!arkProvider || !serverUnroll) throw new Error('infra not initialized')
+
+    // Player picks a uniform digit in [0, n); the length encodes it.
+    const digit = Math.floor(Math.random() * n)
+    const secret = new Uint8Array(VARIABLE_ODDS_BASE_LEN + digit)
+    crypto.getRandomValues(secret)
+    const playerHash = hex.encode(sha(secret))
+    const playerPubHex = hex.encode(toXOnly(await player.id.compressedPublicKey()))
+    const playerChangeAddress = await player.w.getAddress()
+
+    const play = await postJson<PlayResp>(`/play`, {
+      tier: BET, playerPubkey: playerPubHex, playerHash, playerChangeAddress,
+      oddsN: n, oddsTarget: target, oddsLo: lo,
+    })
+    expect(play.pot).toBe(2 * BET)
+
+    // Escrow the player's stake into the escrow address.
+    const escrowPk = ArkAddress.decode(play.escrowAddress).pkScript
+    const pv = (await player.w.getVtxos()).find((v) => v.value >= BET)
+    if (!pv) throw new Error('no player VTXO >= BET')
+    const change = pv.value - BET
+    const outs: { script: Uint8Array; amount: bigint }[] = [{ script: escrowPk, amount: BigInt(BET) }]
+    if (change > 0) outs.push({ script: ArkAddress.decode(playerChangeAddress).pkScript, amount: BigInt(change) })
+    const escrowTx = buildOffchainTx(
+      [{ txid: pv.txid, vout: pv.vout, value: pv.value, tapLeafScript: pv.forfeitTapLeafScript, tapTree: pv.tapTree }],
+      outs, serverUnroll,
+    )
+    const signed = await player.id.sign(escrowTx.arkTx, [0])
     const { arkTxid, signedCheckpointTxs } = await arkProvider.submitTx(
-      base64.encode(signed.toPSBT()), checkpoints.map((c) => base64.encode(c.toPSBT())),
+      base64.encode(signed.toPSBT()), escrowTx.checkpoints.map((c) => base64.encode(c.toPSBT())),
     )
     const finals: string[] = []
     for (const c of signedCheckpointTxs) {
-      const tx = Transaction.fromPSBT(base64.decode(c))
-      const idx = Array.from({ length: tx.inputsLength }, (_, i) => i)
-      if (witness) for (const i of idx) setArkPsbtField(tx, i, ConditionWitness, witness)
-      finals.push(base64.encode((await signer.sign(tx, idx)).toPSBT()))
+      const cptx = Transaction.fromPSBT(base64.decode(c))
+      const idx = Array.from({ length: cptx.inputsLength }, (_, i) => i)
+      finals.push(base64.encode((await player.id.sign(cptx, idx)).toPSBT()))
     }
     await arkProvider.finalizeTx(arkTxid, finals)
-    return arkTxid
-  }
+    const playerEscrow = { txid: arkTxid, vout: 0, value: BET }
 
-  async function escrow(w: Wallet, id: Identity, pkScript: Uint8Array, amount: number): Promise<{ txid: string; vout: number; value: number }> {
-    const v = (await w.getVtxos()).find((x: ExtendedVirtualCoin) => x.value >= amount)
-    if (!v) throw new Error('no VTXO >= amount')
-    const change = v.value - amount
-    const outs: { script: Uint8Array; amount: bigint }[] = [{ script: pkScript, amount: BigInt(amount) }]
-    if (change > 0) outs.push({ script: ArkAddress.decode(await w.getAddress()).pkScript, amount: BigInt(change) })
-    const { arkTx, checkpoints } = buildOffchainTx(
-      [{ txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree }], outs, serverUnroll,
-    )
-    return { txid: await spend(arkTx, checkpoints, id, [0]), vout: 0, value: amount }
-  }
-
-  const total = async (w: Wallet) => (await w.getVtxos()).reduce((a, v) => a + v.value, 0)
-
-  it('the winner sweeps across arbitrary ranges (roll 4+, exactly a 6), wraparound, and boundaries', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
-    const housePub = await houseId.xOnlyPublicKey()
-    const playerPub = await playerId.xOnlyPublicKey()
-    const past = BigInt(Math.floor(Date.now() / 1000) - 3600)
-
-    // n=6, target=3 → player wins 1/2. Cases cover: player no-wrap, house
-    // boundary (roll==target), house with-wrap+boundary, player with-wrap.
-    // [n, target, lo, dC, dP] — player wins iff lo <= (dC+dP) mod n < target.
-    // Covers low-threshold, "roll 4+" ([3,6)), "exactly a 6" ([5,6)), wraparound
-    // into a shifted range, the out-of-range (house) cases, and a large-n bet
-    // (n=216, the 3-dice "beat target" top range) that exercises the >127
-    // CScriptNum push encoding on-chain.
-    const cases: Array<[number, number, number, number, number]> = [
-      [6, 3, 0, 0, 0], // roll 0 ∈ [0,3) → player
-      [6, 6, 3, 1, 2], // roll 3 ∈ [3,6) "roll 4+" → player
-      [6, 6, 3, 0, 0], // roll 0 ∉ [3,6) → house
-      [6, 6, 3, 4, 5], // sum 9 → roll 3 ∈ [3,6) → player (wraps into the range)
-      [6, 6, 5, 2, 3], // roll 5 ∈ [5,6) "exactly a 6" → player
-      [6, 6, 5, 0, 1], // roll 1 ∉ [5,6) → house
-      [216, 216, 213, 107, 107], // n>127: roll 214 ∈ [213,216) → player (CScriptNum push)
-      [216, 216, 213, 100, 99], // n>127: roll 199 ∉ [213,216) → house (CScriptNum push)
-    ]
-
-    for (const [n, target, lo, dC, dP] of cases) {
-      const cSecret = secretOfDigit(dC)
-      const pSecret = secretOfDigit(dP)
-      const script = new CoinflipEscrowScript({
-        creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey,
-        creatorHash: sha(cSecret), playerHash: sha(pSecret),
-        finalExpiration: past, penaltyTimelockSeconds: 1024n,
-        refundPubkey: housePub, oddsN: n, oddsTarget: target, oddsLo: lo,
-      })
-      const pk = script.address(HRP, serverPubkey).pkScript
-      const hEsc = await escrow(houseW, houseId, pk, BET)
-      const pEsc = await escrow(playerW, playerId, pk, BET)
-
-      const winner = determineVariableWinner(cSecret, pSecret, n, target, lo)
-      const leaf = winner === 'creator' ? script.creatorWin() : script.playerWin()
-      const winId = winner === 'creator' ? houseId : playerId
-      const winW = winner === 'creator' ? houseW : playerW
-      const winAddr = ArkAddress.decode(await winW.getAddress())
-      const tapTree = script.encode()
-      const pot = hEsc.value + pEsc.value
-      const inputs: ArkTxInput[] = [hEsc, pEsc].map((e) => ({ txid: e.txid, vout: e.vout, value: e.value, tapLeafScript: leaf, tapTree }))
-      const { arkTx, checkpoints } = buildOffchainTx(inputs, [{ script: winAddr.pkScript, amount: BigInt(pot) }], serverUnroll)
-
-      const before = await total(winW)
-      await spend(arkTx, checkpoints, winId, [0, 1], [cSecret, pSecret])
-      await sleep(6000)
-      const after = await total(winW)
-      console.log(`[variable-odds] n=${n} range[${lo},${target}) digits(${dC},${dP}) → ${winner} wins; ${before}→${after}`)
-      expect(after - before).toBeGreaterThanOrEqual(pot - 100)
-    }
-  }, 300_000)
-
-  it('the loser cannot sweep via its own win leaf (condition rejects)', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
-    const housePub = await houseId.xOnlyPublicKey()
-    const playerPub = await playerId.xOnlyPublicKey()
-    const past = BigInt(Math.floor(Date.now() / 1000) - 3600)
-
-    // digits (0,0) → roll 0 < 3 → PLAYER wins. The house must NOT be able to
-    // sweep via creatorWin.
-    const cSecret = secretOfDigit(0), pSecret = secretOfDigit(0)
-    const script = new CoinflipEscrowScript({
-      creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey,
-      creatorHash: sha(cSecret), playerHash: sha(pSecret),
-      finalExpiration: past, penaltyTimelockSeconds: 1024n,
-      refundPubkey: housePub, oddsN: 6, oddsTarget: 3,
+    // Reveal + resolve (server settles via the covenant — no client signing).
+    const commit = await postJson<CommitResp>(`/game/${play.gameId}/commit`, {
+      playerSecretHex: hex.encode(secret), playerEscrow,
     })
-    expect(determineVariableWinner(cSecret, pSecret, 6, 3)).toBe('player')
-    const pk = script.address(HRP, serverPubkey).pkScript
-    const hEsc = await escrow(houseW, houseId, pk, BET)
-    const pEsc = await escrow(playerW, playerId, pk, BET)
 
-    const leaf = script.creatorWin() // house tries to steal via the wrong leaf
-    const tapTree = script.encode()
-    const houseAddr = ArkAddress.decode(await houseW.getAddress())
-    const inputs: ArkTxInput[] = [hEsc, pEsc].map((e) => ({ txid: e.txid, vout: e.vout, value: e.value, tapLeafScript: leaf, tapTree }))
-    const { arkTx, checkpoints } = buildOffchainTx(inputs, [{ script: houseAddr.pkScript, amount: BigInt(hEsc.value + pEsc.value) }], serverUnroll)
+    // The server-settled winner MUST match the off-chain odds math on the
+    // revealed secret lengths.
+    const houseSecret = hex.decode(commit.houseSecret)
+    const playerSecret = hex.decode(commit.playerSecret)
+    const expectRole = determineVariableWinner(houseSecret, playerSecret, n, target, lo)
+    const expectWinner = expectRole === 'creator' ? 'house' : 'player'
+    expect(commit.winner).toBe(expectWinner)
+    expect(commit.payout).toBe(2 * BET)
+    expect(typeof commit.txid).toBe('string')
+    console.log(
+      `[variable-odds] n=${n} [${lo},${target}) digits(h=${houseSecret.length - VARIABLE_ODDS_BASE_LEN},` +
+      `p=${playerSecret.length - VARIABLE_ODDS_BASE_LEN}) roll=${commit.roll} → ${commit.winner}`,
+    )
+  }
 
-    await expect(spend(arkTx, checkpoints, houseId, [0, 1], [cSecret, pSecret])).rejects.toThrow()
-    console.log('[variable-odds] loser-leaf sweep correctly rejected')
-  }, 180_000)
+  it('settles variable-odds games consistently with the odds math (several configs)', async () => {
+    if (!ready) return
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await makePlayerWallet(playerId)
+    // Fund generously so several games run off one wallet.
+    await faucet(await playerW.getBoardingAddress(), PLAYER_FUND_BTC)
+    await waitFor(playerW, 'boarding', PLAYER_FUND_BTC * 1e8 * 0.9)
+    await settleWithRetry(playerW)
+    await waitFor(playerW, 'settled', BET * 5)
+
+    // [n, target, lo]: a low-threshold, a shifted "roll N+" range, and the coin.
+    const configs: Array<[number, number, number]> = [
+      [6, 3, 0],
+      [6, 6, 3],
+      [2, 1, 0],
+    ]
+    for (const [n, target, lo] of configs) {
+      await playOne({ id: playerId, w: playerW }, n, target, lo)
+      await sleep(1500)
+    }
+  }, 600_000)
 })

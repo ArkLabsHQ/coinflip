@@ -327,9 +327,10 @@ export default defineComponent({
         await reconnect()
       } else if (arkStatus.value === 'connected') {
         // Watcher-driven refreshes are light (balance only), so do one full
-        // refresh on open to bring the drawer's vtxo list / history / boarding
-        // UTXOs current.
+        // refresh on open to bring the drawer's vtxo list / boarding UTXOs
+        // current; the heavy history loads lazily only if Activity is showing.
         store.dispatch('ark/refreshBalance').catch(() => { /* transient */ })
+        loadActivityIfViewing()
       }
     })
 
@@ -371,6 +372,17 @@ export default defineComponent({
     }
 
     const tab = ref<'receive' | 'send' | 'activity' | 'settings'>('receive')
+
+    // The Activity tab's history is heavy (the SDK re-derives it from chain —
+    // an esplora /outspends per boarding tx), so load it lazily, only when that
+    // tab is actually viewed. The cached list (state.txHistory) renders
+    // instantly; this refreshes it. Receive / Send / Settings cost nothing.
+    function loadActivityIfViewing() {
+      if (tab.value === 'activity' && ready.value) {
+        store.dispatch('ark/refreshHistory').catch(() => { /* transient */ })
+      }
+    }
+    watch(tab, loadActivityIfViewing)
 
     // ── Deposit state ─────────────────────────────────────────────
     const depositAmount = ref<number | null>(null)

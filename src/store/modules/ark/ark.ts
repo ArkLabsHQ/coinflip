@@ -701,10 +701,24 @@ const ark: Module<ArkState, RootState> = {
           confirmations: u.status.confirmed && u.status.block_height ? u.status.block_height : 0,
         })))
 
-        // Fetch wallet transaction history (Ark + boarding combined).
+      } catch (error) {
+        console.error('Failed to refresh balance:', error)
+      }
+    },
+
+    /**
+     * Fetch the wallet's transaction history (Ark + boarding). HEAVY — the SDK
+     * re-derives it from live on-chain state (an esplora /tx/:id/outspends per
+     * boarding tx + indexer lookups), so it is deliberately NOT part of
+     * refreshBalance. Loaded on demand when the Activity tab is viewed; the
+     * result stays cached in state.txHistory until the next Activity view.
+     */
+    async refreshHistory({ commit, state }) {
+      if (!sdkWallet || state.status !== 'connected') return
+      try {
         // SDK returns ArkTransaction[] with TxKey carrying arkTxid /
-        // commitmentTxid / boardingTxid — flatten to a single best-effort
-        // txid and a `isBoarding` flag for the UI.
+        // commitmentTxid / boardingTxid — flatten to a single best-effort txid
+        // and an `isBoarding` flag for the UI.
         const history = await sdkWallet.getTransactionHistory()
         commit('SET_TX_HISTORY', history.map((tx) => ({
           txid: tx.key.arkTxid || tx.key.commitmentTxid || tx.key.boardingTxid,
@@ -715,7 +729,7 @@ const ark: Module<ArkState, RootState> = {
           isBoarding: !!tx.key.boardingTxid && !tx.key.arkTxid,
         })))
       } catch (error) {
-        console.error('Failed to refresh balance:', error)
+        console.error('Failed to refresh history:', error)
       }
     },
 

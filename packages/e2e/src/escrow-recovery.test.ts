@@ -1,14 +1,18 @@
 /**
  * House-escrow recovery e2e: a stalled (expired) trustless game leaves the
  * house's escrowed stake sitting at the escrow address. recoverOrphanedHouseEscrows
- * must reclaim it via the HouseEscrow refund leaf once finalExpiration matures —
+ * must reclaim it via the house escrow's refund leaf once finalExpiration matures —
  * the house-side counterpart to the player's client reclaim.
  *
  * We construct a game whose finalExpiration is already in the PAST (so the
  * refund CLTV is satisfiable now), escrow the house stake into the matching
- * HouseEscrow script, persist it as an expired game, then run recovery and
- * assert the house balance comes back. Also covers the gating (future-CLTV
- * games are skipped) and idempotency (a second pass is a no-op).
+ * house escrow script, persist it as an expired game (with the arkadeForfeit
+ * pins recovery rebuilds from), then run recovery and assert the house balance
+ * comes back. Also covers the gating (future-CLTV games are skipped) and
+ * idempotency (a second pass is a no-op).
+ *
+ * Needs arkd (:7070) AND the emulator (:7073) — the covenant escrow pins the
+ * emulator-tweaked key, so the script can't be built without it.
  */
 
 import { base64, hex } from '@scure/base'
@@ -25,12 +29,15 @@ import { faucet } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
+const EMULATOR_URL = process.env.EMULATOR_URL || 'http://localhost:7073'
 const HOUSE_FUND_BTC = 0.005
 const BET = 1000
+const EXIT_DELAY = 86528 // BIP68 seconds, multiple of 512
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const toXOnly = (b: Uint8Array) => (b.length === 33 ? b.slice(1) : b)
 const sha = (b: Uint8Array) => new Uint8Array(createHash('sha256').update(b).digest())
+const p2tr = (xonly: Uint8Array) => new Uint8Array([0x51, 0x20, ...xonly]) // valid-shaped payout pkScript
 
 async function waitForBoarding(w: { getBalance: () => Promise<{ boarding: { total: number } }> }, min: number, t = 30_000) {
   const start = Date.now()
@@ -48,6 +55,15 @@ beforeAll(async () => {
   try { arkAvailable = (await fetch(`${ARK_SERVER_URL}/v1/info`, { signal: AbortSignal.timeout(5000) })).ok } catch { arkAvailable = false }
 }, 10_000)
 
+interface ArkadeForfeitHex {
+  emulatorPubkeyHex: string
+  playerPayoutPkScriptHex: string
+  housePayoutPkScriptHex: string
+  playerStake: number
+  houseStake: number
+  exitDelay: number
+}
+
 describe('house-escrow recovery for stalled games', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let server: any
@@ -56,6 +72,7 @@ describe('house-escrow recovery for stalled games', () => {
   let arkProvider: ArkProvider
   let serverUnroll: CSVMultisigTapscript.Type
   let dataDir: string
+  let emulatorPubkey: Uint8Array | null = null
 
   beforeAll(async () => {
     if (!arkAvailable) return
@@ -63,11 +80,19 @@ describe('house-escrow recovery for stalled games', () => {
     process.env.DATA_DIR = dataDir
     process.env.ARK_SERVER_URL = ARK_SERVER_URL
     process.env.ESPLORA_URL = ESPLORA_URL
+    process.env.EMULATOR_URL = EMULATOR_URL
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     server = require('arkade-coinflip-server')
     deps = await server.bootstrapDeps({ walletSettlementConfig: false })
     arkProvider = deps.wallet.arkProvider
     serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+
+    // The covenant escrow pins the emulator-tweaked key — fetch its pubkey.
+    try {
+      const info = (await (await fetch(`${EMULATOR_URL}/v1/info`)).json()) as { signerPubkey: string }
+      emulatorPubkey = hex.decode(info.signerPubkey)
+    } catch { emulatorPubkey = null }
+
     await faucet(await deps.wallet.getBoardingAddress(), HOUSE_FUND_BTC)
     await waitForBoarding(deps.wallet, HOUSE_FUND_BTC * 1e8 * 0.9)
     await deps.wallet.settle()
@@ -79,6 +104,8 @@ describe('house-escrow recovery for stalled games', () => {
       try { fs.rmSync(dataDir, { recursive: true, force: true }) } catch { /* best effort */ }
     }
   })
+
+  const ready = () => arkAvailable && emulatorPubkey !== null
 
   // Single-party submit by the house identity.
   async function submit(arkTx: Transaction, checkpoints: Transaction[], signInputs: number[]): Promise<string> {
@@ -96,8 +123,12 @@ describe('house-escrow recovery for stalled games', () => {
     return arkTxid
   }
 
-  // Build the Game exactly as the server's buildGame would, for a chosen expiry.
-  async function makeGame(finalExpiration: number, setupExpiration: number): Promise<{ game: Game; houseSecret: Uint8Array; houseHashHex: string; playerPubHex: string; playerHashHex: string }> {
+  // Build the Game exactly as the server's buildGame would (incl. the
+  // arkadeForfeit covenant pins), for a chosen expiry. Returns the game plus the
+  // persisted-state hex bundle so recovery rebuilds the IDENTICAL escrow.
+  async function makeGame(finalExpiration: number, setupExpiration: number): Promise<{
+    game: Game; houseSecret: Uint8Array; playerPubHex: string; playerHashHex: string; arkadeForfeitHex: ArkadeForfeitHex
+  }> {
     const housePub = await (deps.identity as Identity).xOnlyPublicKey()
     const serverPub = toXOnly(hex.decode(deps.arkInfo.signerPubkey))
     const houseSecret = new Uint8Array(15); crypto.getRandomValues(houseSecret)
@@ -106,6 +137,8 @@ describe('house-escrow recovery for stalled games', () => {
     const playerPub = toXOnly(await playerId.compressedPublicKey())
     const houseHash = sha(houseSecret)
     const playerHash = sha(playerSecret)
+    const playerPayoutPkScript = p2tr(playerPub)
+    const housePayoutPkScript = p2tr(housePub)
     const game: Game = {
       gameId: 'escrow',
       betAmount: BigInt(BET),
@@ -114,8 +147,23 @@ describe('house-escrow recovery for stalled games', () => {
       finalExpiration,
       creator: { pubkey: housePub, hash: houseHash },
       player: { pubkey: playerPub, hash: playerHash },
+      // arkadeForfeit covenant config (required by the escrow script).
+      emulatorPubkey: emulatorPubkey!,
+      playerForfeitPkScript: playerPayoutPkScript,
+      housePayoutPkScript,
+      playerStake: BET,
+      houseStake: BET,
+      exitDelay: EXIT_DELAY,
     }
-    return { game, houseSecret, houseHashHex: hex.encode(houseHash), playerPubHex: hex.encode(playerPub), playerHashHex: hex.encode(playerHash) }
+    const arkadeForfeitHex: ArkadeForfeitHex = {
+      emulatorPubkeyHex: hex.encode(emulatorPubkey!),
+      playerPayoutPkScriptHex: hex.encode(playerPayoutPkScript),
+      housePayoutPkScriptHex: hex.encode(housePayoutPkScript),
+      playerStake: BET,
+      houseStake: BET,
+      exitDelay: EXIT_DELAY,
+    }
+    return { game, houseSecret, playerPubHex: hex.encode(playerPub), playerHashHex: hex.encode(playerHash), arkadeForfeitHex }
   }
 
   // Escrow `amount` from the house wallet into `pkScript` (single-party).
@@ -132,28 +180,30 @@ describe('house-escrow recovery for stalled games', () => {
     return { txid, vout: 0, value: amount }
   }
 
-  async function persistExpiredGame(opts: { game: Game; houseSecret: Uint8Array; playerPubHex: string; playerHashHex: string; pkScriptHex: string; houseEscrow: object }): Promise<string> {
+  async function persistExpiredGame(opts: { game: Game; houseSecret: Uint8Array; playerPubHex: string; playerHashHex: string; pkScriptHex: string; houseEscrow: object; arkadeForfeitHex: ArkadeForfeitHex }, repos = deps.repos): Promise<string> {
     const id = `recovery-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
-    await deps.repos.games.save({
+    await repos.games.save({
       id, tier: BET, playerPubkey: opts.playerPubHex, playerChoice: 'trustless', playerHash: opts.playerHashHex,
       houseSecretHex: hex.encode(opts.houseSecret), finalScriptHex: opts.pkScriptHex,
       houseVtxosJson: JSON.stringify({
-        finalExpiration: opts.game.finalExpiration, setupExpiration: opts.game.setupExpiration, houseEscrow: opts.houseEscrow,
+        finalExpiration: opts.game.finalExpiration, setupExpiration: opts.game.setupExpiration,
+        houseEscrow: opts.houseEscrow,
+        arkadeForfeit: opts.arkadeForfeitHex,
       }),
     })
-    await deps.repos.games.update(id, { status: 'expired' })
+    await repos.games.update(id, { status: 'expired' })
     return id
   }
 
   const vtxoTotal = async (): Promise<number> => (await deps.wallet.getVtxos()).reduce((a: number, v: ExtendedVirtualCoin) => a + v.value, 0)
 
   it('reclaims an orphaned house escrow once the CLTV has matured', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!ready()) { console.warn('ark/emulator unavailable — skipped'); return }
     const now = Math.floor(Date.now() / 1000)
-    const { game, houseSecret, playerPubHex, playerHashHex } = await makeGame(now - 3600, now - 7200) // past CLTV
+    const { game, houseSecret, playerPubHex, playerHashHex, arkadeForfeitHex } = await makeGame(now - 3600, now - 7200) // past CLTV
     const houseEscrowScript = getHouseEscrowScript(game)
     const houseEscrow = await escrowHouseInto(houseEscrowScript.pkScript, BET)
-    const gameId = await persistExpiredGame({ game, houseSecret, playerPubHex, playerHashHex, pkScriptHex: hex.encode(houseEscrowScript.pkScript), houseEscrow })
+    const gameId = await persistExpiredGame({ game, houseSecret, playerPubHex, playerHashHex, pkScriptHex: hex.encode(houseEscrowScript.pkScript), houseEscrow, arkadeForfeitHex })
 
     const before = await vtxoTotal()
     const recovered = await server.recoverOrphanedHouseEscrows(deps)
@@ -175,15 +225,15 @@ describe('house-escrow recovery for stalled games', () => {
   }, 300_000)
 
   it('skips a game whose refund CLTV has not matured yet', async () => {
-    if (!arkAvailable) return
+    if (!ready()) return
     const now = Math.floor(Date.now() / 1000)
-    const { game, houseSecret, playerPubHex, playerHashHex } = await makeGame(now + 3600, now + 1800) // FUTURE CLTV
+    const { game, houseSecret, playerPubHex, playerHashHex, arkadeForfeitHex } = await makeGame(now + 3600, now + 1800) // FUTURE CLTV
     const houseEscrowScript = getHouseEscrowScript(game)
     // No need to actually escrow — recovery skips on the CLTV gate before building.
     const gameId = await persistExpiredGame({
       game, houseSecret, playerPubHex, playerHashHex,
       pkScriptHex: hex.encode(houseEscrowScript.pkScript),
-      houseEscrow: { txid: 'f'.repeat(64), vout: 0, value: BET },
+      houseEscrow: { txid: 'f'.repeat(64), vout: 0, value: BET }, arkadeForfeitHex,
     })
     await server.recoverOrphanedHouseEscrows(deps)
     const state = JSON.parse((await deps.repos.games.get(gameId)).house_vtxos_json)
@@ -191,22 +241,18 @@ describe('house-escrow recovery for stalled games', () => {
   }, 120_000)
 
   /**
-   * Regression: if the player swept BOTH escrows via the playerPenalty leaf
+   * Regression: if the player swept BOTH escrows via the playerForfeit leaf
    * (R1 forfeit), the house escrow VTXO is already spent. recoverOrphanedHouseEscrows
    * must handle the double-spend rejection gracefully — no exception propagated,
    * no houseRefundTxid written, return value reflects 0 new reclaims.
    *
-   * This test bootstraps its own minimal deps (no wallet funding) and injects a
-   * mock arkProvider.submitTx that rejects with a double-spend error to simulate
-   * the penalty-spent escrow — does NOT require a running regtest.
+   * Bootstraps its own minimal deps and injects a mock arkProvider.submitTx that
+   * rejects with a double-spend error to simulate the forfeit-spent escrow.
    */
-  it('handles a penalty-spent house escrow gracefully (R1 forfeit regression)', async () => {
-    if (!arkAvailable) return
+  it('handles a forfeit-spent house escrow gracefully (R1 forfeit regression)', async () => {
+    if (!ready()) return
 
-    // Bootstrap a fresh deps for this test — we don't need the house wallet to be
-    // funded; we only need repos (for persistExpiredGame / get) and a real arkInfo
-    // (for buildRefundTransaction to reconstruct the escrow script).
-    const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'coinflip-penalty-spent-test-'))
+    const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'coinflip-forfeit-spent-test-'))
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const serverMod = require('arkade-coinflip-server')
     process.env.DATA_DIR = testDataDir
@@ -214,50 +260,39 @@ describe('house-escrow recovery for stalled games', () => {
 
     try {
       const now = Math.floor(Date.now() / 1000)
-      const { game: baseGame, houseSecret, playerPubHex, playerHashHex } = await makeGame(now - 3600, now - 7200) // past CLTV so recovery attempts the refund
-      const game = { ...baseGame, penaltyTimelockSeconds: 1024 }
+      const { game, houseSecret, playerPubHex, playerHashHex, arkadeForfeitHex } = await makeGame(now - 3600, now - 7200) // past CLTV so recovery attempts the refund
       const houseEscrowScript = getHouseEscrowScript(game)
 
-      // Persist an expired game with a plausible (but fake) escrow outpoint.
-      // We never actually escrowed anything — the point is to reach submitTx.
-      const id = `penalty-spent-${Date.now()}`
-      await testDeps.repos.games.save({
-        id, tier: BET, playerPubkey: playerPubHex, playerChoice: 'trustless', playerHash: playerHashHex,
-        houseSecretHex: hex.encode(houseSecret), finalScriptHex: hex.encode(houseEscrowScript.pkScript),
-        houseVtxosJson: JSON.stringify({
-          finalExpiration: game.finalExpiration, setupExpiration: game.setupExpiration,
-          houseEscrow: { txid: 'a'.repeat(64), vout: 0, value: BET },
-          penaltyTimelockSeconds: 1024,
-        }),
-      })
-      await testDeps.repos.games.update(id, { status: 'expired' })
+      // Persist an expired game with a plausible (but fake) escrow outpoint —
+      // we never escrowed anything; the point is to reach submitTx.
+      const id = await persistExpiredGame({
+        game, houseSecret, playerPubHex, playerHashHex,
+        pkScriptHex: hex.encode(houseEscrowScript.pkScript),
+        houseEscrow: { txid: 'a'.repeat(64), vout: 0, value: BET }, arkadeForfeitHex,
+      }, testDeps.repos)
 
-      // Patch deps: submitTx throws a double-spend error, simulating the case where
-      // the player penalty-swept both escrows before recovery ran.
-      const penaltySpentDeps = {
+      // Patch deps: submitTx throws a double-spend error, simulating the player
+      // having forfeit-swept both escrows before recovery ran.
+      const forfeitSpentDeps = {
         ...testDeps,
         wallet: {
           ...testDeps.wallet,
           arkProvider: {
             ...testDeps.wallet.arkProvider,
-            submitTx: async () => {
-              throw new Error('double spend: input already spent')
-            },
+            submitTx: async () => { throw new Error('double spend: input already spent') },
           },
         },
       }
 
-      // recoverOrphanedHouseEscrows must not throw and must return 0 reclaims.
       let recovered: number | undefined
       await expect(
-        serverMod.recoverOrphanedHouseEscrows(penaltySpentDeps).then((n: number) => { recovered = n }),
+        serverMod.recoverOrphanedHouseEscrows(forfeitSpentDeps).then((n: number) => { recovered = n }),
       ).resolves.not.toThrow()
       expect(recovered).toBe(0)
 
-      // houseRefundTxid must remain unset — no false "reclaimed" record written.
       const row = await testDeps.repos.games.get(id)
       const state = JSON.parse(row.house_vtxos_json)
-      expect(state.houseRefundTxid).toBeUndefined()
+      expect(state.houseRefundTxid).toBeUndefined() // no false "reclaimed" record
     } finally {
       if (fs.existsSync(testDataDir)) {
         try { fs.rmSync(testDataDir, { recursive: true, force: true }) } catch { /* best effort */ }

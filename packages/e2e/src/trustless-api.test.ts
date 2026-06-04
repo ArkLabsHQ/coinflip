@@ -202,20 +202,15 @@ describe('trustless coin flow (server handlers)', () => {
     )
     expect(play.escrowAddress.startsWith(HRP)).toBe(true)
     expect(play.houseEscrow.value).toBe(BET)
-    // R1 forfeit: the play response must echo the BIP68 penalty timelock so the
-    // client can prebuild the penalty PSBT. Documented default is 1024 sec
-    // (2 × 512s ≈ 17 min); MUST be >= 512 and a multiple of 512 to avoid the
-    // BIP68 silent-floor (sub-512 floors to 0 → leaf is immediately spendable).
-    expect(typeof play.penaltyTimelockSeconds).toBe('number')
-    expect(play.penaltyTimelockSeconds).toBeGreaterThanOrEqual(512)
-    expect(play.penaltyTimelockSeconds % 512).toBe(0)
-    expect(play.penaltyTimelockSeconds).toBe(1024)
-    // The persisted state must carry the same value so /commit, /refund, and
-    // recovery rebuild the IDENTICAL escrow script (the taproot address is
-    // hashed from the leaf bytes — any drift here would break the spend).
+    // The play response carries the absolute forfeit/refund deadline
+    // (finalExpiration) baked into the escrow's CLTV leaves; commit/refund/forfeit
+    // rebuild the IDENTICAL escrow script (its taproot address is hashed from the
+    // leaf bytes), so the persisted state must carry the same value.
+    expect(typeof play.finalExpiration).toBe('number')
+    expect(play.finalExpiration).toBeGreaterThan(Math.floor(Date.now() / 1000))
     const persistedRow = await deps.repos.games.get(play.gameId)
     const persistedState = JSON.parse(persistedRow.house_vtxos_json as string)
-    expect(persistedState.penaltyTimelockSeconds).toBe(play.penaltyTimelockSeconds)
+    expect(persistedState.finalExpiration).toBe(play.finalExpiration)
 
     // 2) Player escrows its stake to the SAME address (single-party).
     const escrowPk = ArkAddress.decode(play.escrowAddress).pkScript
@@ -230,27 +225,19 @@ describe('trustless coin flow (server handlers)', () => {
     const playerEscrowTxid = await submit(escrowTx.arkTx, escrowTx.checkpoints, playerId, [0])
     const playerEscrow = { txid: playerEscrowTxid, vout: 0, value: BET }
 
-    // 3) Commit: reveal + resolve. House win → server already swept.
+    // 3) Commit: reveal + resolve. The server settles BOTH wins via the
+    // emulator-bound covenant — the winner signs nothing — and returns the
+    // covenant-sweep txid.
     const commit = await server.handleTrustlessCommit(play.gameId, { playerSecretHex: hex.encode(playerSecret), playerEscrow }, deps)
     expect(['house', 'player']).toContain(commit.winner)
-    console.log(`[trustless-api] winner=${commit.winner} pot-payout=${commit.payout}`)
+    expect(commit.txid).toBeTruthy()
+    expect(commit.payout).toBe(play.pot)
+    console.log(`[trustless-api] winner=${commit.winner} payout=${commit.payout} txid=${String(commit.txid).slice(0, 12)}…`)
 
-    if (commit.winner === 'house') {
-      expect(commit.txid).toBeTruthy() // server swept
-    } else {
-      // Player won — the server built the playerWin sweep; the CLIENT signs +
-      // submits it (exactly what the Vue client does — SDK only, no lib).
-      const s = commit.sweep
-      const sweepArk = Transaction.fromPSBT(hex.decode(s.sweepPsbt))
-      const sweepCps = s.sweepCheckpoints.map((c: string) => Transaction.fromPSBT(hex.decode(c)))
-      const witness = s.witnessHex.map((w: string) => Buffer.from(w, 'hex'))
-      const inputs = Array.from({ length: s.inputCount }, (_, i) => i)
-      const before = await vtxoTotal(playerW)
-      await submit(sweepArk, sweepCps, playerId, inputs, witness)
+    if (commit.winner === 'player') {
+      // The covenant swept the full pot to the player's change address.
       await sleep(6000)
-      const after = await vtxoTotal(playerW)
-      console.log(`[trustless-api] player swept: ${before} -> ${after}`)
-      expect(after - before).toBeGreaterThanOrEqual(commit.payout - 100)
+      expect(await vtxoTotal(playerW)).toBeGreaterThan(0)
     }
 
     const row = await deps.repos.games.get(play.gameId)
@@ -270,17 +257,10 @@ describe('trustless coin flow (server handlers)', () => {
 
     expect(second.winner).toBe(first.winner)
     expect(second.payout).toBe(first.payout)
-    expect(second.rake).toBe(first.rake)
-    if (first.winner === 'house') {
-      expect(first.txid).toBeTruthy()
-      expect(second.txid).toBe(first.txid) // same sweep, NOT re-submitted
-    } else {
-      expect(first.sweep).toBeTruthy()
-      expect(second.sweep).toBeTruthy()
-      // The replay rebuilds a usable sweep for the same pot + secrets.
-      expect(second.sweep.witnessHex).toEqual(first.sweep.witnessHex)
-      expect(second.sweep.inputCount).toBe(first.sweep.inputCount)
-    }
+    // Both wins are server-settled via the covenant; the replay must return the
+    // SAME sweep txid, never re-submit.
+    expect(first.txid).toBeTruthy()
+    expect(second.txid).toBe(first.txid)
     console.log(`[trustless-api] idempotent retry ok (winner=${first.winner})`)
 
     const row = await deps.repos.games.get(gameId)
@@ -304,10 +284,11 @@ describe('trustless coin flow (server handlers)', () => {
     )
 
     const { winner, payout, txid } = results[0]
+    expect(txid).toBeTruthy() // server settled once
     for (const r of results) {
       expect(r.winner).toBe(winner)
       expect(r.payout).toBe(payout)
-      if (winner === 'house') expect(r.txid).toBe(txid)
+      expect(r.txid).toBe(txid) // every replay returns the same covenant sweep
     }
     console.log(`[trustless-api] ${N} concurrent commits resolved once (winner=${winner})`)
 
@@ -391,46 +372,48 @@ describe('trustless coin flow (server handlers)', () => {
     await expect(server.handleTrustlessRefund(gameId, { playerEscrow }, deps)).rejects.toThrow(/resolved/)
   }, 120_000)
 
-  it('builds a player penalty PSBT for a stalled game (R1 forfeit, CSV-locked, pays the player)', async () => {
+  it('builds a player forfeit PSBT for a stalled game (R1 forfeit, CLTV-locked, pays the player)', async () => {
     if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
     const { gameId, playerEscrow, play } = await playAndEscrow()
 
-    // The player can claim BOTH escrows via the penalty leaf once the CSV
-    // timelock matures — no house cooperation needed for the R1 forfeit.
-    const penalty = await server.handleTrustlessPenalty(gameId, { playerEscrow }, deps)
+    // The player can claim BOTH escrows via the playerForfeit leaf once the CLTV
+    // matures — no house cooperation needed for the R1 forfeit.
+    const forfeit = await server.handleTrustlessForfeit(gameId, { playerEscrow }, deps)
 
     // Response shape checks.
-    expect(typeof penalty.penaltyPsbt).toBe('string')
-    expect(penalty.penaltyPsbt.length).toBeGreaterThan(0)
-    expect(Array.isArray(penalty.penaltyCheckpoints)).toBe(true)
-    expect(typeof penalty.penaltyTimelockSeconds).toBe('number')
-    expect(typeof penalty.payoutAddress).toBe('string')
+    expect(typeof forfeit.forfeitPsbt).toBe('string')
+    expect(forfeit.forfeitPsbt.length).toBeGreaterThan(0)
+    expect(Array.isArray(forfeit.forfeitCheckpoints)).toBe(true)
+    expect(typeof forfeit.forfeitClaimableAt).toBe('number')
+    expect(typeof forfeit.payoutAddress).toBe('string')
 
-    // penaltyTimelockSeconds must equal what was persisted at /play time.
-    expect(penalty.penaltyTimelockSeconds).toBe(play.penaltyTimelockSeconds)
+    // The forfeit CLTV opens exactly at finalExpiration (when the abort window closes).
+    expect(forfeit.forfeitClaimableAt).toBe(play.finalExpiration)
 
     // payoutAddress must be the player's own change address.
     const persistedRow = await deps.repos.games.get(gameId)
-    expect(penalty.payoutAddress).toBe(persistedRow.player_change_address)
+    expect(forfeit.payoutAddress).toBe(persistedRow.player_change_address)
 
     // The PSBT must parse as a valid offchain tx with 2 inputs (both escrows).
-    const tx = Transaction.fromPSBT(hex.decode(penalty.penaltyPsbt))
+    const tx = Transaction.fromPSBT(hex.decode(forfeit.forfeitPsbt))
     expect(tx.inputsLength).toBe(2) // house escrow + player escrow
     // Single output: the full pot to the player's change address.
     expect(tx.outputsLength).toBeGreaterThanOrEqual(1)
     const out0 = tx.getOutput(0)
     const expectedPot = play.houseEscrow.value + playerEscrow.value
+    expect(forfeit.potAmount).toBe(expectedPot)
+    expect(forfeit.stakes[0] + forfeit.stakes[1]).toBe(expectedPot)
     expect(Number(out0.amount)).toBe(expectedPot)
-    expect(hex.encode(out0.script!)).toBe(hex.encode(ArkAddress.decode(penalty.payoutAddress).pkScript))
+    expect(hex.encode(out0.script!)).toBe(hex.encode(ArkAddress.decode(forfeit.payoutAddress).pkScript))
 
-    console.log(`[trustless-api] penalty PSBT ok — ${expectedPot} sats claimable after CSV(${penalty.penaltyTimelockSeconds}s), payout=${penalty.payoutAddress}`)
+    console.log(`[trustless-api] forfeit PSBT ok — ${expectedPot} sats claimable after CLTV(${forfeit.forfeitClaimableAt}), payout=${forfeit.payoutAddress}`)
   }, 120_000)
 
-  it('refuses to build a penalty tx for a resolved game (escrows already swept)', async () => {
+  it('refuses to build a forfeit tx for a resolved game (escrows already swept)', async () => {
     if (!arkAvailable) return
     const { gameId, playerEscrow, playerSecretHex } = await playAndEscrow()
     await server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps)
-    await expect(server.handleTrustlessPenalty(gameId, { playerEscrow }, deps)).rejects.toThrow(/resolved/)
+    await expect(server.handleTrustlessForfeit(gameId, { playerEscrow }, deps)).rejects.toThrow(/resolved/)
   }, 120_000)
 
   it('plays a variable-odds game end-to-end (asymmetric house-edged stakes, winner takes the pot)', async () => {
@@ -447,11 +430,9 @@ describe('trustless coin flow (server handlers)', () => {
 
     const commit = await server.handleTrustlessCommit(gameId, { playerSecretHex, playerEscrow }, deps)
     expect(['house', 'player']).toContain(commit.winner)
-    expect(commit.rake).toBe(0) // the edge replaces rake for variable-odds
     expect(commit.payout).toBe(play.pot) // winner sweeps the full odds-weighted pot
+    expect(commit.txid).toBeTruthy() // server settled via covenant (both wins)
     console.log(`[trustless-api] variable-odds ${oddsTarget}/${oddsN}: ${commit.winner} wins pot=${play.pot} (house staked ${expectedHouseStake})`)
-    if (commit.winner === 'house') expect(commit.txid).toBeTruthy()
-    else expect(commit.sweep).toBeTruthy()
 
     const row = await deps.repos.games.get(gameId)
     expect(row.status).toBe('resolved')

@@ -239,7 +239,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import { defineComponent, computed, ref, watch, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
 import { isValidArkAddress } from '@arkade-os/sdk'
@@ -574,15 +574,10 @@ export default defineComponent({
 
     function close() { emit('update:open', false) }
 
-    // Background poll for boarding UTXOs while the drawer is open.
-    let pollInterval: ReturnType<typeof setInterval> | null = null
-    onMounted(() => {
-      pollInterval = setInterval(() => {
-        if (props.open && ready.value) store.dispatch('ark/refreshBalance')
-      }, 15_000)
-    })
+    // Balance updates are push-based via the SDK contract watcher (one SSE
+    // stream + a 60s failsafe poll, wired in ark.ts `notifyIncomingFunds`), so
+    // the drawer no longer needs its own balance poll.
     onUnmounted(() => {
-      if (pollInterval) clearInterval(pollInterval)
       if (depositCleanup) depositCleanup()
     })
 

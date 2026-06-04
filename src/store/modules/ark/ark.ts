@@ -295,6 +295,18 @@ let reconnectAttempts = 0
 // so a click during a background tick (or vice versa) can't double-spend.
 let autoClaimTimer: ReturnType<typeof setInterval> | null = null
 const AUTO_CLAIM_INTERVAL_MS = 15_000
+// Stop fn for the SDK's incoming-funds watcher: one SSE stream over the
+// wallet's active contracts + the SDK's own 60s failsafe poll. Push-based
+// balance updates replace our manual refreshBalance polling.
+let incomingFundsStop: (() => void) | null = null
+let refreshDebounce: ReturnType<typeof setTimeout> | null = null
+// Coalesce watcher-driven refreshes: a single on-chain change emits several
+// events (e.g. vtxo_spent + vtxo_received in a sweep), so debounce into one
+// refreshBalance instead of one per event.
+function scheduleRefresh(dispatch: (type: string) => Promise<unknown>): void {
+  if (refreshDebounce) clearTimeout(refreshDebounce)
+  refreshDebounce = setTimeout(() => { refreshDebounce = null; dispatch('refreshBalance').catch(() => { /* transient */ }) }, 400)
+}
 
 export function getSDKWallet(): Wallet | null {
   return sdkWallet
@@ -515,6 +527,20 @@ const ark: Module<ArkState, RootState> = {
         commit('SET_ERROR', null)
         reconnectAttempts = 0 // connected — reset the backoff
 
+        // Push-based balance updates. Subscribe to the SDK's contract watcher
+        // (a single SSE stream over the wallet's active contracts + its own 60s
+        // failsafe poll, with auto-reconnect). The callback fires the instant a
+        // watched VTXO is received/spent — a faucet, an incoming payment, or the
+        // game's payout sweep landing — so the UI updates without us polling
+        // getBalance/getVtxos on a timer. Coalesced via scheduleRefresh. Stop
+        // any prior subscription first (this runs again on every reconnect).
+        if (incomingFundsStop) { try { incomingFundsStop() } catch { /* already gone */ } incomingFundsStop = null }
+        try {
+          incomingFundsStop = await wallet.notifyIncomingFunds(() => scheduleRefresh(dispatch))
+        } catch (e) {
+          console.warn('[watcher] notifyIncomingFunds unavailable; relying on action-driven refresh:', e)
+        }
+
         // Background stalled-bet auto-claim. Fire once now so a stash
         // already past expiry doesn't have to wait one full tick, then
         // poll on the interval. The action itself short-circuits when
@@ -541,6 +567,7 @@ const ark: Module<ArkState, RootState> = {
         await destroySwaps().catch(() => {})
         sdkWallet = null
         if (autoClaimTimer) { clearInterval(autoClaimTimer); autoClaimTimer = null }
+        if (incomingFundsStop) { try { incomingFundsStop() } catch { /* already gone */ } incomingFundsStop = null }
         commit('SET_STATUS', 'error')
         commit('SET_ERROR', new Error(`Failed to connect: ${(error as Error).message}`))
         commit('SET_INFO', null)

@@ -14,6 +14,8 @@ const { EventSource: NodeEventSource } = require('eventsource')
 
 import express from 'express'
 import cors from 'cors'
+import path from 'path'
+import fs from 'fs'
 import { contractHandlers } from '@arkade-os/sdk'
 import { registerCoinflipContracts } from 'arkade-coinflip'
 import { getSqlExecutor, initDb } from './db.js'
@@ -140,8 +142,24 @@ async function main() {
 
   publicApp.use(createPublicRoutes(deps))
 
+  // Single-image mode: when CLIENT_DIR is set (the bundled image), the public
+  // port also serves the built Vue client + an SPA fallback, so the player gets
+  // the app and the /api on one origin — no separate nginx. Mounted AFTER the
+  // API routes so /api and /health win; the fallback skips them so an unknown
+  // API path still 404s instead of returning index.html.
+  const clientDir = process.env.CLIENT_DIR
+  if (clientDir && fs.existsSync(clientDir)) {
+    publicApp.use(express.static(clientDir))
+    publicApp.use((req, res, next) => {
+      if (req.method !== 'GET') return next()
+      if (req.path.startsWith('/api') || req.path === '/health') return next()
+      res.sendFile(path.join(clientDir, 'index.html'))
+    })
+    console.log(`Serving bundled client from ${clientDir}`)
+  }
+
   publicApp.listen(PUBLIC_PORT, () => {
-    console.log(`Public API listening on port ${PUBLIC_PORT}`)
+    console.log(`Public API (+ client when CLIENT_DIR set) listening on port ${PUBLIC_PORT}`)
   })
 
   // Admin API server

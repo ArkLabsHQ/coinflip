@@ -20,7 +20,7 @@ import path from 'path'
 import { createHash } from 'crypto'
 import { hex } from '@scure/base'
 import { SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository } from '@arkade-os/sdk'
-import { faucet } from './helpers'
+import { faucet, settleWithRetry } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
@@ -82,7 +82,7 @@ describe('admin HTTP API: operator endpoints', () => {
 
     await faucet(await deps.wallet.getBoardingAddress(), HOUSE_FUND_BTC)
     await waitForBoarding(deps.wallet, HOUSE_FUND_BTC * 1e8 * 0.9)
-    await deps.wallet.settle()
+    await settleWithRetry(deps.wallet)
     await waitForSettled(deps.wallet, BET * 5)
 
     app = express()

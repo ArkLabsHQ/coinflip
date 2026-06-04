@@ -31,7 +31,7 @@ import {
   Wallet, SingleKey, InMemoryWalletRepository, InMemoryContractRepository,
   type ArkProvider, type Identity, type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
-import { faucet } from './helpers'
+import { faucet, settleWithRetry } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
@@ -95,7 +95,7 @@ describe('crash-mid-sweep reconciliation (covenant flow)', () => {
 
     await faucet(await deps.wallet.getBoardingAddress(), HOUSE_FUND_BTC)
     await waitForBoarding(deps.wallet, HOUSE_FUND_BTC * 1e8 * 0.9)
-    await deps.wallet.settle()
+    await settleWithRetry(deps.wallet)
     await waitForSettled(deps.wallet, BET * 3)
 
     playerId = SingleKey.fromRandomBytes()
@@ -106,7 +106,7 @@ describe('crash-mid-sweep reconciliation (covenant flow)', () => {
     })
     await faucet(await playerW.getBoardingAddress(), PLAYER_FUND_BTC)
     await waitForBoarding(playerW, PLAYER_FUND_BTC * 1e8 * 0.9)
-    await playerW.settle()
+    await settleWithRetry(playerW)
     await waitForSettled(playerW, BET)
   }, 240_000)
 

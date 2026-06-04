@@ -10,7 +10,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@arkade-os/sdk": "file:../../vendor/arkade-os-sdk-0.4.32-arkade-script-6fb717f.tgz",
+    "@arkade-os/sdk": "file:../../vendor/arkade-os-sdk-0.4.32-arkade-script-1c02fac.tgz",
     "@noble/secp256k1": "^2.1.0",
     "@scure/base": "^1.2.1",
     "arkade-coinflip": "file:../lib",

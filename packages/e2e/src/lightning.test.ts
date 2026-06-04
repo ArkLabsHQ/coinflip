@@ -34,7 +34,7 @@ import {
   type SwapRepository,
   type BoltzSwap,
 } from '@arkade-os/boltz-swap'
-import { faucet } from './helpers'
+import { faucet, settleWithRetry } from './helpers'
 
 /**
  * In-memory SwapRepository — the default `IndexedDbSwapRepository` requires
@@ -197,7 +197,7 @@ describe('Lightning rails: Boltz reverse + submarine swaps against arkade-regtes
     const boardingAddr = await wallet.getBoardingAddress()
     await faucet(boardingAddr, FUND_AMOUNT_BTC)
     await waitForBoarding(wallet, FUND_AMOUNT_BTC * 1e8 * 0.9)
-    await wallet.settle()
+    await settleWithRetry(wallet)
     await waitForSettled(wallet, FUND_AMOUNT_BTC * 1e8 * 0.7)
 
     const swapProvider = new BoltzSwapProvider({

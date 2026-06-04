@@ -52,6 +52,25 @@ export async function createFundedWallet(): Promise<{
 }
 
 /**
+ * settle() can throw a transient "No inputs found" when arkd hasn't yet indexed
+ * a just-fauceted boarding UTXO — the balance probe sees it before settle's
+ * input gathering does. Retry ONLY that signal; rethrow anything else
+ * immediately so real failures aren't masked.
+ */
+export async function settleWithRetry(wallet: Wallet, tries = 3): Promise<void> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      await wallet.settle()
+      return
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (!msg.includes('No inputs found') || i === tries - 1) throw e
+      await new Promise((r) => setTimeout(r, 5000))
+    }
+  }
+}
+
+/**
  * Fund a wallet using the nigiri faucet + Ark settlement.
  * 1. Send BTC to the wallet's boarding address via faucet
  * 2. Mine blocks
@@ -69,7 +88,7 @@ export async function fundWallet(wallet: Wallet, amountSats: number): Promise<vo
   await waitForBalance(wallet, 'boarding', amountSats, 30_000)
 
   // Settle to convert boarding UTXOs to VTXOs
-  await wallet.settle()
+  await settleWithRetry(wallet)
 
   // Wait for settlement
   await waitForBalance(wallet, 'settled', amountSats * 0.9, 30_000) // ~10% fees

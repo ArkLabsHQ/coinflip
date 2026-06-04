@@ -219,6 +219,20 @@ export async function renewSettle(deps: AppDeps, label = 'renewal'): Promise<boo
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/No inputs found/i.test(msg)) return false // nothing eligible — graceful no-op
+    // Phantom boarding input: the wallet's cache holds a boarding UTXO whose
+    // funding tx arkd can't resolve (e.g. after a chain reset), so every settle
+    // dies on that input. It looks confirmed locally, so we can't filter it.
+    // Skip this tick with a one-line recovery pointer rather than throwing a
+    // stack trace every interval — clear it by redeploying once with
+    // RESYNC_WALLET_ON_BOOT=1 (keeps the house key).
+    if (/failed to (get|validate) boarding input|boarding input tx/i.test(msg)) {
+      console.warn(
+        `[${label}] skipped — a cached boarding input is unresolvable on the Ark server: ` +
+        `${msg.split('\n')[0]}. Renewal stays stuck until the stale wallet cache is cleared; ` +
+        `redeploy once with RESYNC_WALLET_ON_BOOT=1 (preserves the house key).`,
+      )
+      return false
+    }
     throw err
   }
 }

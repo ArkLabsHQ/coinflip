@@ -69,12 +69,25 @@ export async function initHouseWallet(
     console.log(`House wallet created: ${pubHex.substring(0, 16)}...`)
   }
 
+  // Key-preserving resync. RESYNC_WALLET_ON_BOOT wipes the SDK's cached chain
+  // state (vtxos / utxos / transactions) so a stale ghost — e.g. a boarding
+  // UTXO whose funding tx arkd can no longer resolve after a chain reset, which
+  // wedges renewal with TX_NOT_FOUND — is dropped and re-synced fresh from arkd
+  // on the Wallet.create below. The house KEY lives in HouseWalletRepository (a
+  // separate table), so it is NOT touched. One-shot recovery flag: set it,
+  // redeploy once, then remove it.
+  const walletRepository = new SQLiteWalletRepository(executor)
+  if (/^(1|true)$/i.test(process.env.RESYNC_WALLET_ON_BOOT || '')) {
+    console.warn('[resync] RESYNC_WALLET_ON_BOOT set — clearing cached wallet state (VTXOs / boarding / txs); house key preserved. Re-syncing from arkd.')
+    await walletRepository.clear()
+  }
+
   const wallet = await Wallet.create({
     identity,
     arkServerUrl: ARK_SERVER_URL,
     ...(ESPLORA_URL ? { esploraUrl: ESPLORA_URL } : {}),
     storage: {
-      walletRepository: new SQLiteWalletRepository(executor),
+      walletRepository,
       contractRepository: new SQLiteContractRepository(executor),
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

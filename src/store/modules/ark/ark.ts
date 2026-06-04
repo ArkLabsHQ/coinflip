@@ -422,25 +422,34 @@ const ark: Module<ArkState, RootState> = {
       try {
         commit('SET_STATUS', 'connecting')
 
-        // The network is the coinflip server's choice (its ARK_SERVER_URL),
-        // surfaced via GET /api/network — never a client-side default. Align to
-        // it BEFORE creating the wallet, or a public deploy connects with the
-        // regtest hostname fallbacks (e.g. the esplora `http://<host>:3000/api`,
-        // since the initial preset is 'regtest'). Best-effort: if the server is
-        // unreachable we connect with the current/last-known network.
+        // The network — and the Ark server + esplora URLs it implies — is the
+        // coinflip server's choice (its ARK_SERVER_URL), surfaced via GET
+        // /api/network. Resolve it on EVERY connect and derive the URLs from the
+        // matching preset, so neither a stale cache nor the regtest default can
+        // leak onto a public deploy. For any non-regtest network the esplora is
+        // left EMPTY on purpose — the SDK derives it from the Ark server itself
+        // (mutinynet → mempool.mutinynet.arkade.sh); we never hardcode it. The
+        // resolved URLs (not `state.*`) feed Wallet.create + the /v1/info fetch,
+        // so even a returning browser whose state still holds the bad default
+        // connects correctly. Best-effort: on an unreachable server we fall back
+        // to the last-known URLs.
+        let arkServerUrl = state.server
+        let esploraUrl = state.esplora
         try {
           const { network } = await getNetwork()
           const preset = NETWORK_PRESETS[network]
-          if (preset && network !== state.networkPreset) {
+          if (preset) {
+            arkServerUrl = preset.server
+            esploraUrl = preset.esplora
+            if (network !== state.networkPreset) commit('SET_INFO', null)
             commit('SET_NETWORK_PRESET', network)
-            commit('SET_SERVER', preset.server)
-            commit('SET_ESPLORA', preset.esplora)
+            commit('SET_SERVER', arkServerUrl)
+            commit('SET_ESPLORA', esploraUrl)
             if (preset.boltz) localStorage.setItem('boltz_api', preset.boltz)
             else localStorage.removeItem('boltz_api')
-            commit('SET_INFO', null)
           }
         } catch {
-          /* server unreachable — connect with the current/last-known network */
+          /* server unreachable — fall back to the current/last-known URLs */
         }
 
         const privateKey = rootState.wallet.privateKey
@@ -453,8 +462,8 @@ const ark: Module<ArkState, RootState> = {
         const identity = SingleKey.fromHex(privateKey)
         const wallet = await Wallet.create({
           identity,
-          arkServerUrl: state.server,
-          ...(state.esplora ? { esploraUrl: state.esplora } : {}),
+          arkServerUrl,
+          ...(esploraUrl ? { esploraUrl } : {}),
           // Disable the SDK's settlement poll loop. It finalizes the game's
           // preconfirmed VTXOs (escrow change, sweep payout) into batch rounds
           // every poll, paying the per-intent fee each time — a ~5k-sats/flip
@@ -478,7 +487,7 @@ const ark: Module<ArkState, RootState> = {
         }
 
         // Get server info via REST for display
-        const response = await fetch(`${state.server}/v1/info`, {
+        const response = await fetch(`${arkServerUrl}/v1/info`, {
           signal: AbortSignal.timeout(12000)
         })
         if (!response.ok) {

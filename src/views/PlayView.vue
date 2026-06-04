@@ -532,9 +532,8 @@ export default defineComponent({
         history.unshift(historyEntry)
         localStorage.setItem('gameHistory', JSON.stringify(history.slice(0, 100)))
 
-        setTimeout(() => {
-          store.dispatch('ark/refreshBalance').catch(() => { /* deferred for indexer lag */ })
-        }, 2000)
+        // No manual deferred refresh — the SDK contract watcher pushes the
+        // post-flip balance the instant the sweep's vtxos move (ark.ts).
 
         return true
       } catch (e: unknown) {

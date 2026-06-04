@@ -1,15 +1,13 @@
 # @arklabshq/contract-workflows-prototype
 
-**Incubator** for the eventual `@arkade-os/contract-workflows`
-framework. See
-[`docs/superpowers/specs/2026-05-29-contract-workflows-framework.md`](../../docs/superpowers/specs/2026-05-29-contract-workflows-framework.md)
-for the full architectural plan.
+**Incubator** for the eventual `@arkade-os/contract-workflows` framework — a
+primitives library for building state-machine contracts on Arkade via
+arkade-script, extracted from the shapes that recur across real contracts.
 
 ## Status
 
-This package ships **option B** from the framework spec — a primitives
-library for building state-machine contracts on Ark via arkade-script.
-Contracts compose the primitives by hand; the DSL (option A) gets
+This package ships the **hand-composed primitives layer**: contracts wire the
+primitives together by hand. The higher-level `defineContract` DSL gets
 extracted once 2-3 contracts have stabilized on this layer.
 
 Today's surface:
@@ -42,20 +40,19 @@ These are the **proven** building blocks pulled out of:
 
 ## What this does NOT ship yet
 
-- The `defineContract` DSL (option A from the spec)
+- The `defineContract` DSL
 - Richer predicates: `coinflipWinCondition`,
   `signedAttestation` (CHECKSIGFROMSTACK), `rangeCheck`
 - Richer covenants: `splitRefund`, `nextStateBinding`
 - A recovery state-machine driver
-- The TS↔Rust port (mentioned in the framework spec as future)
+- The TS↔Rust port (future)
 
 ## Why it lives here for now
 
-Per the framework spec's adoption path: incubate inside `coinflip`
-until the API is stable, then graduate to the upstream `arkade-os`
-org. The coinflip refactor onto these primitives (already 90%
-done via the `feat/r1-via-arkade-script` branch) is the first real
-consumer; banco-style swap is the planned second.
+The adoption path is to incubate inside `coinflip` until the API is
+stable, then graduate to the upstream `arkade-os` org. The coinflip
+refactor onto these primitives is the first real consumer (now on
+`master`); a banco-style swap is the planned second.
 
 ## Building
 
@@ -66,6 +63,6 @@ npm run build
 ```
 
 No standalone tests yet — the primitives are exercised through the
-coinflip test suite (38 unit + structural tests on the parent
-branch). Standalone property tests + a typed reference suite are the
-next iteration.
+coinflip test suite (the `packages/e2e` unit + structural tests).
+Standalone property tests + a typed reference suite are the next
+iteration.

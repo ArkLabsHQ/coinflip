@@ -53,6 +53,7 @@
         :state="skinState"
         :tier="selectedTier"
         :odds-edge-bps="oddsEdgeBps"
+        :dust="dust"
         @launch="onSkinLaunch"
         @cashout="onSkinCashout"
       />
@@ -482,6 +483,17 @@ export default defineComponent({
         // reveals, and (on a win) sweeps the pot — all on-Ark. Keep animating
         // for at least MIN_FLIP_MS so a fast resolution still reads as a flip.
         const bet = overrideBet ?? selectedBet.value
+        // Defense-in-depth dust guard. The odds slider already clamps coin /
+        // roulette bets to a dust-safe house stake, and the Rocket skin gates its
+        // cash-out the same way — but a gesture skin's overrideBet is the one path
+        // that can hand us a sub-dust bet, which the server (and the on-chain
+        // escrow) would reject. This is the universal choke point: never place a
+        // bet whose house side falls below the dust floor.
+        if (houseStakeOf(bet) < dust.value) {
+          throw new Error(
+            `That win chance is too high for this stake — the house side would fall below the ${dust.value}-sat minimum. Lower the win chance / multiplier or raise the stake.`,
+          )
+        }
         const [result] = await Promise.all([
           store.dispatch('ark/playTrustlessGame', {
             tier: selectedTier.value,

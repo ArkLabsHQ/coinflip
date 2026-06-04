@@ -40,7 +40,7 @@ import {
   type Identity,
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
-import { faucet } from './helpers'
+import { faucet, settleWithRetry } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
@@ -168,8 +168,8 @@ describe('spike: trustless broadcast (setup → final → claim)', () => {
     await faucet(await playerW.getBoardingAddress(), FUND_BTC)
     await waitFor(houseW, 'boarding', BET)
     await waitFor(playerW, 'boarding', BET)
-    await houseW.settle()
-    await playerW.settle()
+    await settleWithRetry(houseW)
+    await settleWithRetry(playerW)
     await waitFor(houseW, 'settled', BET)
     await waitFor(playerW, 'settled', BET)
 

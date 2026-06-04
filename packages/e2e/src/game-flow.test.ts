@@ -48,7 +48,7 @@ import {
   type Identity,
   type ArkProvider,
 } from '@arkade-os/sdk'
-import { faucet } from './helpers'
+import { faucet, settleWithRetry } from './helpers'
 
 // -- Config --
 
@@ -241,10 +241,10 @@ describe('full game flow: P2P coinflip', () => {
     if (!arkAvailable) return
 
     console.log('Settling creator wallet...')
-    await creatorWallet.settle()
+    await settleWithRetry(creatorWallet)
 
     console.log('Settling player wallet...')
-    await playerWallet.settle()
+    await settleWithRetry(playerWallet)
 
     // Wait for settled VTXOs
     await waitForSettledBalance(creatorWallet, BET_AMOUNT, 60_000)

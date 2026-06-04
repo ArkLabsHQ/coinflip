@@ -32,10 +32,10 @@
     bip68 "1.0.4"
     light-bolt11-decoder "3.2.0"
 
-"@arkade-os/sdk@file:./vendor/arkade-os-sdk-0.4.32-arkade-script-6fb717f.tgz":
-  version "0.4.32"
-  resolved "file:vendor/arkade-os-sdk-0.4.32-arkade-script-6fb717f.tgz"
-  integrity sha512-02GmIrENij/3z5dGOAIlaknCg2W7r4zLqPFddqay/nhLVtald7QfZwung1tvhUXEEoB0gRUEebV8qGh4+mD+NA==
+"@arkade-os/sdk@file:./vendor/arkade-os-sdk-0.4.32-arkade-script-1c02fac.tgz":
+  version "0.4.32-arkade-script-1c02fac"
+  resolved "file:vendor/arkade-os-sdk-0.4.32-arkade-script-1c02fac.tgz"
+  integrity sha512-ygMqc4QXJiCTYxfXE6MR4wgbBg1gqrt0L4O1dAzqLxkowKbhVFwqwIqxIw/8t8vnzdTS4PNZttC0PUnSWBL9HA==
   dependencies:
     "@bitcoinerlab/descriptors-scure" "3.1.7"
     "@marcbachmann/cel-js" "7.3.1"

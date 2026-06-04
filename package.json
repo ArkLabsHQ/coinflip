@@ -12,7 +12,7 @@
   "dependencies": {
     "@3d-dice/dice-box-threejs": "^0.0.12",
     "@arkade-os/boltz-swap": "^0.3.37",
-    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.32-arkade-script-6fb717f.tgz",
+    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.32-arkade-script-1c02fac.tgz",
     "@noble/secp256k1": "^2.1.0",
     "@scure/base": "^1.2.1",
     "@scure/btc-signer": "^1.5.0",
@@ -49,7 +49,7 @@
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.32-arkade-script-6fb717f.tgz"
+    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.32-arkade-script-1c02fac.tgz"
   },
   "eslintConfig": {
     "root": true,

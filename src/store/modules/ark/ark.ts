@@ -405,41 +405,13 @@ const ark: Module<ArkState, RootState> = {
     },
 
     /**
-     * Apply a named network preset (regtest / mutinynet) and reconnect.
-     * Mutinynet only pins the Ark server URL; esplora + Boltz are left empty
-     * so the SDK auto-defaults them from the detected network. Driven by
-     * `syncNetworkFromServer`, not by the user — the network is the server's
-     * choice (its ARK_SERVER_URL env), not a client toggle.
+     * Ask the coinflip server which network it's on and connect the wallet
+     * aligned to it. The alignment itself lives in `checkConnection` (it runs
+     * before every wallet creation), so this is just a named connect entry
+     * point — the network is always the server's choice (its ARK_SERVER_URL),
+     * never a client toggle.
      */
-    async setNetworkPreset({ commit, dispatch }, preset: string) {
-      const p = NETWORK_PRESETS[preset]
-      if (!p) return
-      commit('SET_NETWORK_PRESET', preset)
-      commit('SET_SERVER', p.server)
-      commit('SET_ESPLORA', p.esplora)
-      if (p.boltz) localStorage.setItem('boltz_api', p.boltz)
-      else localStorage.removeItem('boltz_api')
-      // Drop the cached info so the UI doesn't show the previous network.
-      commit('SET_INFO', null)
-      await dispatch('checkConnection')
-    },
-
-    /**
-     * Ask the coinflip server which network it's on and align the client to
-     * it before connecting the wallet. The server's network is fixed by its
-     * env, so the client never picks independently — it follows. Falls back
-     * to the current preset if the server is unreachable.
-     */
-    async syncNetworkFromServer({ state, dispatch }) {
-      try {
-        const { network } = await getNetwork()
-        if (NETWORK_PRESETS[network] && network !== state.networkPreset) {
-          await dispatch('setNetworkPreset', network) // applies + reconnects
-          return
-        }
-      } catch {
-        /* server unreachable — connect with whatever we have */
-      }
+    async syncNetworkFromServer({ dispatch }) {
       await dispatch('checkConnection')
     },
 
@@ -449,6 +421,27 @@ const ark: Module<ArkState, RootState> = {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
       try {
         commit('SET_STATUS', 'connecting')
+
+        // The network is the coinflip server's choice (its ARK_SERVER_URL),
+        // surfaced via GET /api/network — never a client-side default. Align to
+        // it BEFORE creating the wallet, or a public deploy connects with the
+        // regtest hostname fallbacks (e.g. the esplora `http://<host>:3000/api`,
+        // since the initial preset is 'regtest'). Best-effort: if the server is
+        // unreachable we connect with the current/last-known network.
+        try {
+          const { network } = await getNetwork()
+          const preset = NETWORK_PRESETS[network]
+          if (preset && network !== state.networkPreset) {
+            commit('SET_NETWORK_PRESET', network)
+            commit('SET_SERVER', preset.server)
+            commit('SET_ESPLORA', preset.esplora)
+            if (preset.boltz) localStorage.setItem('boltz_api', preset.boltz)
+            else localStorage.removeItem('boltz_api')
+            commit('SET_INFO', null)
+          }
+        } catch {
+          /* server unreachable — connect with the current/last-known network */
+        }
 
         const privateKey = rootState.wallet.privateKey
         if (!privateKey) {

@@ -34,6 +34,7 @@ import {
   type SwapRepository,
   type BoltzSwap,
 } from '@arkade-os/boltz-swap'
+import { faucet } from './helpers'
 
 /**
  * In-memory SwapRepository — the default `IndexedDbSwapRepository` requires
@@ -64,7 +65,7 @@ class InMemorySwapRepository implements SwapRepository {
 }
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
-const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
+const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 // Boltz REST is at :9001 and WebSocket is at :9004; the SDK's BoltzSwapProvider
 // derives wsUrl from apiUrl by swapping `9069` → `9004` (the nginx convention).
 // Pointing apiUrl at the nginx proxy (:9069) makes both halves resolve cleanly.
@@ -83,14 +84,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-async function faucet(address: string, amountBtc: number): Promise<void> {
-  const resp = await fetch(`${ESPLORA_URL}/faucet`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, amount: amountBtc }),
-  })
-  if (!resp.ok) throw new Error(`Faucet failed: ${resp.status} ${await resp.text()}`)
-}
 
 async function waitForBoarding(wallet: Wallet, minSats: number, timeoutMs = 60_000): Promise<void> {
   const start = Date.now()

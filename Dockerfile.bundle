@@ -1,0 +1,96 @@
+# All-in-one image: the Node server serves BOTH the player client (static Vue
+# build + /api on the USER port) and the admin dashboard (ADMIN port). No nginx
+# — the server's public Express app serves the client when CLIENT_DIR is set.
+#
+#   Build:  docker build -f Dockerfile.bundle -t coinflip .
+#   Run:    docker run -p 3000:3000 -p 3002:3002 \
+#             -e ARK_SERVER_URL=https://mutinynet.arkade.sh \
+#             -e EMULATOR_URL=... -e EMULATOR_PUBLIC_URL=... \
+#             -v coinflip-data:/app/data coinflip
+#
+#   User side  → http://localhost:3000  (game UI + /api)
+#   Admin side → http://localhost:3002  (dashboard + admin API)
+
+# ── Stage 1: build the Vue client ─────────────────────────────────────────
+FROM node:20-alpine AS client
+WORKDIR /app
+# Vendored @arkade-os/sdk tarball (file: dep) must be present before install.
+COPY vendor/ ./vendor/
+COPY package.json package-lock.json* yarn.lock* ./
+RUN npm install
+COPY src/ ./src/
+COPY public/ ./public/
+COPY tsconfig.json babel.config.js vue.config.js* ./
+# BASE_URL defaults to '' → the client calls /api on its own origin, which the
+# bundled server serves. No VUE_APP_API_URL needed.
+RUN npm run build
+# → /app/dist
+
+# ── Stage 2: build the Node server (mirrors packages/server/Dockerfile) ────
+FROM node:22-slim AS server
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY vendor/ ./vendor/
+
+# contract-workflows-prototype first (file: dep of lib; its dist must exist
+# before lib's install/build can resolve it).
+COPY packages/contract-workflows-prototype/package.json packages/contract-workflows-prototype/package-lock.json* ./packages/contract-workflows-prototype/
+WORKDIR /app/packages/contract-workflows-prototype
+RUN npm install
+COPY packages/contract-workflows-prototype/ ./
+RUN npm run build
+
+# lib (server depends on it)
+WORKDIR /app
+COPY packages/lib/package.json packages/lib/package-lock.json* ./packages/lib/
+WORKDIR /app/packages/lib
+RUN npm install
+COPY packages/lib/ ./
+RUN npm run build
+
+# server
+WORKDIR /app/packages/server
+COPY packages/server/package.json packages/server/package-lock.json* ./
+RUN npm install
+COPY packages/server/ ./
+RUN npm run build
+
+# ── Stage 3: runtime ──────────────────────────────────────────────────────
+FROM node:22-slim
+WORKDIR /app
+
+# Server runtime: contract-workflows-prototype + lib + server (dist + deps).
+COPY --from=server /app/packages/contract-workflows-prototype/dist ./packages/contract-workflows-prototype/dist
+COPY --from=server /app/packages/contract-workflows-prototype/package.json ./packages/contract-workflows-prototype/
+COPY --from=server /app/packages/contract-workflows-prototype/node_modules ./packages/contract-workflows-prototype/node_modules
+COPY --from=server /app/packages/lib/dist ./packages/lib/dist
+COPY --from=server /app/packages/lib/package.json ./packages/lib/
+COPY --from=server /app/packages/lib/node_modules ./packages/lib/node_modules
+COPY --from=server /app/packages/server/dist ./packages/server/dist
+COPY --from=server /app/packages/server/package.json ./packages/server/
+COPY --from=server /app/packages/server/node_modules ./packages/server/node_modules
+COPY --from=server /app/packages/server/src/admin/dashboard.html ./packages/server/dist/admin/
+COPY --from=server /app/packages/server/src/admin/amount-validate.js ./packages/server/dist/admin/
+
+# Bundled client (served by the server on the user port via CLIENT_DIR).
+COPY --from=client /app/dist ./client
+
+RUN mkdir -p /app/data
+WORKDIR /app/packages/server
+
+ENV NODE_ENV=production
+ENV DATA_DIR=/app/data
+ENV CLIENT_DIR=/app/client
+# USER side (game UI + /api) and ADMIN side (dashboard) on separate ports.
+ENV PUBLIC_PORT=3000
+ENV ADMIN_PORT=3002
+# Bind the admin app to all interfaces so its published port is reachable.
+# NOTE: the admin API is unauthenticated — keep this port firewalled or behind
+# an authenticating reverse proxy in production.
+ENV ADMIN_HOST=0.0.0.0
+
+EXPOSE 3000 3002
+
+CMD ["node", "dist/index.js"]

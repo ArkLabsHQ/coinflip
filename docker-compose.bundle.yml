@@ -1,0 +1,29 @@
+# All-in-one coinflip: ONE image serving both sides on two ports.
+#   - user  → :3000  (game UI + /api, same origin)
+#   - admin → :3002  (dashboard + admin API)
+#
+#   docker compose -f docker-compose.bundle.yml up --build
+#
+# No secrets committed here — override via the environment or a local .env
+# (gitignored). Defaults point at public mutinynet.
+services:
+  coinflip:
+    build:
+      context: .
+      dockerfile: Dockerfile.bundle
+    image: coinflip-bundle
+    ports:
+      - "3000:3000" # USER side: game UI + /api
+      - "3002:3002" # ADMIN side: dashboard + admin API — keep this firewalled / behind an auth proxy
+    environment:
+      ARK_SERVER_URL: ${ARK_SERVER_URL:-https://mutinynet.arkade.sh}
+      # Set these to enable the trustless (arkade-script) settlement path:
+      EMULATOR_URL: ${EMULATOR_URL:-}
+      EMULATOR_PUBLIC_URL: ${EMULATOR_PUBLIC_URL:-}
+      # ESPLORA_URL: ${ESPLORA_URL:-}  # optional; SDK auto-defaults per network
+    volumes:
+      - coinflip-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  coinflip-data:

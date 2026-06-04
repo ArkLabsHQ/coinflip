@@ -7,6 +7,25 @@ on:
     branches: [master]
 
 jobs:
+  client-unit-tests:
+    name: Client Unit Tests (Vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install client dependencies
+        run: npm install --include=dev
+
+      - name: Run client unit tests (jsdom, no regtest)
+        # Vitest covers the browser-context client helpers that the node
+        # packages/e2e jest can't reach: esplora-URL migration, stash
+        # eviction (pruneOnLoad), and the clipboard secure-context fallback.
+        run: npm run test:unit
+
   unit-tests:
     name: Unit & Script Tests
     runs-on: ubuntu-latest
@@ -16,6 +35,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Install & build contract-workflows-prototype
+        working-directory: packages/contract-workflows-prototype
+        # lib depends on this package via file: (symlinked) and consumes its
+        # types from dist/, which is gitignored — so a clean checkout has no
+        # dist. tsc/build of lib resolves the symlink target, so cwp must be
+        # built first or `tsc --noEmit` fails with "Cannot find module".
+        run: npm install --include=dev && npm run build
 
       - name: Install lib dependencies
         working-directory: packages/lib
@@ -37,15 +64,32 @@ jobs:
         working-directory: packages/server
         run: npx tsc --noEmit
 
+      - name: Build server
+        working-directory: packages/server
+        # The *.unit.test.ts files import the built server (dist/game-engine.js,
+        # dist/vtxo-pool.js) directly, so this job must emit dist — type-check
+        # alone (--noEmit) doesn't.
+        run: npm run build
+
       - name: Install E2E test dependencies
         working-directory: packages/e2e
         run: npm install --include=dev
 
-      - name: Run unit tests (no regtest needed)
+      - name: Run *.unit.test.ts (pure, no regtest)
         working-directory: packages/e2e
-        # Path anchored to `coinflip.test.ts` only — the broader `coinflip`
-        # substring matches every test file in this repo because the working
-        # directory itself contains "coinflip", which is not what we want.
+        # Every `*.unit.test.ts` is deterministic and stack-free (mocked deps /
+        # built dist). Run the whole set in the fast lane so a unit-level
+        # regression is caught without spinning up arkd+emulator. Previously
+        # these only ran in the slow e2e-tests job — slow feedback for a pure
+        # logic break.
+        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="\\.unit\\.test\\.ts$"
+
+      - name: Run coinflip.test.ts unit subset (no regtest)
+        working-directory: packages/e2e
+        # coinflip.test.ts mixes unit + integration cases in one file, so it's
+        # filtered by test NAME to the stack-free ones. Path anchored to the
+        # exact file — the broader `coinflip` substring matches every test file
+        # because the working directory itself contains "coinflip".
         run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="src/coinflip\\.test\\.ts$" -t "gameFromEvents|determineWinner|generateSecret|CoinflipSetupScript|CoinflipFinalScript|coinSelect|event type guards|server-as-counterparty|ContractHandler"
 
   e2e-tests:
@@ -57,36 +101,28 @@ jobs:
         with:
           submodules: true
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-
-      - uses: actions/cache@v4
-        with:
-          path: arkade-regtest/_build
-          key: nigiri-${{ hashFiles('arkade-regtest/.env.defaults', '.env.regtest') }}
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Start regtest environment
-        run: |
-          chmod +x arkade-regtest/*.sh arkade-regtest/helpers/*.sh
-          ./arkade-regtest/start-env.sh
+        run: node arkade-regtest/regtest.mjs start
         timeout-minutes: 15
-
-      - name: Add nigiri to PATH
-        run: echo "${{ github.workspace }}/arkade-regtest/_build/nigiri/build" >> $GITHUB_PATH
 
       - name: Diagnostic - dump regtest env state
         run: |
-          echo "=== .env.regtest ==="
-          cat .env.regtest || echo "no .env.regtest"
           echo "=== arkd info ==="
           curl -s http://localhost:7070/v1/info | head -50 || true
           echo "=== docker ps ==="
           docker ps --format "table {{.Names}}\t{{.Status}}" || true
+
+      - name: Install & build contract-workflows-prototype
+        working-directory: packages/contract-workflows-prototype
+        # lib depends on this package via file: (symlinked) and consumes its
+        # types from dist/, which is gitignored — so a clean checkout has no
+        # dist. tsc/build of lib resolves the symlink target, so cwp must be
+        # built first or `tsc --noEmit` fails with "Cannot find module".
+        run: npm install --include=dev && npm run build
 
       - name: Install lib dependencies
         working-directory: packages/lib
@@ -112,7 +148,15 @@ jobs:
         working-directory: packages/e2e
         env:
           ARK_SERVER_URL: http://localhost:7070
-          ESPLORA_URL: http://localhost:3000
+          # denigiri stack serves Esplora REST under the mempool /api prefix;
+          # the bare :3000 root is the mempool web UI (HTML).
+          ESPLORA_URL: http://localhost:3000/api
+          # The arkade-regtest stack starts the emulator by default at :7073
+          # (confirmed in the start logs). The trustless /play + escrow paths
+          # REQUIRE it — tell the in-process test server where it is, or
+          # handleTrustlessPlay throws "Emulator not configured".
+          EMULATOR_URL: http://localhost:7073
+          EMULATOR_PUBLIC_URL: http://localhost:7073
         run: npx jest --runInBand --forceExit --testTimeout=300000 --ci
 
       - name: Capture logs on failure
@@ -124,6 +168,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: |
-          chmod +x arkade-regtest/clean-env.sh 2>/dev/null || true
-          ./arkade-regtest/clean-env.sh || true
+        run: node arkade-regtest/regtest.mjs clean || true

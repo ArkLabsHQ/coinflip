@@ -188,6 +188,10 @@
         <!-- ── Settings ───────────────────────────────────────────── -->
         <section v-if="tab === 'settings'" class="settings-section">
           <button class="btn-outline" @click="showKey = true">Back Up Private Key</button>
+          <button class="btn-outline" :disabled="resyncing" @click="resyncWallet">
+            {{ resyncing ? 'Resyncing…' : 'Resync Wallet Data' }}
+          </button>
+          <p class="text-muted mono resync-hint">Clears cached balance/VTXOs and re-syncs from the server. Keeps your key — use after a node/chain reset.</p>
           <button class="btn-danger" @click="showDeleteConfirm = true">Delete Wallet</button>
           <div class="server-info text-muted mono">
             <div>Network: {{ info?.network || '—' }} <span class="net-note">(set by server)</span></div>
@@ -249,6 +253,7 @@ import {
   type FeesResponse,
   type LimitsResponse,
 } from '@/services/boltz'
+import { copyToClipboard } from '@/utils/clipboard'
 
 type SendKind = 'empty' | 'lightning' | 'ark' | 'onchain' | 'unknown'
 interface SendTarget { kind: SendKind; amountSats: number; address: string }
@@ -515,11 +520,27 @@ export default defineComponent({
     const showKey = ref(false)
     const showDeleteConfirm = ref(false)
     const deleteConfirmText = ref('')
+    const resyncing = ref(false)
 
-    function deleteWallet() {
-      store.dispatch('clearWallet')
+    async function deleteWallet() {
+      await store.dispatch('clearWallet')
       emit('update:open', false)
       router.push('/setup')
+    }
+
+    // Purge the SDK's cached local data (ghost VTXOs) and re-sync from the
+    // server, keeping the key. Clears a stale balance left by a node/chain reset.
+    async function resyncWallet() {
+      if (resyncing.value) return
+      resyncing.value = true
+      try {
+        // `ark` is a namespaced module — the action is `ark/resyncWallet`.
+        await store.dispatch('ark/resyncWallet')
+      } catch (e) {
+        console.warn('resync failed:', e)
+      } finally {
+        resyncing.value = false
+      }
     }
 
     async function requestFaucet() {
@@ -548,8 +569,7 @@ export default defineComponent({
     }
 
     async function copyText(text: string) {
-      if (!text) return
-      try { await navigator.clipboard.writeText(text); showToast('Copied!') } catch { /* ignore */ }
+      if (await copyToClipboard(text)) showToast('Copied!')
     }
 
     function close() { emit('update:open', false) }
@@ -580,6 +600,7 @@ export default defineComponent({
       fees, limits, calcReceive,
       createLnDeposit, resetDeposit, settleFunds,
       showKey, showDeleteConfirm, deleteConfirmText, deleteWallet, requestFaucet,
+      resyncing, resyncWallet,
       copyText, toastMsg, toastType,
     }
   },
@@ -752,6 +773,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .boarding-conf { font-size: 0.72rem; margin-left: auto; }
 
 .settings-section { display: flex; flex-direction: column; gap: 12px; }
+.resync-hint { font-size: 0.68rem; line-height: 1.4; margin: -4px 0 4px; }
 .net-note { opacity: 0.7; }
 
 .activity-section { display: flex; flex-direction: column; gap: 4px; }

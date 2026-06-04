@@ -1,4 +1,9 @@
 [submodule "arkade-regtest"]
 	path = arkade-regtest
 	url = https://github.com/ArkLabsHQ/arkade-regtest.git
-	branch = master
+	# Tracking the denigiri PR branch (ArkLabsHQ/arkade-regtest#27) which
+	# replaces nigiri + the compiled-Go binary with a Node-orchestrated
+	# Docker Compose stack — no WSL or shell-script dependencies, runs
+	# the same on Windows / macOS / Linux. Switch back to `master` once
+	# #27 merges.
+	branch = denigiri-regtest

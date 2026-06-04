@@ -38,8 +38,11 @@ export {
 export {
   CoinflipSetupScript,
   CoinflipFinalScript,
+  CoinflipEscrowScript,
+  VARIABLE_ODDS_BASE_LEN,
   type CoinflipSetupOptions,
   type CoinflipFinalOptions,
+  type CoinflipEscrowOptions,
 } from './script'
 
 // Transaction building
@@ -48,10 +51,29 @@ export {
   getFinalScript,
   getSetupAddress,
   getFinalAddress,
+  getPlayerEscrowScript,
+  getHouseEscrowScript,
+  getPlayerEscrowAddress,
+  getHouseEscrowAddress,
   getPotAmount,
   buildGameTransactions,
+  buildClaimTransaction,
+  buildForfeitClaimTransaction,
+  buildCovenantSweepTransaction,
+  buildRefundTransaction,
+  getFinalOutpoint,
+  type ClaimArgs,
+  type EscrowInput,
+  type ForfeitClaimArgs,
+  type CovenantSweepArgs,
+  type RefundArgs,
   determineWinner,
   generateSecret,
+  generateRandomCoinSecret,
+  randomUniformInt,
+  determineVariableWinner,
+  generateVariableSecret,
+  computeVariableRoll,
   addConditionWitness,
   getConditionWitness,
   type BuiltOffchainTx,
@@ -75,3 +97,16 @@ export {
 // against — avoids dueling-instance issues when the SDK ends up installed
 // in multiple package node_modules trees.
 export { contractHandlers } from '@arkade-os/sdk'
+
+// Arkade-script forfeit support — see arkade-forfeit.ts module header.
+export {
+  ARKADE_OP,
+  arkadeScriptHash,
+  computeArkadeScriptPublicKey,
+  buildForfeitArkadeScript,
+  buildForfeitLeafSpec,
+  type ForfeitLeafSpec,
+  encodeEmulatorWitness,
+  encodeOutputIndexWitness,
+  addEmulatorPacket,
+} from './arkade-forfeit'

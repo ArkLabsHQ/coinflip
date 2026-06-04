@@ -1,15 +1,18 @@
 {
   "name": "my-vue-app",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "serve": "vue-cli-service serve src/main.ts",
     "build": "vue-cli-service build",
-    "lint": "vue-cli-service lint"
+    "lint": "vue-cli-service lint",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest"
   },
   "dependencies": {
-    "@arkade-os/boltz-swap": "^0.3.32",
-    "@arkade-os/sdk": "^0.4.27",
+    "@3d-dice/dice-box-threejs": "^0.0.12",
+    "@arkade-os/boltz-swap": "^0.3.37",
+    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.32-arkade-script-6fb717f.tgz",
     "@noble/secp256k1": "^2.1.0",
     "@scure/base": "^1.2.1",
     "@scure/btc-signer": "^1.5.0",
@@ -40,8 +43,13 @@
     "@vue/eslint-config-typescript": "^11.0.3",
     "eslint": "^8.42.0",
     "eslint-plugin-vue": "^9.14.1",
+    "jsdom": "^29.1.1",
     "sass": "^1.63.4",
-    "sass-loader": "^13.3.2"
+    "sass-loader": "^13.3.2",
+    "vitest": "^4.1.8"
+  },
+  "overrides": {
+    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.32-arkade-script-6fb717f.tgz"
   },
   "eslintConfig": {
     "root": true,

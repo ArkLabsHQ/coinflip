@@ -4,13 +4,13 @@
   "description": "Coinflip house mode server with admin dashboard",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-assets.cjs",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@arkade-os/sdk": "^0.4.27",
+    "@arkade-os/sdk": "file:../../vendor/arkade-os-sdk-0.4.32-arkade-script-6fb717f.tgz",
     "@noble/secp256k1": "^2.1.0",
     "@scure/base": "^1.2.1",
     "arkade-coinflip": "file:../lib",

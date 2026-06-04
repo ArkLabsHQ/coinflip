@@ -285,6 +285,7 @@ import {
   type FeesResponse,
   type LimitsResponse,
 } from '@/services/boltz'
+import { copyToClipboard } from '@/utils/clipboard'
 
 export default {
   name: 'WalletView',
@@ -343,11 +344,7 @@ export default {
     }
 
     async function copyText(text: string) {
-      if (!text) return
-      try {
-        await navigator.clipboard.writeText(text)
-        showToast('Copied!')
-      } catch { /* ignore */ }
+      if (await copyToClipboard(text)) showToast('Copied!')
     }
 
     function calcReceive(amount: number): number {
@@ -486,8 +483,8 @@ export default {
       }
     }
 
-    function deleteWallet() {
-      store.dispatch('clearWallet')
+    async function deleteWallet() {
+      await store.dispatch('clearWallet')
       router.push('/setup')
     }
 

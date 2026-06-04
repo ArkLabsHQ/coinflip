@@ -25,8 +25,13 @@
           <span class="pnl-amount mono">{{ formattedPnl }}</span>
         </div>
         <button class="history-btn" title="Game history" @click="openHistory">&#9827;</button>
+        <router-link to="/how-it-works" class="history-btn help-btn" title="How it works">?</router-link>
       </div>
     </div>
+
+    <!-- Trustless safety net: if a game ever fails to resolve, the player's
+         escrowed stake is reclaimable here (no trust in the server). -->
+    <StalledBets />
 
     <!-- Sparkline row: last-50 win/loss results. Rollbit pattern. -->
     <div class="sparkline" v-if="sparkline.length">
@@ -39,9 +44,18 @@
       />
     </div>
 
-    <!-- Centerpiece skin -->
+    <!-- Centerpiece skin. For skins that own their play gesture (Rocket),
+         pass the extra props the skin needs and bind its launch/cashout
+         events; non-gesture skins ignore the unknown props. -->
     <div class="skin-area" :class="{ playing: isFlipping }">
-      <component :is="currentSkin.component" :state="skinState" />
+      <component
+        :is="currentSkin.component"
+        :state="skinState"
+        :tier="selectedTier"
+        :odds-edge-bps="oddsEdgeBps"
+        @launch="onSkinLaunch"
+        @cashout="onSkinCashout"
+      />
     </div>
 
     <!-- Streak badge — appears at 3+ in a row. -->
@@ -57,67 +71,69 @@
         <TierSelector
           :tiers="tiers"
           :selected-tier="selectedTier"
-          :max-available="maxAvailable"
+          :affordable-tiers="affordableTiers"
           :player-balance="playerBalance"
           @select="selectedTier = $event"
         />
       </div>
 
-      <!-- Side selection only for skins where it's meaningful (coin). Default
-           is RANDOM so getting started is one click. Auto mode always
-           randomises, so the selector hides during auto. -->
-      <div v-if="currentSkin.supportsSide && !isAutoMode" class="side-selector">
-        <button
-          class="side-btn random"
-          :class="{ selected: selectedSide === 'random' }"
-          @click="selectedSide = 'random'"
-        >
-          <span class="side-icon">&#9858;</span>
-          RANDOM
-        </button>
-        <button
-          class="side-btn"
-          :class="{ selected: selectedSide === 'heads' }"
-          @click="selectedSide = 'heads'"
-        >
-          <span class="side-icon">&#x20BF;</span>
-          HEADS
-        </button>
-        <button
-          class="side-btn"
-          :class="{ selected: selectedSide === 'tails' }"
-          @click="selectedSide = 'tails'"
-        >
-          <span class="side-icon flipped">&#x20BF;</span>
-          TAILS
-        </button>
+      <!-- Odds slider: walks the active skin's bet ladder — slide right for
+           more coins / reels / dice (lower win rate, bigger payout). The exact
+           win chance + multiple update live; all enforced on-chain. The top end
+           is clamped to what the house bankroll can cover for this stake. -->
+      <div v-if="!isAutoMode" class="odds-slider">
+        <div class="odds-readout">
+          <span class="odds-step-label">{{ stepLabel }}</span>
+          <span class="odds-stats">
+            <span class="win-pct">{{ winPctLabel }} win</span>
+            <span class="payout-mult">{{ payoutMult(selectedBet) }}</span>
+          </span>
+        </div>
+        <input
+          class="odds-range"
+          type="range"
+          :min="minStep"
+          :max="maxStep"
+          step="1"
+          v-model.number="sliderIndex"
+          aria-label="Odds"
+        />
+        <div class="odds-ends">
+          <span>safer · bigger chance</span>
+          <span>riskier · bigger payout</span>
+        </div>
       </div>
 
-      <div class="auto-selector">
+      <!-- Auto-batch + FLIP button only when the skin doesn't own the
+           play gesture. Rocket renders its own LAUNCH / CASH OUT inside
+           the centerpiece. -->
+      <template v-if="!skinOwnsGesture">
+        <div class="auto-selector">
+          <button
+            v-for="opt in autoOptions"
+            :key="opt.label"
+            class="auto-chip"
+            :class="{ selected: autoCount === opt.value }"
+            :disabled="isAutoRunning"
+            @click="selectAuto(opt.value)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+
         <button
-          v-for="opt in autoOptions"
-          :key="opt.label"
-          class="auto-chip"
-          :class="{ selected: autoCount === opt.value }"
-          :disabled="isAutoRunning"
-          @click="selectAuto(opt.value)"
+          class="flip-btn"
+          :class="{ active: canFlip, stop: isAutoRunning }"
+          :disabled="!canFlip && !isAutoRunning"
+          @click="doFlip"
         >
-          {{ opt.label }}
+          <template v-if="isAutoRunning">STOP ({{ autoRemainingLabel }} LEFT)</template>
+          <template v-else-if="isAutoMode">{{ isFlipping ? 'FLIPPING...' : `AUTO ×${autoCountLabel}` }}</template>
+          <template v-else>{{ isFlipping ? 'FLIPPING...' : 'FLIP IT' }}</template>
         </button>
-      </div>
 
-      <button
-        class="flip-btn"
-        :class="{ active: canFlip, stop: isAutoRunning }"
-        :disabled="!canFlip && !isAutoRunning"
-        @click="doFlip"
-      >
-        <template v-if="isAutoRunning">STOP ({{ autoRemainingLabel }} LEFT)</template>
-        <template v-else-if="isAutoMode">{{ isFlipping ? 'FLIPPING...' : `AUTO ×${autoCountLabel}` }}</template>
-        <template v-else>{{ isFlipping ? 'FLIPPING...' : 'FLIP IT' }}</template>
-      </button>
-
-      <div class="hotkey-hint" v-if="!isAutoMode && !isFlipping && canFlip">Press Enter to flip</div>
+        <div class="hotkey-hint" v-if="!isAutoMode && !isFlipping && canFlip">Press Enter to flip</div>
+      </template>
     </div>
 
     <div v-if="error" class="error-toast">{{ error }}</div>
@@ -155,9 +171,9 @@ import { defineComponent, ref, computed, onMounted, onUnmounted, watch } from 'v
 import { useStore } from 'vuex'
 import TierSelector from '@/components/TierSelector.vue'
 import GameHistoryList, { type GameHistoryItem } from '@/components/GameHistoryList.vue'
-import { getTiers, play, sign } from '@/services/api'
-import { createHash } from '@/utils/crypto'
-import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState } from '@/skins'
+import StalledBets from '@/components/StalledBets.vue'
+import { getTiers } from '@/services/api'
+import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState, type OddsBet } from '@/skins'
 
 const AUTO_OPTIONS = [
   { label: 'OFF', value: null },
@@ -183,7 +199,7 @@ interface SlabResult { won: boolean; amount: number }
 
 export default defineComponent({
   name: 'PlayView',
-  components: { TierSelector, GameHistoryList },
+  components: { TierSelector, GameHistoryList, StalledBets },
   emits: ['open-wallet'],
   setup(_props, { emit }) {
     const store = useStore()
@@ -191,21 +207,95 @@ export default defineComponent({
     // ── Game config ───────────────────────────────────────────────────
     const tiers = ref<number[]>([1000, 5000, 10000, 50000])
     const maxAvailable = ref(50000)
+    // House spendable — the real ceiling on a payout (sizes the odds slider).
+    const houseBankroll = ref(0)
+    // arkd dust limit + variable-odds house edge — used to clamp the slider's
+    // SAFE end (a high-win bet's house stake must clear dust, or the server
+    // rejects it). Defaults mirror the server.
+    const dust = ref(546)
+    const oddsEdgeBps = ref(300)
     const houseReady = ref(false)
     const selectedTier = ref<number | null>(null)
-    // 'random' (default) flips a random side each play — getting started is
-    // one click. 'heads'/'tails' are explicit player calls (coin skin only).
-    const selectedSide = ref<'heads' | 'tails' | 'random'>('random')
+
+    // ── Skin selection (early, so the odds slider can read the ladder) ──
+    const currentSkinId = ref(getSavedSkinId())
+    const currentSkin = computed(() => findSkin(currentSkinId.value))
+
+    // ── Odds slider ───────────────────────────────────────────────────
+    // The slider walks the active skin's bet ladder (strictly decreasing win
+    // rate — more coins / reels / dice). `sliderIndex` is the position.
+    const sliderIndex = ref(currentSkin.value.defaultStep)
+    const currentSkinLadder = computed(() => currentSkin.value.oddsLadder)
+    // The house escrow for a bet, mirroring the server's computeHouseStake
+    // (house-edged): tier·(n−win)/win, trimmed by the edge. House stake RISES
+    // with payout, so the ladder's playable window is a contiguous band:
+    //   floor = first step whose stake clears dust (safe end, tiny stakes),
+    //   ceiling = last step the bankroll can cover (risky end, big stakes).
+    function houseStakeAt(tier: number, bet: OddsBet): number {
+      const win = bet.target - bet.lo
+      return Math.floor((tier * (bet.n - win) * (10000 - oddsEdgeBps.value)) / (win * 10000))
+    }
+    function houseStakeOf(bet: OddsBet): number {
+      return houseStakeAt(selectedTier.value ?? 0, bet)
+    }
+    // A tier is offerable only if the CURRENT skin has at least one odds step
+    // whose house stake both clears dust and fits the house bankroll. Capping on
+    // the house STAKE (not the player's tier) matters for variable odds: a
+    // high-win bet's house stake is far below the tier, so a tier-vs-bankroll
+    // check would wrongly hide affordable bets. The slider then clamps the odds
+    // range within the chosen tier; the server backstops over-cap bets.
+    const affordableTiers = computed<number[]>(() =>
+      tiers.value.filter((t) =>
+        currentSkinLadder.value.some((b) => {
+          const s = houseStakeAt(t, b)
+          return s >= dust.value && s <= houseBankroll.value
+        }),
+      ),
+    )
+    const minStep = computed(() => {
+      const ladder = currentSkinLadder.value
+      if (!selectedTier.value) return 0
+      for (let i = 0; i < ladder.length; i++) if (houseStakeOf(ladder[i]) >= dust.value) return i
+      return ladder.length - 1 // nothing clears dust at this tier → pin to the riskiest
+    })
+    const maxStep = computed(() => {
+      const ladder = currentSkinLadder.value
+      if (!selectedTier.value) return ladder.length - 1
+      let max = minStep.value
+      for (let i = 0; i < ladder.length; i++) {
+        if (houseStakeOf(ladder[i]) <= houseBankroll.value) max = i
+        else break
+      }
+      return Math.max(max, minStep.value)
+    })
+    const safeStep = computed(() => Math.min(Math.max(sliderIndex.value, minStep.value), maxStep.value))
+    const selectedBet = computed<OddsBet>(() => currentSkinLadder.value[safeStep.value])
+    const stepLabel = computed(() => currentSkin.value.stepLabel(selectedBet.value, safeStep.value))
+    const winPctLabel = computed(() => {
+      const b = selectedBet.value
+      const p = ((b.target - b.lo) / b.n) * 100
+      return (p >= 10 ? Math.round(p) : Math.round(p * 10) / 10) + '%'
+    })
+    // Fair payout multiple (the house edge trims the actual payout, never the
+    // win probability — so the win% shown is exact, the multiple is pre-edge).
+    function payoutMult(bet: OddsBet): string {
+      const m = bet.n / (bet.target - bet.lo)
+      return (Number.isInteger(m) ? String(m) : m.toFixed(1)) + '×'
+    }
 
     // ── Flip lifecycle state ──────────────────────────────────────────
-    const phase = ref<'idle' | 'flipping' | 'resolved'>('idle')
-    const outcome = ref<{ won: boolean; side: 'heads' | 'tails' } | null>(null)
+    // `climbing` and `settling` are for skins that own their play gesture
+    // (Rocket): launch → climb → cashout → settle. Standard skins only
+    // ever see idle / flipping / resolved.
+    const phase = ref<'idle' | 'flipping' | 'resolved' | 'climbing' | 'settling'>('idle')
+    const outcome = ref<{ won: boolean; side: 'heads' | 'tails'; roll: number | null } | null>(null)
     const isFlipping = ref(false)
     const error = ref<string | null>(null)
 
     const skinState = computed<SkinState>(() => ({
       phase: phase.value,
       outcome: outcome.value,
+      odds: selectedBet.value,
     }))
 
     // ── Auto-flip state ───────────────────────────────────────────────
@@ -218,11 +308,30 @@ export default defineComponent({
     const autoRemainingLabel = computed(() => isFinite(autoRemaining.value) ? String(autoRemaining.value) : '∞')
 
     // ── Skin selection ────────────────────────────────────────────────
-    const currentSkinId = ref(getSavedSkinId())
-    const currentSkin = computed(() => findSkin(currentSkinId.value))
+    // (currentSkinId / currentSkin are declared above with the odds slider.)
+    const skinOwnsGesture = computed(() => currentSkin.value.ownsPlayGesture === true)
     function selectSkin(id: string) {
       currentSkinId.value = id
       saveSkinId(id)
+      // Reset to idle so a half-played gesture in the previous skin
+      // doesn't bleed into the new one.
+      phase.value = 'idle'
+      outcome.value = null
+    }
+
+    /** Skin emitted `launch` — start the climb. (Only the Rocket skin does this today.) */
+    function onSkinLaunch() {
+      if (isFlipping.value) return
+      phase.value = 'climbing'
+      outcome.value = null
+      error.value = null
+    }
+
+    /** Skin emitted `cashout` with the locked-in bet — commit it via flipOnce. */
+    async function onSkinCashout(bet: OddsBet) {
+      if (isFlipping.value) return
+      phase.value = 'settling'
+      await flipOnce(bet)
     }
 
     // ── History modal ─────────────────────────────────────────────────
@@ -279,6 +388,9 @@ export default defineComponent({
         const data = await getTiers()
         tiers.value = data.tiers
         maxAvailable.value = data.maxAvailable
+        houseBankroll.value = data.houseBankroll ?? data.maxAvailable
+        if (data.dust) dust.value = data.dust
+        if (data.oddsEdgeBps !== undefined) oddsEdgeBps.value = data.oddsEdgeBps
         houseReady.value = data.houseReady
         // Pre-select the cheapest affordable tier so getting started is one
         // click. Only set on first load (don't override a manual pick).
@@ -290,15 +402,9 @@ export default defineComponent({
       }
     }
 
-    /** Resolve the side to actually play: explicit pick, or a coin toss. */
-    function resolveSide(): 'heads' | 'tails' {
-      if (selectedSide.value === 'random') return Math.random() < 0.5 ? 'heads' : 'tails'
-      return selectedSide.value
-    }
-
     // ── Stats recording ───────────────────────────────────────────────
     let sparkKey = 0
-    function recordResult(side: 'heads' | 'tails', won: boolean, payout: number) {
+    function recordResult(won: boolean, payout: number, roll: number | null) {
       const tier = selectedTier.value ?? 0
       const net = won ? payout - tier : -tier
 
@@ -322,8 +428,9 @@ export default defineComponent({
       sparkline.value.push({ won, key: ++sparkKey })
       if (sparkline.value.length > SPARKLINE_MAX) sparkline.value.shift()
 
-      // Outcome for the skin
-      outcome.value = { won, side }
+      // Outcome for the skin (roll = the variable-odds value; side is vestigial
+      // now that every bet is variable-odds — kept for the SkinState shape).
+      outcome.value = { won, side: 'heads', roll }
       phase.value = 'resolved'
 
       // Slab
@@ -340,15 +447,25 @@ export default defineComponent({
     }
 
     // ── Single flip ───────────────────────────────────────────────────
-    async function flipOnce(side: 'heads' | 'tails'): Promise<boolean> {
+    /**
+     * Commit one game. `overrideBet` lets a skin that owns its play gesture
+     * (Rocket) pass the bet it locked in at cashout — which may differ from
+     * the parent slider's current step. When absent, falls back to
+     * `selectedBet.value` (the slider's current position).
+     */
+    async function flipOnce(overrideBet?: OddsBet): Promise<boolean> {
       if (!selectedTier.value) return false
 
       // Mark busy but DON'T animate yet — we only spin once the bet is
       // actually placed on the server, so a rejected bet (insufficient
       // balance, house busy, validation) never shows a phantom flip.
       isFlipping.value = true
-      phase.value = 'idle'
-      outcome.value = null
+      // For gesture-owning skins, keep the 'settling' phase so the skin
+      // doesn't flicker through 'idle' between cashout and flipping.
+      if (!skinOwnsGesture.value) {
+        phase.value = 'idle'
+        outcome.value = null
+      }
       error.value = null
 
       try {
@@ -356,39 +473,32 @@ export default defineComponent({
           throw new Error('Wallet not connected — open the wallet drawer to reconnect.')
         }
 
-        const pubkey = store.state.wallet.publicKey
-        const secretLen = side === 'heads' ? 15 : 16
-        const secretBytes = new Uint8Array(secretLen)
-        crypto.getRandomValues(secretBytes)
-        const secretHex = Array.from(secretBytes).map((b) => b.toString(16).padStart(2, '0')).join('')
-        const playerHash = await createHash(secretBytes)
-
-        const playerVtxos = await store.dispatch('ark/selectPlayerVtxoInputs', selectedTier.value)
         const playerChangeAddress = store.getters['ark/address']
         if (!playerChangeAddress) throw new Error('No Ark address available — wallet still connecting?')
 
-        // Place the bet. Once this resolves the game exists server-side, so
-        // it's safe to start the flip animation.
-        const playResult = await play(selectedTier.value, side, pubkey, playerHash, playerVtxos, playerChangeAddress)
-
         phase.value = 'flipping'
 
-        // Keep animating until the result is in — and for at least
-        // MIN_FLIP_MS so a fast resolution still reads as a real flip.
-        const [signResult] = await Promise.all([
-          sign(playResult.gameId, [], '', secretHex),
+        // Trustless settlement: the store action escrows the player's stake,
+        // reveals, and (on a win) sweeps the pot — all on-Ark. Keep animating
+        // for at least MIN_FLIP_MS so a fast resolution still reads as a flip.
+        const bet = overrideBet ?? selectedBet.value
+        const [result] = await Promise.all([
+          store.dispatch('ark/playTrustlessGame', {
+            tier: selectedTier.value,
+            oddsN: bet.n, oddsTarget: bet.target, oddsLo: bet.lo,
+          }),
           new Promise((r) => setTimeout(r, MIN_FLIP_MS)),
         ])
 
-        recordResult(side, signResult.winner === 'player', signResult.payout)
+        recordResult(result.winner === 'player', result.payout, result.roll ?? null)
 
         const historyEntry = {
-          id: playResult.gameId,
+          id: `${Date.now()}`,
           tier: selectedTier.value,
-          playerChoice: side,
-          winner: signResult.winner,
-          rakeAmount: signResult.rake,
-          payoutAmount: signResult.payout,
+          playerChoice: stepLabel.value,
+          winner: result.winner,
+          rakeAmount: result.rake,
+          payoutAmount: result.payout,
           status: 'resolved',
           createdAt: new Date().toISOString(),
           resolvedAt: new Date().toISOString(),
@@ -397,7 +507,6 @@ export default defineComponent({
         history.unshift(historyEntry)
         localStorage.setItem('gameHistory', JSON.stringify(history.slice(0, 100)))
 
-        await store.dispatch('ark/refreshBalance').catch(() => { /* non-fatal */ })
         setTimeout(() => {
           store.dispatch('ark/refreshBalance').catch(() => { /* deferred for indexer lag */ })
         }, 2000)
@@ -427,8 +536,7 @@ export default defineComponent({
       autoRemaining.value = autoCount.value === Infinity ? Infinity : autoCount.value
 
       while (autoRemaining.value > 0 && !stopRequested.value) {
-        const side: 'heads' | 'tails' = Math.random() < 0.5 ? 'heads' : 'tails'
-        const ok = await flipOnce(side)
+        const ok = await flipOnce()
         if (!ok) break
         if (isFinite(autoRemaining.value)) autoRemaining.value -= 1
         if (autoRemaining.value > 0 && !stopRequested.value) {
@@ -450,7 +558,7 @@ export default defineComponent({
         await runAuto()
         return
       }
-      await flipOnce(resolveSide())
+      await flipOnce()
     }
 
     // ── Keyboard hotkey: Enter to re-flip ─────────────────────────────
@@ -485,15 +593,22 @@ export default defineComponent({
       if (slabTimer) clearTimeout(slabTimer)
     })
 
-    // Reset streak silently to 0 when starting a fresh session via PnL reload —
-    // not strictly necessary, just guards against runaway counters.
+    // Switching skins swaps in that skin's own ladder — reset the slider to the
+    // new skin's default step, clamped into the playable [dust, bankroll] window.
     watch(currentSkinId, () => {
-      // Cosmetic: skin change doesn't reset stats. Future: per-skin stats.
+      sliderIndex.value = Math.min(Math.max(currentSkin.value.defaultStep, minStep.value), maxStep.value)
+    })
+    // Keep the thumb inside the playable window when the stake changes — the
+    // bankroll ceiling drops and the dust floor rises as the tier moves.
+    watch([minStep, maxStep], ([lo, hi]) => {
+      sliderIndex.value = Math.min(Math.max(sliderIndex.value, lo), hi)
     })
 
     return {
       // Game config
-      tiers, maxAvailable, houseReady, selectedTier, selectedSide,
+      tiers, maxAvailable, affordableTiers, houseReady, selectedTier,
+      // Odds slider
+      sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctLabel, payoutMult,
       // Lifecycle
       isFlipping, error, skinState, phase,
       // Auto
@@ -501,6 +616,8 @@ export default defineComponent({
       autoCountLabel, autoRemainingLabel,
       // Skin
       skins: SKINS, currentSkinId, currentSkin, selectSkin,
+      skinOwnsGesture, onSkinLaunch, onSkinCashout,
+      oddsEdgeBps,
       // History modal
       historyOpen, historyGames, openHistory,
       // Stats
@@ -713,51 +830,6 @@ export default defineComponent({
   width: 100%;
 }
 
-/* Side selector */
-.side-selector {
-  display: flex;
-  gap: 10px;
-  justify-content: center;
-  width: 100%;
-  max-width: 340px;
-}
-.side-btn {
-  flex: 1;
-  background: var(--bg-elevated);
-  border: 1.5px solid var(--border-light);
-  color: var(--text-dim);
-  border-radius: 12px;
-  padding: 14px 12px;
-  font-size: 0.85rem;
-  font-weight: 700;
-  letter-spacing: 1.5px;
-  cursor: pointer;
-  transition: all 0.18s;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  font-family: inherit;
-}
-.side-icon { font-size: 1.4rem; color: var(--gold); opacity: 0.5; transition: opacity 0.18s; }
-.side-icon.flipped { transform: scaleX(-1); filter: brightness(0.8); }
-.side-btn:hover { border-color: var(--blue); color: var(--text); }
-.side-btn:hover .side-icon { opacity: 0.8; }
-.side-btn.selected {
-  border-color: var(--blue);
-  background: rgba(56, 189, 248, 0.08);
-  color: var(--blue);
-  box-shadow: 0 0 16px var(--blue-glow);
-}
-.side-btn.selected .side-icon { opacity: 1; color: var(--blue); }
-.side-btn.random.selected {
-  border-color: var(--gold);
-  background: rgba(247, 201, 72, 0.08);
-  color: var(--gold);
-  box-shadow: 0 0 16px var(--gold-glow);
-}
-.side-btn.random.selected .side-icon { opacity: 1; color: var(--gold); }
-
 .auto-call-badge {
   display: inline-flex;
   align-items: center;
@@ -803,6 +875,81 @@ export default defineComponent({
   color: var(--gold);
 }
 .auto-chip:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Odds slider */
+.odds-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 340px;
+}
+.odds-readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.odds-step-label {
+  font-size: 0.92rem;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: var(--gold);
+}
+.odds-readout .odds-stats {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.win-pct {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.payout-mult {
+  font-size: 0.95rem;
+  font-weight: 800;
+  font-family: ui-monospace, monospace;
+  color: var(--green, #22c55e);
+}
+.odds-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--green, #22c55e) 0%, var(--gold) 55%, var(--red) 100%);
+  outline: none;
+  cursor: pointer;
+}
+.odds-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--gold);
+  border: 2px solid var(--bg);
+  box-shadow: 0 0 10px var(--gold-glow);
+  cursor: pointer;
+}
+.odds-range::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--gold);
+  border: 2px solid var(--bg);
+  box-shadow: 0 0 10px var(--gold-glow);
+  cursor: pointer;
+}
+.odds-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.58rem;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
 
 /* Flip button */
 .flip-btn {

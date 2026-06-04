@@ -2,6 +2,11 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Vendored @arkade-os/sdk tarball — package.json depends on
+# `file:./vendor/...` while we track the arkade-script-final branch
+# (PR arkade-os/ts-sdk#319). Must be in place BEFORE npm install.
+COPY vendor/ ./vendor/
+
 # Copy package files
 COPY package.json package-lock.json* yarn.lock* ./
 

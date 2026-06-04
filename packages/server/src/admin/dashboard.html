@@ -67,6 +67,15 @@
     letter-spacing: 1px;
     margin-bottom: 16px;
   }
+  .section h3.op-label {
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin: 20px 0 10px;
+    font-weight: 600;
+  }
+  .op-hint { color: var(--muted); font-size: 0.72rem; margin-top: 8px; }
 
   .address-box {
     background: var(--bg);
@@ -255,6 +264,14 @@
       <div class="label">VTXOs</div>
       <div class="value games" id="vtxoCount">—</div>
     </div>
+    <div class="stat-card">
+      <div class="label">Active Games</div>
+      <div class="value games" id="activeGames">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">In-flight Liability</div>
+      <div class="value negative" id="liability">—</div>
+    </div>
   </div>
 
   <div class="section">
@@ -285,6 +302,52 @@
   </div>
 
   <div class="section">
+    <h2>Wallet Operations</h2>
+
+    <h3 class="op-label">Move Funds Out</h3>
+    <div class="config-row">
+      <input type="text" id="sendAddress" placeholder="Destination address (Ark or on-chain)" style="flex:1;min-width:280px">
+    </div>
+    <div class="config-row">
+      <input type="number" id="sendAmount" placeholder="Amount (sats)" style="width:160px" min="1" step="1" oninput="updateSendBtc()">
+      <label style="min-width:auto;display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="sendForce" style="width:auto"> force (ignore reserved)
+      </label>
+      <button class="btn" onclick="doSend()">Send</button>
+    </div>
+    <p class="op-hint" id="sendBtcReadout">Amount is in <strong>sats</strong> (whole numbers). 0.005 BTC = 500,000 sats.</p>
+    <p class="op-hint">Withdrawals are capped at available − in-flight liability unless "force" is set, so funds owed to live games aren't drained.</p>
+
+    <h3 class="op-label">Settle / Renew VTXOs</h3>
+    <div class="config-row">
+      <button class="btn btn-gold" onclick="doSettle()">Settle now</button>
+      <span class="op-hint" style="margin:0">Joins a settlement round to renew expiring VTXOs and confirm boarding deposits into Ark.</span>
+    </div>
+
+    <h3 class="op-label">Fragment / Redistribute Pool</h3>
+    <div class="config-row">
+      <label>Target #:</label>
+      <input type="number" id="fragTarget" placeholder="e.g. 8" style="width:90px" min="1">
+      <label>Piece size:</label>
+      <input type="number" id="fragPiece" placeholder="sats" style="width:120px" min="1" value="50000">
+      <button class="btn" onclick="doFragment()">Split</button>
+    </div>
+    <p class="op-hint">Splits large house VTXOs into uniform pieces so concurrent games can each reserve their own.</p>
+  </div>
+
+  <div class="section">
+    <h2>House VTXOs</h2>
+    <table>
+      <thead>
+        <tr><th>Outpoint</th><th>Value</th><th>Expiry</th><th>Reserved By</th></tr>
+      </thead>
+      <tbody id="vtxosTable">
+        <tr><td colspan="4" class="empty">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
     <h2>Configuration</h2>
     <div class="config-row">
       <label>Rake:</label>
@@ -293,6 +356,12 @@
         <option value="percentage">%</option>
         <option value="flat">sats (flat)</option>
       </select>
+      <button class="btn btn-small" onclick="saveConfig()">Save</button>
+    </div>
+    <div class="config-row">
+      <label>House edge:</label>
+      <input type="number" id="oddsEdgeBps" style="width:90px" min="0" max="9999">
+      <span style="color:var(--muted)">bps (variable-odds)</span>
       <button class="btn btn-small" onclick="saveConfig()">Save</button>
     </div>
     <div class="config-row">
@@ -312,6 +381,15 @@
 
   <div class="section">
     <h2>Recent Games</h2>
+    <div class="config-row">
+      <label>Status:</label>
+      <select id="gameStatusFilter" onchange="loadGames()">
+        <option value="">all</option>
+        <option value="pending">pending</option>
+        <option value="resolved">resolved</option>
+        <option value="expired">expired</option>
+      </select>
+    </div>
     <table>
       <thead>
         <tr><th>ID</th><th>Tier</th><th>Winner</th><th>Rake</th><th>Status</th><th>Time</th></tr>
@@ -336,6 +414,9 @@
 
   <div class="toast" id="toast"></div>
 
+<!-- Shared amount classifier (single source of truth with the unit test).
+     Classic script: attaches window.AmountValidate before the inline code runs. -->
+<script src="amount-validate.js"></script>
 <script>
   let currentTiers = [];
 
@@ -398,6 +479,7 @@
       rakeValue: parseInt(document.getElementById('rakeValue').value) || 0,
       tiers: currentTiers,
       minHouseBalance: parseInt(document.getElementById('minBalance').value) || 0,
+      oddsEdgeBps: parseInt(document.getElementById('oddsEdgeBps').value) || 0,
     };
     await fetch('/api/config', {
       method: 'POST',
@@ -426,6 +508,7 @@
     document.getElementById('rakeValue').value = data.rakeValue;
     document.getElementById('rakeType').value = data.rakeType;
     document.getElementById('minBalance').value = data.minHouseBalance;
+    document.getElementById('oddsEdgeBps').value = data.oddsEdgeBps;
     currentTiers = data.tiers;
     renderTiers();
   }
@@ -454,7 +537,8 @@
   }
 
   async function loadGames() {
-    const res = await fetch('/api/games?limit=20');
+    const status = (document.getElementById('gameStatusFilter') || {}).value || '';
+    const res = await fetch('/api/games?limit=30' + (status ? '&status=' + status : ''));
     const games = await res.json();
     const tbody = document.getElementById('gamesTable');
     if (games.length === 0) {
@@ -524,12 +608,123 @@
     }).join('');
   }
 
+  async function loadReservations() {
+    const res = await fetch('/api/reservations');
+    if (!res.ok) return;
+    const data = await res.json();
+    document.getElementById('activeGames').textContent = data.activeGames;
+    const liabEl = document.getElementById('liability');
+    liabEl.textContent = fmt(data.totalLiability) + ' sats';
+    liabEl.className = 'value ' + (data.totalLiability > 0 ? 'negative' : 'games');
+  }
+
+  async function loadVtxos() {
+    const res = await fetch('/api/vtxos');
+    const vtxos = await res.json();
+    const tbody = document.getElementById('vtxosTable');
+    if (!Array.isArray(vtxos) || vtxos.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty">No VTXOs</td></tr>';
+      return;
+    }
+    // Reserved first, then largest value first.
+    vtxos.sort((a, b) => (b.reservedBy ? 1 : 0) - (a.reservedBy ? 1 : 0) || b.value - a.value);
+    tbody.innerHTML = vtxos.map(v => {
+      const op = v.txid.substring(0, 8) + '…:' + v.vout;
+      const reserved = v.reservedBy
+        ? `<span class="badge badge-sent">${v.reservedBy.substring(0, 8)}</span>`
+        : '<span class="badge badge-settled">free</span>';
+      const expiry = v.expiringSoon
+        ? '<span class="badge badge-loss">soon</span>'
+        : (v.batchExpiry ? '<span class="badge badge-unsettled">active</span>' : '—');
+      return `<tr>
+        <td class="txid-cell" onclick="copyTxid('${v.txid}:${v.vout}')" title="${v.txid}:${v.vout}">${op}</td>
+        <td>${fmt(v.value)}</td>
+        <td>${expiry}</td>
+        <td>${reserved}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Live BTC equivalent under the sats field, so a BTC-style entry (the classic
+  // "0.005" mistake — parseInt truncates it to 0) is caught by eye before Send.
+  // Classification logic lives in amount-validate.js (loaded as a global) so
+  // it's a single source of truth shared with the unit test.
+  function updateSendBtc() {
+    const el = document.getElementById('sendBtcReadout');
+    const c = AmountValidate.classifySendAmount(document.getElementById('sendAmount').value);
+    if (c.state === 'empty') { el.innerHTML = 'Amount is in <strong>sats</strong> (whole numbers). 0.005 BTC = 500,000 sats.'; return; }
+    if (c.state === 'invalid') { el.textContent = 'Enter a positive whole number of sats.'; return; }
+    if (c.state === 'fractional') {
+      el.innerHTML = '⚠ Sats must be a whole number — looks like a BTC amount. ' +
+        c.suggestedSats.toLocaleString() + ' sats?';
+      return;
+    }
+    el.textContent = '= ' + c.btc + ' BTC';
+  }
+
+  async function doSend() {
+    const address = document.getElementById('sendAddress').value.trim();
+    const raw = document.getElementById('sendAmount').value.trim();
+    const c = AmountValidate.classifySendAmount(raw);
+    const force = document.getElementById('sendForce').checked;
+    if (!address) { showToast('Enter a destination address'); return; }
+    if (c.state === 'empty' || c.state === 'invalid') { showToast('Enter an amount in sats'); return; }
+    if (c.state === 'fractional') {
+      showToast('Amount must be a whole number of sats (' + c.suggestedSats.toLocaleString() + ' for ' + raw + ' BTC?)');
+      return;
+    }
+    const amount = c.sats;
+    if (!confirm(`Send ${fmt(amount)} sats to ${address.substring(0, 24)}…?`)) return;
+    const res = await fetch('/api/wallet/send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address, amount, force }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast(data.error || 'Send failed'); return; }
+    showToast('Sent! txid ' + String(data.txid || '').substring(0, 12) + '…');
+    document.getElementById('sendAmount').value = '';
+    document.getElementById('sendForce').checked = false;
+    updateSendBtc();
+    refresh();
+  }
+
+  async function doSettle() {
+    if (!confirm('Join a settlement round now to renew VTXOs / confirm boarding?')) return;
+    showToast('Settling…');
+    const res = await fetch('/api/wallet/settle', { method: 'POST' });
+    const data = await res.json();
+    if (res.status === 202) { showToast(data.message || 'Settle in progress…'); return; }
+    if (!res.ok) { showToast(data.error || 'Settle failed'); return; }
+    showToast('Settled!');
+    refresh();
+  }
+
+  async function doFragment() {
+    const targetRaw = parseInt(document.getElementById('fragTarget').value);
+    const pieceSize = parseInt(document.getElementById('fragPiece').value) || 50000;
+    const body = { pieceSize };
+    if (targetRaw && targetRaw > 0) body.targetCount = targetRaw;
+    showToast('Fragmenting…');
+    const res = await fetch('/api/wallet/fragment', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast(data.error || 'Fragment failed'); return; }
+    showToast(`Created ${data.created} piece(s)`);
+    refresh();
+  }
+
+  async function refresh() {
+    await Promise.all([loadStatus(), loadWallet(), loadGames(), loadActivity(), loadVtxos(), loadReservations()]);
+  }
+
   async function init() {
-    await Promise.all([loadStatus(), loadConfig(), loadWallet(), loadGames(), loadActivity()]);
+    await Promise.all([loadStatus(), loadConfig(), loadWallet(), loadGames(), loadActivity(), loadVtxos(), loadReservations()]);
   }
 
   init();
-  setInterval(() => { loadStatus(); loadGames(); loadActivity(); }, 10000);
+  setInterval(() => { loadStatus(); loadGames(); loadActivity(); loadVtxos(); loadReservations(); }, 10000);
 </script>
 </body>
 </html>

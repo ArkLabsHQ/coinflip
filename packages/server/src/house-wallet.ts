@@ -12,7 +12,10 @@ import { SQLiteContractRepository, SQLiteWalletRepository } from '@arkade-os/sdk
 import { getSqlExecutor } from './db.js'
 import type { ConfigRepository, HouseWalletRepository } from './repositories/types.js'
 
-const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh'
+// Canonical Ark server URL for the whole process. Exported so other modules
+// (e.g. crash-recovery reconciliation) resolve the same endpoint instead of
+// re-reading the env with their own divergent fallback.
+export const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'https://mutinynet.arkade.sh'
 // Optional. Leave unset to let the SDK auto-default esplora from the network
 // it detects at the Ark server (mutinynet → https://mempool.mutinynet.arkade.sh/api).
 // Set it explicitly for regtest/docker where the esplora host isn't the SDK default.

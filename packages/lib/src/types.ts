@@ -45,6 +45,58 @@ export interface Game {
   player?: PlayerData
   setupExpiration?: number
   finalExpiration?: number
+  /** Player stake in sats (= `betAmount`). Pinned into escrow covenants. */
+  playerStake?: number
+  /** House stake in sats (computed by the server). Pinned into escrow covenants. */
+  houseStake?: number
+  /**
+   * CSV exit_delay (seconds) for the unilateral exit-mirror leaves on
+   * `CoinflipEscrowScript`. Matches the operator's `unilateralExitDelay`
+   * from `arkInfo` and pins the timelock each user spends alone under.
+   */
+  exitDelay?: number
+  /**
+   * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the escrow win
+   * condition is `(oddsLo ?? 0) <= roll < oddsTarget` over `oddsN` outcomes
+   * (probability `(oddsTarget - (oddsLo ?? 0))/oddsN`); unset → the 50/50 coin.
+   * Flows into `CoinflipEscrowScript`.
+   */
+  oddsN?: number
+  oddsTarget?: number
+  oddsLo?: number
+  /**
+   * Compressed (33-byte) or x-only (32-byte) emulator pubkey. When set
+   * **together with** `playerForfeitPkScript`, `CoinflipEscrowScript`
+   * adds a 5th `playerForfeit` leaf — a `CLTVMultisigTapscript` closure
+   * (execution-bucket, arkd-recognized) wrapping an arkade-script covenant
+   * that enforces the spend pays `playerForfeitPkScript` exactly the
+   * configured per-escrow value. The CLTV gate uses `finalExpiration`,
+   * matching the `refund` leaf.
+   *
+   * Optional/additive: when undefined, the escrow keeps the 4-leaf layout
+   * and the CSV `playerPenalty` remains the only forfeit path. See
+   * `arkade-forfeit.ts` and the design doc in
+   * `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`.
+   */
+  emulatorPubkey?: Uint8Array
+  /**
+   * On-chain P2TR pkScript (`0x51 0x20 <32-byte witness program>`) of the
+   * player's payout address. Pinned into the playerForfeit arkade-script
+   * covenant; the spend MUST produce an output matching it exactly. The
+   * server derives this from the player's ArkAddress at game-creation
+   * time and persists it so /commit/refund/forfeit rebuilds derive the
+   * SAME taproot address as the original escrow.
+   */
+  playerForfeitPkScript?: Uint8Array
+  /**
+   * House's payout pkScript. When set alongside `emulatorPubkey` and
+   * `playerForfeitPkScript`, the escrow grows two covenant-resolved
+   * win leaves (`playerWinCovenant`, `creatorWinCovenant`) that let
+   * the server settle a resolved game with NO client signature. The
+   * server derives this from its own wallet's payout address at
+   * /play time.
+   */
+  housePayoutPkScript?: Uint8Array
 }
 
 // -- Game Events --

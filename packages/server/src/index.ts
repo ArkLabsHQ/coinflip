@@ -14,13 +14,16 @@ const { EventSource: NodeEventSource } = require('eventsource')
 
 import express from 'express'
 import cors from 'cors'
+import path from 'path'
+import fs from 'fs'
 import { contractHandlers } from '@arkade-os/sdk'
 import { registerCoinflipContracts } from 'arkade-coinflip'
 import { getSqlExecutor, initDb } from './db.js'
 import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
 import { attachContractEventHandler, initContractManager } from './contract-manager.js'
-import { startExpiryTimer } from './game-engine.js'
+import { startExpiryTimer, startRenewalTimer } from './game-engine.js'
+import { startEscrowRecoveryTimer, reconcilePendingSweeps } from './trustless-game.js'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
 import { createAdminRoutes } from './admin/routes.js'
@@ -34,7 +37,25 @@ export { getSqlExecutor, initDb } from './db.js'
 export { makeRepos } from './repositories/index.js'
 export { initHouseWallet } from './house-wallet.js'
 export { attachContractEventHandler, initContractManager } from './contract-manager.js'
-export { startExpiryTimer } from './game-engine.js'
+export { startExpiryTimer, startRenewalTimer, shouldRenew } from './game-engine.js'
+export {
+  handleTrustlessPlay,
+  handleTrustlessCommit,
+  handleTrustlessRefund,
+  handleTrustlessForfeit,
+  recoverOrphanedHouseEscrows,
+  reconcilePendingSweeps,
+  startEscrowRecoveryTimer,
+  type TrustlessPlayRequest,
+  type TrustlessPlayResult,
+  type TrustlessCommitRequest,
+  type TrustlessCommitResult,
+  type TrustlessRefundRequest,
+  type TrustlessRefundResult,
+  type TrustlessForfeitRequest,
+  type TrustlessForfeitResult,
+  type Outpoint,
+} from './trustless-game.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'
 export { createAdminRoutes } from './admin/routes.js'
@@ -62,8 +83,13 @@ export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<App
   registerCoinflipContracts(contractHandlers)
   await initDb()
   const repos = makeRepos(getSqlExecutor())
+  // Default the SDK's auto-renewal loop OFF (settlementConfig:false). It fires a
+  // settle every ~30s that arkd rejects with INTENT_INSUFFICIENT_FEE, churning
+  // and slowly degrading the house VTXO pool. Renewal is instead driven by the
+  // gated `startRenewalTimer` (long cadence, only when VTXOs are expiring or
+  // boarding needs confirming). Callers (tests) may override.
   const { wallet, identity, arkInfo } = await initHouseWallet(repos, {
-    settlementConfig: options.walletSettlementConfig,
+    settlementConfig: options.walletSettlementConfig ?? false,
   })
   const contractManager = await initContractManager(wallet, { repos })
   const deps: AppDeps = { repos, wallet, identity, arkInfo, contractManager }
@@ -75,13 +101,35 @@ async function main() {
   console.log('Bootstrapping server dependencies...')
   const deps = await bootstrapDeps()
 
+  // Probe the arkade-script emulator early so the boot log shows whether
+  // new games will use the 5-leaf escrow or fall back to the 4-leaf CSV
+  // path. loadEmulatorConfig is cache-backed, so this is the only network
+  // hit per process lifetime.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  await (await import('./emulator.js')).loadEmulatorConfig()
+
   // Rebuild VTXO reservations from any pending games that survived a restart,
   // then keep a healthy pool of distinct house VTXOs for concurrent play.
   await rebuildReservations(deps)
+
+  // Resolve any games left `pending` by a crash mid house-win sweep (their
+  // escrow is already spent) before the expiry timer can flip them to expired.
+  await reconcilePendingSweeps(deps).catch((e) =>
+    console.error('[reconcile] boot pass failed:', e instanceof Error ? e.message : e),
+  )
+
   startPoolMaintenance(deps)
 
   // Start game expiry timer
   startExpiryTimer(deps)
+
+  // Reclaim orphaned house escrows from stalled games once their refund CLTV
+  // matures, so abandoned games don't slowly lock up house funds.
+  startEscrowRecoveryTimer(deps)
+
+  // Renew expiring VTXOs + confirm boarding deposits on a long cadence (only
+  // when there's something to do — no per-poll batch-fee drain).
+  startRenewalTimer(deps)
 
   // Public API server
   const publicApp = express()
@@ -94,8 +142,24 @@ async function main() {
 
   publicApp.use(createPublicRoutes(deps))
 
+  // Single-image mode: when CLIENT_DIR is set (the bundled image), the public
+  // port also serves the built Vue client + an SPA fallback, so the player gets
+  // the app and the /api on one origin — no separate nginx. Mounted AFTER the
+  // API routes so /api and /health win; the fallback skips them so an unknown
+  // API path still 404s instead of returning index.html.
+  const clientDir = process.env.CLIENT_DIR
+  if (clientDir && fs.existsSync(clientDir)) {
+    publicApp.use(express.static(clientDir))
+    publicApp.use((req, res, next) => {
+      if (req.method !== 'GET') return next()
+      if (req.path.startsWith('/api') || req.path === '/health') return next()
+      res.sendFile(path.join(clientDir, 'index.html'))
+    })
+    console.log(`Serving bundled client from ${clientDir}`)
+  }
+
   publicApp.listen(PUBLIC_PORT, () => {
-    console.log(`Public API listening on port ${PUBLIC_PORT}`)
+    console.log(`Public API (+ client when CLIENT_DIR set) listening on port ${PUBLIC_PORT}`)
   })
 
   // Admin API server

@@ -106,6 +106,37 @@ export default defineComponent({
   .balance-unit { color: var(--text-muted); font-size: 0.72rem; }
 }
 
+.mode-switch {
+  position: fixed;
+  top: 18px;
+  left: 18px;
+  z-index: 50;
+  display: flex;
+  gap: 2px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 3px;
+  backdrop-filter: blur(10px);
+
+  .mode-link {
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 5px 14px;
+    border-radius: 999px;
+    transition: all 0.18s ease;
+    &:hover { color: var(--text); }
+    &.active {
+      background: rgba(247, 201, 72, 0.14);
+      color: var(--gold);
+      box-shadow: 0 0 8px var(--gold-glow);
+    }
+  }
+}
+
 .conn-dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--text-muted);

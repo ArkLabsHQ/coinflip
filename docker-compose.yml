@@ -6,8 +6,12 @@ services:
     volumes:
       - server-data:/app/data
     environment:
-      - ARK_SERVER_URL=http://ark:7070
-      - ESPLORA_URL=http://chopsticks:3000
+      # Hostnames are the container_names from the arkade-regtest stack
+      # (PR #27 denigiri profile). arkd was renamed from "ark"; the
+      # Esplora-compatible REST API now lives under the mempool service's
+      # `/api` prefix instead of the old chopsticks root.
+      - ARK_SERVER_URL=http://arkd:7070
+      - ESPLORA_URL=http://mempool_web/api
       - PUBLIC_PORT=3001
       - ADMIN_PORT=3002
       # Bind admin listener inside the container to all interfaces so
@@ -16,10 +20,20 @@ services:
       # the docker-compose port map is the right access boundary here.
       - ADMIN_HOST=0.0.0.0
       - DATA_DIR=/app/data
+      # Opt-in arkade-script forfeit (R1 audit). When set, new games are
+      # minted with the 5-leaf escrow + playerForfeit leaf bound to the
+      # player's payout address. Unset/unreachable → legacy CSV penalty.
+      # See packages/server/src/emulator.ts.
+      # - EMULATOR_URL: the in-docker-network DNS the server probes.
+      # - EMULATOR_PUBLIC_URL: where the browser submits forfeit txs;
+      #   surfaced via GET /api/network. In production this would be a
+      #   public ingress; for local dev, the host port mapping.
+      - EMULATOR_URL=http://emulator:7073
+      - EMULATOR_PUBLIC_URL=http://localhost:7073
     ports:
       - "3002:3002"
     networks:
-      - nigiri
+      - arkade-regtest_default
     restart: unless-stopped
 
   client:
@@ -34,11 +48,11 @@ services:
     depends_on:
       - server
     networks:
-      - nigiri
+      - arkade-regtest_default
     restart: unless-stopped
 
 networks:
-  nigiri:
+  arkade-regtest_default:
     external: true
 
 volumes:

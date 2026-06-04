@@ -8,7 +8,22 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Copy lib package first (server depends on it)
+# Vendored @arkade-os/sdk tarball — both packages/lib/package.json and
+# packages/server/package.json depend on `file:../../vendor/...` while we
+# track the arkade-script-final branch (PR arkade-os/ts-sdk#319). Must be
+# in place BEFORE npm install in either package.
+COPY vendor/ ./vendor/
+
+# Contract-workflows-prototype (file: dep of the lib). Build it BEFORE
+# lib so lib's npm install can resolve @arklabshq/contract-workflows-prototype.
+COPY packages/contract-workflows-prototype/package.json packages/contract-workflows-prototype/package-lock.json* ./packages/contract-workflows-prototype/
+WORKDIR /app/packages/contract-workflows-prototype
+RUN npm install
+COPY packages/contract-workflows-prototype/ ./
+RUN npm run build
+
+# Copy lib package (server depends on it)
+WORKDIR /app
 COPY packages/lib/package.json packages/lib/package-lock.json* ./packages/lib/
 WORKDIR /app/packages/lib
 RUN npm install
@@ -27,6 +42,11 @@ FROM node:22-slim
 
 WORKDIR /app
 
+# Copy contract-workflows-prototype (lib depends on it)
+COPY --from=builder /app/packages/contract-workflows-prototype/dist ./packages/contract-workflows-prototype/dist
+COPY --from=builder /app/packages/contract-workflows-prototype/package.json ./packages/contract-workflows-prototype/
+COPY --from=builder /app/packages/contract-workflows-prototype/node_modules ./packages/contract-workflows-prototype/node_modules
+
 # Copy lib
 COPY --from=builder /app/packages/lib/dist ./packages/lib/dist
 COPY --from=builder /app/packages/lib/package.json ./packages/lib/
@@ -37,6 +57,7 @@ COPY --from=builder /app/packages/server/dist ./packages/server/dist
 COPY --from=builder /app/packages/server/package.json ./packages/server/
 COPY --from=builder /app/packages/server/node_modules ./packages/server/node_modules
 COPY --from=builder /app/packages/server/src/admin/dashboard.html ./packages/server/dist/admin/
+COPY --from=builder /app/packages/server/src/admin/amount-validate.js ./packages/server/dist/admin/
 
 # Create data directory
 RUN mkdir -p /app/data

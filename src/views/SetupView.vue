@@ -77,6 +77,7 @@
 import { defineComponent, ref } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
+import { copyToClipboard } from '@/utils/clipboard'
 
 export default defineComponent({
   name: 'SetupView',
@@ -106,9 +107,7 @@ export default defineComponent({
     }
 
     async function copyKey() {
-      try {
-        await navigator.clipboard.writeText(newPrivateKey.value)
-      } catch { /* ignore */ }
+      await copyToClipboard(newPrivateKey.value)
     }
 
     function onConfirm() {

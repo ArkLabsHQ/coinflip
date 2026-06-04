@@ -35,3 +35,14 @@ packages/e2e/data
 
 # Local deploy compose (carries admin auth secret) — never commit
 docker-compose.mutinynet.yml
+
+# Test/dev artifacts
+.playwright-mcp/
+*.tgz
+# …except vendored SDK tarballs we depend on (file: path in package.json).
+!/vendor/*.tgz
+
+.research/
+
+# Trust-model audit — local-only research doc, not part of the shipped repo.
+docs/TRUSTLESS-AUDIT.md

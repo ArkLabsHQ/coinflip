@@ -54,6 +54,17 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
 
+      - name: Docker metadata (bundle)
+        id: meta-bundle
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}-bundle
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Build & push server
         uses: docker/build-push-action@v6
         with:
@@ -75,3 +86,14 @@ jobs:
           labels: ${{ steps.meta-client.outputs.labels }}
           cache-from: type=gha,scope=client
           cache-to: type=gha,mode=max,scope=client
+
+      - name: Build & push bundle (all-in-one)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.bundle
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-bundle.outputs.tags }}
+          labels: ${{ steps.meta-bundle.outputs.labels }}
+          cache-from: type=gha,scope=bundle
+          cache-to: type=gha,mode=max,scope=bundle

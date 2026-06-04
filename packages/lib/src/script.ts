@@ -9,6 +9,12 @@
  *   - creatorWin: condition(secrets same size = false) + creator + server
  *   - playerWin: condition(secrets same size = true) + player + server
  *   - abort: CLTV timeout + creator + server (if player doesn't reveal)
+ *
+ * Escrow output (`CoinflipEscrowScript`) has 4 leaves: creatorWin, playerWin,
+ * refund (owner-scoped CLTV self-refund), and playerPenalty (audit R1 forfeit
+ * — ConditionCSVMultisigTapscript leaf: hash-check on the player's revealed
+ * secret + relative CSV timelock + 2-of-2[player, server]; the player sweeps
+ * both escrows after a stall using only their own secret).
  */
 
 import { OP } from '@scure/btc-signer'
@@ -16,9 +22,13 @@ import { hex } from '@scure/base'
 import {
   VtxoScript,
   ConditionMultisigTapscript,
+  ConditionCSVMultisigTapscript,
   CLTVMultisigTapscript,
+  CSVMultisigTapscript,
   TapLeafScript,
+  arkade,
 } from '@arkade-os/sdk'
+import { buildForfeitArkadeScript } from './arkade-forfeit'
 
 export interface CoinflipSetupOptions {
   creatorPubkey: Uint8Array
@@ -122,6 +132,108 @@ function buildCoinflipConditionScript(
 }
 
 /**
+ * Base secret length for variable-odds games. Each party's "digit" is encoded
+ * as `secretLength - VARIABLE_ODDS_BASE_LEN`, so a valid secret is
+ * `BASE_LEN .. BASE_LEN + n - 1` bytes. 16 bytes keeps the SHA256 commit
+ * brute-force-resistant (≥128 bits) at the smallest digit.
+ */
+export const VARIABLE_ODDS_BASE_LEN = 16
+
+/**
+ * Minimal numeric push: OP_0 / OP_1..OP_16 / a minimally-encoded CScriptNum.
+ * For v ≤ 127 this is the original `[0x01, v]` 1-byte form (unchanged); for
+ * larger v it emits little-endian bytes with a 0x00 pad when the MSB's high bit
+ * is set, so the value stays positive. Lets variable-odds use n ≥ 128 (e.g. a
+ * 3-dice "beat target" bet, n = 216, threshold up to 215).
+ */
+function pushNum(v: number): number[] {
+  if (!Number.isInteger(v) || v < 0) throw new Error(`pushNum: ${v} must be a non-negative integer`)
+  if (v === 0) return [0x00]
+  if (v >= 1 && v <= 16) return [0x50 + v] // OP_1..OP_16
+  const bytes: number[] = []
+  let n = v
+  while (n > 0) { bytes.push(n & 0xff); n >>= 8 }
+  if (bytes[bytes.length - 1] & 0x80) bytes.push(0x00) // keep positive
+  return [bytes.length, ...bytes]
+}
+
+/** value ∈ [lo, hi) → leaves one bool on the stack (consumes the value). */
+function inRangeOps(lo: number, hi: number): number[] {
+  return [
+    OP.DUP, ...pushNum(lo), OP.GREATERTHANOREQUAL, // v (v>=lo)
+    OP.SWAP, ...pushNum(hi), OP.LESSTHAN,           // (v>=lo) (v<hi)
+    OP.BOOLAND,                                     // inRange
+  ]
+}
+
+/** size ∈ [base, base+n) → leaves one bool on the stack (consumes the size). */
+function rangeCheckOps(base: number, n: number): number[] {
+  return inRangeOps(base, base + n)
+}
+
+/**
+ * Variable-odds win condition (generalizes the coin's same/different-size check).
+ *
+ * Stack expects: <creatorSecret> <playerSecret>. Result: pushes 1 if the PLAYER
+ * wins, 0 if the creator (house) wins. The creatorWin leaf wraps this in OP_NOT.
+ *
+ * Fairness: each party commits a secret hash whose LENGTH encodes a digit in
+ * [0, n) — chosen before seeing the opponent's digit (commit-reveal). The roll
+ * is `(digitC + digitP) mod n`; the player wins iff `lo <= roll < target`, i.e.
+ * with probability `(target - lo)/n`. This arbitrary range lets a skin express
+ * "roll a 1" ([0,1)), "roll 4+" ([3,6)), "exactly a 6" ([5,6)), etc. OP_MOD is
+ * disabled in Script, so the mod is a single conditional subtraction (sum ∈
+ * [0, 2n-2] ⇒ one `-n` suffices).
+ *
+ * An out-of-range secret makes its submitter LOSE (not void the game), so a
+ * sure-loser can't grief a refund by revealing a bad length — exactly the
+ * coin's invalid-size handling, generalized.
+ */
+function buildVariableOddsConditionScript(
+  creatorHash: Uint8Array,
+  playerHash: Uint8Array,
+  n: number,
+  target: number,
+  lo = 0,
+): Uint8Array {
+  const base = VARIABLE_ODDS_BASE_LEN
+  // The secret LENGTH encodes the digit (base + digit), so the largest valid
+  // secret is `base + n - 1` bytes; cap it at the 520-byte push limit. arkd
+  // handles the resulting >127 OP_SIZE / pushNum values as ordinary CScriptNums.
+  if (!Number.isInteger(n) || n < 2 || base + n - 1 > 520) throw new Error(`invalid n: ${n}`)
+  if (!Number.isInteger(lo) || !Number.isInteger(target) || lo < 0 || target <= lo || target > n) {
+    throw new Error(`invalid odds range: need 0<=lo<target<=n (got lo=${lo}, target=${target}, n=${n})`)
+  }
+
+  return new Uint8Array([
+    // Validate both hashes; leaves: cS pS
+    OP['2DUP'],
+    OP.SHA256, 0x20, ...playerHash, OP.EQUALVERIFY,
+    OP.SHA256, 0x20, ...creatorHash, OP.EQUALVERIFY,
+    // Validate player secret length ∈ [base, base+n)
+    OP.SIZE, ...rangeCheckOps(base, n),  // cS pS isValidP
+    OP.NOTIF,
+      OP['2DROP'], 0x00,                  // player out of range → house wins (0)
+    OP.ELSE,
+      OP.SWAP,                            // pS cS
+      OP.SIZE, ...rangeCheckOps(base, n), // pS cS isValidC
+      OP.NOTIF,
+        OP['2DROP'], 0x51,                // creator out of range → player wins (1)
+      OP.ELSE,
+        // both valid; stack: pS cS. roll = (digitC + digitP) mod n
+        OP.SIZE, OP.NIP, ...pushNum(base), OP.SUB,  // pS digitC
+        OP.SWAP,                                     // digitC pS
+        OP.SIZE, OP.NIP, ...pushNum(base), OP.SUB,  // digitC digitP
+        OP.ADD,                                      // sum ∈ [0, 2n-2]
+        OP.DUP, ...pushNum(n), OP.GREATERTHANOREQUAL,
+        OP.IF, ...pushNum(n), OP.SUB, OP.ENDIF,      // roll = sum mod n
+        ...inRangeOps(lo, target),                   // lo <= roll < target → player wins
+      OP.ENDIF,
+    OP.ENDIF,
+  ])
+}
+
+/**
  * Setup output VtxoScript.
  * Two leaves:
  *   1. Reveal: condition(SHA256 check) + creator + player + server
@@ -215,5 +327,276 @@ export class CoinflipFinalScript extends VtxoScript {
 
   abort(): TapLeafScript {
     return this.findLeaf(this.abortScriptHex)
+  }
+}
+
+/**
+ * Arkade-script forfeit + covenant-win configuration. Required at all
+ * times — the coinflip protocol is single-path: it depends on an
+ * emulator-signed covenant for resolution and a CLTV-gated covenant
+ * for R1 forfeit. There is no legacy fallback.
+ */
+export interface ArkadeForfeitConfig {
+  /** 32-byte x-only OR 33-byte compressed emulator pubkey. */
+  emulatorPubkey: Uint8Array
+  /**
+   * Player payout P2TR pkScript. Pinned by:
+   *   - `playerWinCovenant`  (server settles player win, no client sig)
+   *   - `playerForfeit`      (R1: player sweeps both stakes after CLTV)
+   */
+  playerPayoutPkScript: Uint8Array
+  /**
+   * House payout P2TR pkScript. Pinned by:
+   *   - `creatorWinCovenant` (server settles house win, no client sig)
+   */
+  housePayoutPkScript: Uint8Array
+  /** Player stake (this leaf's "other input" value from the house's POV). */
+  playerStake: bigint
+  /** House stake (this leaf's "other input" value from the player's POV). */
+  houseStake: bigint
+}
+
+export interface CoinflipEscrowOptions {
+  creatorPubkey: Uint8Array
+  playerPubkey: Uint8Array
+  serverPubkey: Uint8Array
+  creatorHash: Uint8Array
+  playerHash: Uint8Array
+  finalExpiration: bigint
+  /**
+   * The FUNDER's pubkey: only this party (+ server) may refund after
+   * the timeout. Per-funder refund is the abort-theft fix.
+   */
+  refundPubkey: Uint8Array
+  /**
+   * Relative CSV timelock (seconds, BIP68) for the unilateral exit
+   * mirrors. Every collab leaf has a CSV-gated sibling so the user is
+   * never stranded by arkd censorship. Typically matches arkd's
+   * `unilateralExitDelay`. MUST be a multiple of 512 and ≥ 512.
+   */
+  exitDelay: bigint
+  /**
+   * Variable-odds parameters. When `oddsN`/`oddsTarget` are set the
+   * win condition is `oddsLo <= roll < oddsTarget` over `oddsN`
+   * outcomes; unset → the 50/50 coin.
+   */
+  oddsN?: number
+  oddsTarget?: number
+  oddsLo?: number
+  /** Arkade-script covenant config. Required. */
+  arkadeForfeit: ArkadeForfeitConfig
+}
+
+/**
+ * Per-party coinflip escrow. Eight leaves — each collab path (arkd-
+ * cosigned) is mirrored by a CSV-gated unilateral path so the user is
+ * never stranded by arkd censorship.
+ *
+ * Collab (execution bucket; arkd cosigns, fires within game window):
+ *   1. playerWinCovenant  — ConditionMultisig[server, emu] + player-wins
+ *                           predicate + atomic-sweep covenant → player.
+ *   2. creatorWinCovenant — Symmetric → house.
+ *   3. playerForfeit      — CLTVMultisig[player, server, emu] +
+ *                           atomic-sweep covenant → player. R1.
+ *   4. refund             — CLTVMultisig[funder, server].
+ *                           Per-party reclaim post-finalExpiration.
+ *
+ * Unilateral exits (exit bucket; user signs alone after `exitDelay`):
+ *   5. playerWinExit       — ConditionCSVMultisig[player] + player-wins.
+ *   6. creatorWinExit      — ConditionCSVMultisig[creator] + house-wins.
+ *   7. playerForfeitExit   — ConditionCSVMultisig[player] +
+ *                            hash160(playerSecret). R1 under censorship.
+ *   8. refundExit          — CSVMultisig[funder]. Censorship reclaim.
+ *
+ * Exit leaves drop the covenant (the user signs, picks their own
+ * destination) and the server signature. CSV starts when the escrow
+ * VTXO is on-chain checkpointed; in practice `exitDelay` ≫ game window,
+ * so the exits naturally fire only when collab paths have stalled.
+ */
+export class CoinflipEscrowScript extends VtxoScript {
+  readonly playerWinCovenantScriptHex: string
+  readonly creatorWinCovenantScriptHex: string
+  readonly playerForfeitScriptHex: string
+  readonly refundScriptHex: string
+  readonly playerWinExitScriptHex: string
+  readonly creatorWinExitScriptHex: string
+  readonly playerForfeitExitScriptHex: string
+  readonly refundExitScriptHex: string
+  readonly playerWinCovenantArkadeScript: Uint8Array
+  readonly creatorWinCovenantArkadeScript: Uint8Array
+  readonly forfeitArkadeScript: Uint8Array
+
+  constructor(readonly options: CoinflipEscrowOptions) {
+    const {
+      creatorPubkey, playerPubkey, serverPubkey,
+      creatorHash, playerHash, finalExpiration, refundPubkey, exitDelay,
+      oddsN, oddsTarget, oddsLo,
+      arkadeForfeit: { emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake },
+    } = options
+
+    const pot = playerStake + houseStake
+    // Which "other input" value each leaf pins is **symmetric** — every
+    // leaf on the player's escrow pins the house stake, every leaf on
+    // the house's escrow pins the player stake. The atomic-sweep
+    // covenant uses this to require both escrows to be in the same tx.
+    // The caller picks which "other" to bind by passing `refundPubkey`
+    // — player escrow → otherStake = houseStake; house escrow →
+    // otherStake = playerStake.
+    const isPlayerEscrow = hex.encode(refundPubkey) === hex.encode(playerPubkey)
+    const otherStake = isPlayerEscrow ? houseStake : playerStake
+
+    // Win-determination condition (player wins). House wins = OP_NOT.
+    const playerWinsCondition =
+      oddsN !== undefined && oddsTarget !== undefined
+        ? buildVariableOddsConditionScript(creatorHash, playerHash, oddsN, oddsTarget, oddsLo ?? 0)
+        : buildCoinflipConditionScript(creatorHash, playerHash)
+    const houseWinsCondition = new Uint8Array([...playerWinsCondition, OP.NOT])
+
+    // Covenants — three of them, all atomic-sweep (cross-input value
+    // check + single output of the full pot to the winner's address).
+    const playerWinCovenantArkadeScript = buildForfeitArkadeScript(
+      playerPayoutPkScript, pot, otherStake,
+    )
+    const creatorWinCovenantArkadeScript = buildForfeitArkadeScript(
+      housePayoutPkScript, pot, otherStake,
+    )
+    const forfeitArkadeScript = buildForfeitArkadeScript(
+      playerPayoutPkScript, pot, otherStake,
+    )
+
+    // Each covenant leaf is an ordinary tapscript whose multisig pubkeys
+    // include the EMULATOR-TWEAKED key (pubkey + taggedHash("ArkScriptHash",
+    // arkadeScript)·G). The emulator holds the untweaked key and only derives
+    // the tweaked secret AFTER running the arkade script — so its signature on
+    // that slot is equivalent to "the covenant passed". (ts-sdk 0.4.32 removed
+    // the ArkadeVtxoScript/ArkadeLeaf abstraction; we now assemble the taptree
+    // from these raw tapscript bodies directly via VtxoScript. The arkade
+    // script bytes themselves travel at spend time in the EmulatorPacket.)
+    const tweakedEmuKey = (script: Uint8Array) =>
+      arkade.computeArkadeScriptPublicKey(emulatorPubkey, script)
+
+    const playerWinCovenantScript = ConditionMultisigTapscript.encode({
+      conditionScript: playerWinsCondition,
+      pubkeys: [serverPubkey, tweakedEmuKey(playerWinCovenantArkadeScript)],
+    }).script
+
+    const creatorWinCovenantScript = ConditionMultisigTapscript.encode({
+      conditionScript: houseWinsCondition,
+      pubkeys: [serverPubkey, tweakedEmuKey(creatorWinCovenantArkadeScript)],
+    }).script
+
+    const forfeitLeafScript = CLTVMultisigTapscript.encode({
+      absoluteTimelock: finalExpiration,
+      pubkeys: [playerPubkey, serverPubkey, tweakedEmuKey(forfeitArkadeScript)],
+    }).script
+
+    const refundTapscript = CLTVMultisigTapscript.encode({
+      absoluteTimelock: finalExpiration,
+      pubkeys: [refundPubkey, serverPubkey],
+    })
+
+    // Unilateral exit mirrors. Three of the four KEEP the atomic-sweep
+    // covenant (and the emu_tweaked key) so the user can exit without
+    // arkd while still preserving destination + atomicity: the user
+    // signs the user slot, emu signs the emu_tweaked slot AFTER running
+    // the same covenant the collab path used. Underlying closure stays
+    // `ConditionCSVMultisig` (exit bucket) — arkd still partitions
+    // correctly.
+    //
+    // `refundExit` is the lone non-covenant exit: the funder is just
+    // reclaiming their own stake (no atomicity / no destination binding
+    // makes sense), so the leaf is a raw `CSVMultisig[funder]`. This
+    // is also the FINAL fallback when arkd AND the emu are both
+    // unavailable — every other leaf requires the emu.
+    const playerWinExitScript = ConditionCSVMultisigTapscript.encode({
+      conditionScript: playerWinsCondition,
+      timelock: { value: exitDelay, type: 'seconds' },
+      pubkeys: [playerPubkey, tweakedEmuKey(playerWinCovenantArkadeScript)],
+    }).script
+
+    const creatorWinExitScript = ConditionCSVMultisigTapscript.encode({
+      conditionScript: houseWinsCondition,
+      timelock: { value: exitDelay, type: 'seconds' },
+      pubkeys: [creatorPubkey, tweakedEmuKey(creatorWinCovenantArkadeScript)],
+    }).script
+
+    const playerForfeitExitScript = ConditionCSVMultisigTapscript.encode({
+      conditionScript: buildHashCheckScript(playerHash),
+      timelock: { value: exitDelay, type: 'seconds' },
+      pubkeys: [playerPubkey, tweakedEmuKey(forfeitArkadeScript)],
+    }).script
+
+    const refundExitTapscript = CSVMultisigTapscript.encode({
+      timelock: { value: exitDelay, type: 'seconds' },
+      pubkeys: [refundPubkey],
+    })
+
+    // Assemble the 8-leaf taptree from the raw tapscript bodies. The 6
+    // covenant leaves carry the emulator-tweaked key in their multisig; the
+    // two refund leaves (refund / refundExit) are plain (no covenant). Order
+    // is preserved by VtxoScript.encode()/findLeaf(), so the *ScriptHex
+    // lookups below resolve to these exact bodies.
+    super([
+      playerWinCovenantScript,
+      creatorWinCovenantScript,
+      forfeitLeafScript,
+      refundTapscript.script,
+      playerWinExitScript,
+      creatorWinExitScript,
+      playerForfeitExitScript,
+      refundExitTapscript.script,
+    ])
+
+    this.playerWinCovenantScriptHex = hex.encode(playerWinCovenantScript)
+    this.creatorWinCovenantScriptHex = hex.encode(creatorWinCovenantScript)
+    this.playerForfeitScriptHex = hex.encode(forfeitLeafScript)
+    this.refundScriptHex = hex.encode(refundTapscript.script)
+    this.playerWinExitScriptHex = hex.encode(playerWinExitScript)
+    this.creatorWinExitScriptHex = hex.encode(creatorWinExitScript)
+    this.playerForfeitExitScriptHex = hex.encode(playerForfeitExitScript)
+    this.refundExitScriptHex = hex.encode(refundExitTapscript.script)
+    this.playerWinCovenantArkadeScript = playerWinCovenantArkadeScript
+    this.creatorWinCovenantArkadeScript = creatorWinCovenantArkadeScript
+    this.forfeitArkadeScript = forfeitArkadeScript
+  }
+
+  /** Server settles a player win (no client signature). */
+  playerWinCovenant(): TapLeafScript {
+    return this.findLeaf(this.playerWinCovenantScriptHex)
+  }
+
+  /** Server settles a house win (no client signature). */
+  creatorWinCovenant(): TapLeafScript {
+    return this.findLeaf(this.creatorWinCovenantScriptHex)
+  }
+
+  /** R1: player sweeps both stakes after `finalExpiration`. */
+  playerForfeit(): TapLeafScript {
+    return this.findLeaf(this.playerForfeitScriptHex)
+  }
+
+  /** Funder reclaims their own stake after `finalExpiration`. */
+  refund(): TapLeafScript {
+    return this.findLeaf(this.refundScriptHex)
+  }
+
+  /** Unilateral mirror of playerWinCovenant — player alone, CSV exit_delay. */
+  playerWinExit(): TapLeafScript {
+    return this.findLeaf(this.playerWinExitScriptHex)
+  }
+
+  /** Unilateral mirror of creatorWinCovenant — creator alone, CSV exit_delay. */
+  creatorWinExit(): TapLeafScript {
+    return this.findLeaf(this.creatorWinExitScriptHex)
+  }
+
+  /** Unilateral mirror of playerForfeit — player alone with hash check, CSV exit_delay. */
+  playerForfeitExit(): TapLeafScript {
+    return this.findLeaf(this.playerForfeitExitScriptHex)
+  }
+
+  /** Unilateral mirror of refund — funder alone, CSV exit_delay. */
+  refundExit(): TapLeafScript {
+    return this.findLeaf(this.refundExitScriptHex)
   }
 }

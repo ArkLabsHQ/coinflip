@@ -118,3 +118,13 @@ export {
   CoinflipEscrowScriptV3,
   type CoinflipEscrowOptionsV3,
 } from './script-v3'
+
+// v0.3 transaction-building helpers — see transactions-v3.ts module header.
+export {
+  getPlayerEscrowScriptV3,
+  getHouseEscrowScriptV3,
+  getPlayerEscrowAddressV3,
+  getHouseEscrowAddressV3,
+  getPlayerEscrowOptionsV3,
+  getHouseEscrowOptionsV3,
+} from './transactions-v3'

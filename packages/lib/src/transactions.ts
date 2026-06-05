@@ -104,6 +104,19 @@ export function getHouseEscrowOptions(game: Game): CoinflipEscrowOptions {
   return getHouseEscrowScript(game).options
 }
 
+/**
+ * The exact `CoinflipEscrowOptions` that produced the PLAYER escrow's on-chain
+ * pkScript — the player-side mirror of `getHouseEscrowOptions`. Same single
+ * source of truth: serialize these through
+ * `CoinflipEscrowContractHandler.serializeParams` and the handler re-derives a
+ * byte-identical script. Used by the client to register its own escrow as a
+ * first-class SDK contract so the ContractWatcher clears the stalled-bet stash
+ * the instant the atomic sweep spends it.
+ */
+export function getPlayerEscrowOptions(game: Game): CoinflipEscrowOptions {
+  return getPlayerEscrowScript(game).options
+}
+
 /** Get the pot amount (2x bet) */
 export function getPotAmount(game: Game): bigint {
   assertDefined(game.betAmount, 'betAmount')

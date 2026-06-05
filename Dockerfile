@@ -7,16 +7,41 @@ WORKDIR /app
 # (PR arkade-os/ts-sdk#319). Must be in place BEFORE npm install.
 COPY vendor/ ./vendor/
 
+# The client depends on `arkade-coinflip` (file:packages/lib), which depends on
+# @arklabshq/contract-workflows-prototype. Both must be BUILT before the root
+# `npm install` can resolve `file:packages/lib` and the client bundle can import
+# `arkade-coinflip/contract`. (Mirrors Dockerfile.bundle Stage 1.)
+
+# contract-workflows-prototype first (file: dep of lib).
+COPY packages/contract-workflows-prototype/package.json packages/contract-workflows-prototype/package-lock.json* ./packages/contract-workflows-prototype/
+WORKDIR /app/packages/contract-workflows-prototype
+RUN npm install
+COPY packages/contract-workflows-prototype/ ./
+RUN npm run build
+
+# lib (client imports arkade-coinflip/contract from it).
+WORKDIR /app
+COPY packages/lib/package.json packages/lib/package-lock.json* ./packages/lib/
+WORKDIR /app/packages/lib
+RUN npm install
+COPY packages/lib/ ./
+RUN npm run build
+
 # Copy package files
+WORKDIR /app
 COPY package.json package-lock.json* yarn.lock* ./
 
-# Install dependencies
+# Install dependencies (resolves file:packages/lib to the built dist)
 RUN npm install
 
 # Copy source
 COPY src/ ./src/
 COPY public/ ./public/
 COPY tsconfig.json babel.config.js vue.config.js* ./
+# .eslintignore is load-bearing: vue-cli's build lints the project tree, and
+# with `transpileDependencies` the lib/cwp transpiled dist/*.js lands inside it.
+# Without these the eslint-loader rejects the transpiled JS (var / require()).
+COPY .eslintrc.js .eslintignore ./
 
 # Build Vue app
 RUN npm run build

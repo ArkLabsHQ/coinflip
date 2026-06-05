@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "serve": "vue-cli-service serve src/main.ts",
+    "prebuild": "npm --prefix packages/contract-workflows-prototype install && npm --prefix packages/contract-workflows-prototype run build && npm --prefix packages/lib install && npm --prefix packages/lib run build",
     "build": "vue-cli-service build",
     "lint": "vue-cli-service lint",
     "test:unit": "vitest run",
@@ -16,6 +17,7 @@
     "@noble/secp256k1": "^2.1.0",
     "@scure/base": "^1.2.1",
     "@scure/btc-signer": "^1.5.0",
+    "arkade-coinflip": "file:packages/lib",
     "bech32": "^2.0.0",
     "bitcoinjs-lib": "^7.0.0-rc.0",
     "core-js": "^3.31.0",

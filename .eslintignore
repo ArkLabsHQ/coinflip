@@ -1,0 +1,6 @@
+# Compiled output of the workspace packages (server / lib / contract prototype).
+# The client depends on `arkade-coinflip` (packages/lib) for the coinflip-escrow
+# CONTRACT exports; with `transpileDependencies` the symlinked dist/*.js lands
+# inside the project tree and the vue-cli eslint plugin would otherwise lint
+# transpiled JS (var / require()). These are build artifacts, not source.
+packages/**/dist/

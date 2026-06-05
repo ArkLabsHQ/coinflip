@@ -4,12 +4,14 @@ import type { State as RootState } from '@/store'
 import {
   Wallet, SingleKey, VtxoScript,
   buildOffchainTx, decodeTapscript, CSVMultisigTapscript, ConditionWitness, setArkPsbtField, Transaction, ArkAddress, selectVirtualCoins,
+  contractHandlers,
   type WalletBalance, type ExtendedVirtualCoin, type ArkTxInput, type ArkProvider, type Identity,
 } from '@arkade-os/sdk'
+import { COINFLIP_ESCROW_TYPE, registerCoinflipContracts } from 'arkade-coinflip/contract'
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
-  forfeit as apiForfeit,
+  forfeit as apiForfeit, getGame as apiGetGame,
   type Outpoint,
 } from '@/services/api'
 import { createHash } from '@/utils/crypto'
@@ -98,6 +100,15 @@ export interface StashedRefund {
   /** Player's secret in hex — required as the condition witness when claiming
    * the penalty. Stored ONLY in the stash, never sent off-device. */
   playerSecretHex?: string
+  /**
+   * Serialized params of the PLAYER escrow's `coinflip-escrow` contract (from
+   * /api/play). Persisted so a page reload can RE-REGISTER the escrow with the
+   * SDK ContractManager and re-arm the watcher that clears this stash on the
+   * sweep's `vtxo_spent`. */
+  escrowContractParams?: Record<string, string>
+  /** The player escrow's Ark address — its pkScript is the contract's key
+   *  (and what we deactivate when the bet is done). */
+  escrowAddress?: string
 }
 
 // Stash backend moved to IndexedDB via @/utils/stashStore. The shape and
@@ -299,6 +310,14 @@ const AUTO_CLAIM_INTERVAL_MS = 15_000
 // wallet's active contracts + the SDK's own 60s failsafe poll. Push-based
 // balance updates replace our manual refreshBalance polling.
 let incomingFundsStop: (() => void) | null = null
+// Stop fn for the coinflip-escrow contract-event subscription. The
+// ContractManager fires `vtxo_spent` for a player escrow the instant the
+// atomic sweep settles (house OR player win — both spend both escrows), so we
+// clear the stalled-bet stash + refresh eagerly. The SDK's ContractWatcher
+// carries its own 60s failsafe poll + auto-reconnect, so no separate getGame
+// poll is needed. Lives only while the wallet is connected (see connect wiring
+// and the disconnect cleanup, like incomingFundsStop).
+let escrowEventStop: (() => void) | null = null
 // Coalesce watcher-driven refreshes. A single settlement (e.g. a game's sweep)
 // emits several vtxo_spent / vtxo_received events spread over a few seconds; a
 // naive per-event refresh hammers the indexer. Leading edge fires immediately
@@ -327,6 +346,81 @@ function scheduleRefresh(dispatch: (type: string, payload?: unknown) => Promise<
 
 export function getSDKWallet(): Wallet | null {
   return sdkWallet
+}
+
+/**
+ * Register a player escrow as an ACTIVE `coinflip-escrow` contract so the SDK
+ * ContractManager/ContractWatcher tracks it and emits `vtxo_spent` when the
+ * atomic sweep settles. The serialized params (from /api/play) reproduce the
+ * exact on-chain script; we pass the pkScript derived from the escrow address
+ * as the contract key so the watcher matches the real VTXO. Labelled with the
+ * gameId so the event handler can clear the right stash.
+ *
+ * Idempotent: a duplicate re-register (e.g. on reload) is swallowed. Entirely
+ * best-effort — a failure here must NOT break play or the refund/forfeit safety
+ * net; the stash + auto-claim still cover a stalled game.
+ */
+async function registerEscrowContract(stash: StashedRefund): Promise<void> {
+  if (!sdkWallet || !stash.escrowContractParams || !stash.escrowAddress) return
+  try {
+    const cm = await sdkWallet.getContractManager()
+    await cm.createContract({
+      type: COINFLIP_ESCROW_TYPE,
+      params: stash.escrowContractParams,
+      script: hex.encode(ArkAddress.decode(stash.escrowAddress).pkScript),
+      address: stash.escrowAddress,
+      state: 'active',
+      label: stash.gameId,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/already exists|duplicate/i.test(msg)) return // re-register is fine
+    console.warn('[contract] could not register player escrow (continuing):', msg)
+  }
+}
+
+/**
+ * Best-effort: mark a finished bet's player-escrow contract `inactive` so the
+ * ContractWatcher stops watching it ("bet done → deactivate"). No-op when the
+ * stash lacks an escrow address or the ContractManager is unavailable; never
+ * throws.
+ */
+async function deactivateEscrowContract(stash: StashedRefund | undefined): Promise<void> {
+  if (!sdkWallet || !stash?.escrowAddress) return
+  try {
+    const cm = await sdkWallet.getContractManager()
+    await cm.setContractState(hex.encode(ArkAddress.decode(stash.escrowAddress).pkScript), 'inactive')
+  } catch (e) {
+    console.warn('[contract] could not deactivate player escrow (continuing):', e instanceof Error ? e.message : e)
+  }
+}
+
+/**
+ * Subscribe to the ContractManager so a player escrow being spent on-Ark clears
+ * its stalled-bet stash EAGERLY — the atomic sweep (house OR player win) spends
+ * both escrows, so a `vtxo_spent` on the player's `coinflip-escrow` means the
+ * game settled and the stash is no longer needed. Also deactivates the contract
+ * (best-effort) and refreshes the balance. The handler body is wrapped so a bad
+ * event never tears down the subscription. Returns the unsubscribe fn (no-op
+ * when there's no wallet).
+ */
+async function startEscrowContractWatch(dispatch: (type: string, payload?: unknown) => Promise<unknown>): Promise<() => void> {
+  if (!sdkWallet) return () => {}
+  const cm = await sdkWallet.getContractManager()
+  return cm.onContractEvent((event) => {
+    if (event.type !== 'vtxo_spent' || event.contract.type !== COINFLIP_ESCROW_TYPE) return
+    void (async () => {
+      try {
+        const gameId = event.contract.label
+        if (gameId) await clearRefund(gameId)
+        scheduleRefresh(dispatch)
+        // Bet done → stop watching this escrow.
+        await cm.setContractState(event.contract.script, 'inactive').catch(() => { /* best-effort */ })
+      } catch (e) {
+        console.error('[contract] vtxo_spent handler failed:', e instanceof Error ? e.message : e)
+      }
+    })()
+  })
 }
 
 /**
@@ -558,6 +652,25 @@ const ark: Module<ArkState, RootState> = {
           console.warn('[watcher] notifyIncomingFunds unavailable; relying on action-driven refresh:', e)
         }
 
+        // Coinflip-escrow contract tracking. Register the handler against OUR
+        // SDK's contractHandlers singleton (the lib re-exports the same one,
+        // but pass it explicitly to be robust to multi-copy installs), then
+        // RE-REGISTER every active stash's player escrow so a page reload
+        // re-arms the watcher, and start the vtxo_spent subscription that
+        // clears the stash the instant the sweep settles. All best-effort —
+        // the stash + auto-claim remain the trustless safety net regardless.
+        // Stop any prior subscription first (this runs again on every reconnect).
+        if (escrowEventStop) { try { escrowEventStop() } catch { /* already gone */ } escrowEventStop = null }
+        try {
+          registerCoinflipContracts(contractHandlers)
+          for (const stash of await loadRefunds()) {
+            if (stash.escrowContractParams && stash.escrowAddress) await registerEscrowContract(stash)
+          }
+          escrowEventStop = await startEscrowContractWatch(dispatch)
+        } catch (e) {
+          console.warn('[contract] escrow contract watch unavailable; relying on stash + auto-claim:', e instanceof Error ? e.message : e)
+        }
+
         // Background stalled-bet auto-claim. Fire once now so a stash
         // already past expiry doesn't have to wait one full tick, then
         // poll on the interval. The action itself short-circuits when
@@ -585,6 +698,7 @@ const ark: Module<ArkState, RootState> = {
         sdkWallet = null
         if (autoClaimTimer) { clearInterval(autoClaimTimer); autoClaimTimer = null }
         if (incomingFundsStop) { try { incomingFundsStop() } catch { /* already gone */ } incomingFundsStop = null }
+        if (escrowEventStop) { try { escrowEventStop() } catch { /* already gone */ } escrowEventStop = null }
         commit('SET_STATUS', 'error')
         commit('SET_ERROR', new Error(`Failed to connect: ${(error as Error).message}`))
         commit('SET_INFO', null)
@@ -861,11 +975,20 @@ const ark: Module<ArkState, RootState> = {
       // that will almost certainly resolve, but log it loudly.
       try {
         const r = await apiRefund(playRes.gameId, playerEscrow)
-        await stashRefund({
+        const stash: StashedRefund = {
           gameId: playRes.gameId, tier, playerEscrow,
           refundPsbt: r.refundPsbt, refundCheckpoints: r.refundCheckpoints,
           finalExpiration: r.finalExpiration, createdAt: Date.now(),
-        })
+          // Persist the player escrow's contract params + address so a reload
+          // can re-register it and re-arm the vtxo_spent watcher.
+          escrowContractParams: playRes.escrowContractParams,
+          escrowAddress: playRes.escrowAddress,
+        }
+        await stashRefund(stash)
+        // Register the player escrow as a coinflip-escrow contract so the
+        // ContractWatcher clears this stash the instant the sweep settles.
+        // Best-effort — the stash itself is the trustless backstop.
+        await registerEscrowContract(stash)
       } catch (e) {
         console.warn('[trustless] could not stash refund (continuing):', e instanceof Error ? e.message : e)
       }
@@ -909,12 +1032,21 @@ const ark: Module<ArkState, RootState> = {
         await updateRefundStash(playRes.gameId, { revealed: true })
         result = await apiCommit(playRes.gameId, playerSecretHex, playerEscrow)
       } catch (e) {
+        // Soft messaging: a /commit failure almost always means the operator is
+        // still settling (it finishes autonomously). Surface that calmly and
+        // log the underlying error rather than steering the user straight at
+        // the reclaim path. The stash + forfeit watcher remain the backstop.
+        console.warn('[trustless] /commit failed (operator settles autonomously):', e instanceof Error ? e.message : e)
         const when = new Date(playRes.finalExpiration * 1000).toLocaleString()
         throw new Error(
-          `${e instanceof Error ? e.message : 'Game failed to resolve'} — your ${tier} sat stake is safe and reclaimable after ${when} (see "Reclaim stalled bets").`,
+          `Still settling — the operator finishes this automatically and it usually lands within a minute. ` +
+          `Your ${tier} sat stake is safe; if it doesn't resolve you can reclaim it after ${when} (see "Reclaim stalled bets").`,
         )
       }
+      const doneStash = (await loadRefunds()).find((x) => x.gameId === playRes.gameId)
       await clearRefund(playRes.gameId)
+      // Bet done → stop watching this escrow (best-effort).
+      await deactivateEscrowContract(doneStash)
 
       // No manual refresh — the contract watcher fires on the sweep's vtxo
       // events and pushes a (coalesced, light) balance update.
@@ -986,6 +1118,8 @@ const ark: Module<ArkState, RootState> = {
           throw e
         }
         await clearRefund(gameId)
+        // Bet done (own stake reclaimed) → stop watching this escrow.
+        await deactivateEscrowContract(stash)
         // Balance update is push-based via the contract watcher (refund vtxo event).
       } finally {
         commit('CLEAR_CLAIMING', gameId)
@@ -1055,6 +1189,8 @@ const ark: Module<ArkState, RootState> = {
         }
 
         await clearRefund(gameId)
+        // Bet done (full pot claimed via forfeit) → stop watching this escrow.
+        await deactivateEscrowContract(stash)
         // Balance update is push-based via the contract watcher (claim vtxo event).
       } finally {
         commit('CLEAR_CLAIMING', gameId)
@@ -1076,6 +1212,17 @@ const ark: Module<ArkState, RootState> = {
       if (chainTime === null) return // can't decide; try next tick
       for (const stash of stashes) {
         if (state.claimingGames[stash.gameId]) continue
+        // Thin failsafe behind the contract watcher: if the server already
+        // settled this game (a vtxo_spent event was missed, or the escrow
+        // contract failed to register at all), drop the stash + deactivate the
+        // contract — so the panel still clears even if the event path no-ops.
+        try {
+          if ((await apiGetGame(stash.gameId)).status === 'resolved') {
+            await clearRefund(stash.gameId)
+            await deactivateEscrowContract(stash)
+            continue
+          }
+        } catch { /* server unreachable — fall through to the CLTV-gated claim */ }
         const canForfeit =
           stash.revealed === true &&
           !!stash.forfeitPsbt &&

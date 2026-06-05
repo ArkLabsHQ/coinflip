@@ -32,6 +32,13 @@ export interface PlayResponse {
   betAmount: number
   finalExpiration: number
   houseEscrow: Outpoint
+  /**
+   * Serialized params of the PLAYER escrow's `coinflip-escrow` contract. The
+   * client registers its escrow with these (via ContractManager.createContract)
+   * so the SDK's ContractWatcher fires `vtxo_spent` the instant the atomic sweep
+   * settles — clearing the stalled-bet stash without polling getGame.
+   */
+  escrowContractParams: Record<string, string>
   /** Variable-odds echo + total pot the winner sweeps (player stake + house stake). */
   oddsN?: number
   oddsTarget?: number

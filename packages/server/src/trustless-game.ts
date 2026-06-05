@@ -25,6 +25,7 @@ import {
   getPlayerEscrowAddress,
   getHouseEscrowAddress,
   getHouseEscrowOptions,
+  getPlayerEscrowOptions,
   buildCovenantSweepTransaction,
   buildRefundTransaction,
   buildForfeitClaimTransaction,
@@ -80,6 +81,14 @@ export interface TrustlessPlayResult {
   finalExpiration: number
   /** The house's escrow VTXO, so the client can build the winner sweep. */
   houseEscrow: Outpoint
+  /**
+   * Serialized params of the PLAYER escrow's `coinflip-escrow` contract — the
+   * exact options that produce the on-chain player-escrow pkScript. The client
+   * feeds these to `ContractManager.createContract` so its own ContractWatcher
+   * re-derives a byte-identical script and emits `vtxo_spent` the instant the
+   * atomic sweep settles (house OR player win), clearing the stalled-bet stash.
+   */
+  escrowContractParams: Record<string, string>
   /** Variable-odds echo + economics so the client can show/verify the bet. */
   oddsN?: number
   oddsTarget?: number
@@ -535,6 +544,10 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     betAmount: req.tier,
     finalExpiration,
     houseEscrow,
+    // The PLAYER escrow's serialized contract params (mirrors the house side
+    // registered above) — the client registers its own escrow with these so its
+    // ContractWatcher reproduces the same script and observes the sweep.
+    escrowContractParams: CoinflipEscrowContractHandler.serializeParams(getPlayerEscrowOptions(game)),
     oddsN: odds?.oddsN,
     oddsTarget: odds?.oddsTarget,
     oddsLo: odds?.oddsLo,

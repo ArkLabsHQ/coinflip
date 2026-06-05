@@ -95,6 +95,14 @@ export interface TrustlessPlayResult {
   oddsLo?: number
   /** Total pot the winner sweeps = player stake (`betAmount`) + house stake. */
   pot: number
+  /**
+   * Contract version of the escrow this game uses — 'v2' (today's
+   * legacy length-encoded predicate) or 'v3' (arkade-script + packet-borne
+   * reveals). Defaults to 'v2' on response unless the server is configured
+   * with LEGACY_ESCROW=false. The client uses this to route to the right
+   * contract handler when registering the player's escrow with the SDK.
+   */
+  contractVersion?: 'v2' | 'v3'
 }
 
 export interface TrustlessCommitRequest {
@@ -552,6 +560,10 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     oddsTarget: odds?.oddsTarget,
     oddsLo: odds?.oddsLo,
     pot: req.tier + houseStake,
+    // The current handler always returns the v0.2.x escrow shape. The wire
+    // format is forward-compatible: v3 handler returns 'v3' here, and the
+    // client routes the SDK contract-handler registration accordingly.
+    contractVersion: 'v2',
   }
 }
 

@@ -13,18 +13,60 @@
         </p>
       </header>
 
-      <!-- 30-second version -->
-      <section class="tldr casino-card">
-        <h2 class="tldr-title">The 30-second version</h2>
-        <ol class="tldr-steps">
-          <li>Both sides <strong>commit</strong> to a hidden secret (only its hash is shared).</li>
-          <li>Each side <strong>escrows</strong> its own stake into a shared contract.</li>
-          <li>You <strong>reveal</strong> your secret. The two secrets together decide the winner.</li>
-          <li>An <strong>Arkade&nbsp;Script covenant</strong> pays the full pot to the winner — the
-            winner never signs, and the loser has no spend path.</li>
-          <li>If the operator goes silent, the contract still lets you <strong>reclaim or sweep</strong>
-            on your own.</li>
-        </ol>
+      <!-- 30-second version + interactive per-party diagram, side by side -->
+      <section class="overview-row">
+        <div class="tldr casino-card">
+          <h2 class="tldr-title">The 30-second version</h2>
+          <ol class="tldr-steps">
+            <li>Both sides <strong>commit</strong> to a hidden secret (only its hash is shared).</li>
+            <li>Each side <strong>escrows</strong> its own stake into its <strong>own</strong> per-party escrow — neither can touch the other's.</li>
+            <li>You <strong>reveal</strong> your secret. The two secrets together decide the winner.</li>
+            <li>An <strong>Arkade&nbsp;Script covenant</strong> pays the full pot to the winner — the
+              winner never signs, and the loser has no spend path.</li>
+            <li>If the operator goes silent, the contract still lets you <strong>reclaim or sweep</strong>
+              on your own.</li>
+          </ol>
+        </div>
+
+        <div class="diagram-card">
+          <div class="scenario-tabs" role="tablist" aria-label="Scenario">
+            <button v-for="s in scenarios" :key="s.id" type="button" role="tab"
+                    :aria-selected="scenario === s.id"
+                    :class="['scenario-tab', { active: scenario === s.id }]"
+                    @click="scenario = s.id">{{ s.label }}</button>
+          </div>
+
+          <div class="pp">
+            <div class="pp-cols">
+              <div class="pp-col">
+                <div class="pp-box you"><span class="pp-name">YOU</span><span class="pp-meta">commit + stake</span></div>
+                <span class="pp-arr">↓</span>
+                <div class="pp-box escrow filled"><span class="pp-name">your escrow</span><span class="pp-meta">staked</span></div>
+              </div>
+              <div class="pp-col">
+                <div class="pp-box house" :class="{ ghost: scenario === 'nofund' }">
+                  <span class="pp-name">HOUSE</span>
+                  <span class="pp-meta">{{ scenario === 'nofund' ? 'no-show' : 'commit + stake' }}</span>
+                </div>
+                <span class="pp-arr" :class="{ ghost: scenario === 'nofund' }">↓</span>
+                <div class="pp-box escrow" :class="scenario === 'nofund' ? 'empty' : 'filled'">
+                  <span class="pp-name">house escrow</span>
+                  <span class="pp-meta">{{ scenario === 'nofund' ? 'never funded' : 'staked' }}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="pp-trigger">{{ outcome.trigger }}</div>
+            <span class="pp-merge">↓</span>
+
+            <div class="pp-outcome" :class="outcome.kind">
+              <span class="pp-out-title">{{ outcome.title }}</span>
+              <span class="pp-out-detail">{{ outcome.detail }}</span>
+            </div>
+          </div>
+
+          <p class="scenario-note">{{ outcome.note }}</p>
+        </div>
       </section>
 
       <!-- The layers -->
@@ -234,6 +276,34 @@ const open = ref<Record<string, boolean>>({})
 const toggle = (k: string) => { open.value = { ...open.value, [k]: !open.value[k] } }
 const condVariant = ref<'coin' | 'odds'>('coin')
 
+// ── At-a-glance scenario toggle ───────────────────────────────────
+// The per-party escrow means each failure mode has a self-serve mitigation.
+type Scenario = 'happy' | 'nofund' | 'noreveal'
+const scenarios: { id: Scenario; label: string }[] = [
+  { id: 'happy', label: 'Happy path' },
+  { id: 'nofund', label: "House doesn't fund" },
+  { id: 'noreveal', label: 'Secret not revealed' },
+]
+const scenario = ref<Scenario>('happy')
+const OUTCOMES: Record<Scenario, { kind: string; trigger: string; title: string; detail: string; note: string }> = {
+  happy: {
+    kind: 'win', trigger: 'you reveal → covenant settles',
+    title: 'Winner takes the pot', detail: 'covenant pays the full pot on-chain',
+    note: 'Both stakes are escrowed and you reveal — the Arkade-Script covenant settles the whole pot to the rightful winner. The winner signs nothing; the loser has no spend path.',
+  },
+  nofund: {
+    kind: 'refund', trigger: 'timeout passes',
+    title: 'You refund your stake', detail: 'CLTV self-refund — nothing at risk',
+    note: "Because escrows are per-party, the house never touched your stake. If it never funds its own, there's no game — after the timeout you reclaim your stake with just your key. A no-show can't cost you.",
+  },
+  noreveal: {
+    kind: 'forfeit', trigger: 'you revealed → deadline passes',
+    title: 'You take the whole pot', detail: 'forfeit path (CLTV) — the staller loses',
+    note: "You revealed but the operator won't settle. After the deadline the forfeit leaf lets you sweep BOTH stakes to yourself — stalling costs the house everything.",
+  },
+}
+const outcome = computed(() => OUTCOMES[scenario.value])
+
 interface Step { ops: string[]; explain: string }
 
 // ── Byte-accurate opcodes, disassembled from the real CoinflipEscrowScript
@@ -420,6 +490,59 @@ h2 { font-size: 1.25rem; font-weight: 700; margin-bottom: 6px; }
     }
     strong { color: var(--text); }
   }
+}
+
+/* Overview: 30-second version + interactive per-party diagram, side by side */
+.overview-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 8px 0 34px; align-items: start;
+}
+.overview-row .tldr { margin: 0; }
+
+.diagram-card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px; box-shadow: var(--shadow-card); display: flex; flex-direction: column; gap: 12px;
+}
+.scenario-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.scenario-tab {
+  flex: 1 1 auto; background: var(--bg-elevated); border: 1px solid var(--border-light);
+  color: var(--text-muted); font-size: 0.7rem; font-weight: 600; padding: 6px 8px;
+  border-radius: 999px; cursor: pointer; transition: all 0.16s; white-space: nowrap;
+  &:hover { color: var(--text); }
+  &.active { background: var(--gold-glow); border-color: var(--gold); color: var(--gold); }
+}
+
+.pp { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.pp-cols { display: flex; gap: 14px; width: 100%; }
+.pp-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 0; }
+.pp-box {
+  width: 100%; text-align: center; border: 1.5px solid var(--border-light); border-radius: 10px;
+  padding: 8px 6px; background: var(--bg-elevated); display: flex; flex-direction: column; gap: 1px;
+  transition: opacity 0.16s, border-color 0.16s;
+  .pp-name { font-weight: 700; font-size: 0.8rem; color: var(--text); }
+  .pp-meta { font-size: 0.64rem; color: var(--text-dim); }
+}
+.pp-box.you { border-color: var(--blue); .pp-name { color: var(--blue); } }
+.pp-box.house { border-color: var(--gold); .pp-name { color: var(--gold); } }
+.pp-box.escrow .pp-name { color: var(--text); font-size: 0.74rem; }
+.pp-box.escrow.filled { border-color: var(--green); background: var(--green-glow); }
+.pp-box.escrow.empty { border-style: dashed; border-color: var(--text-muted); opacity: 0.55; }
+.pp-box.ghost { opacity: 0.4; border-style: dashed; }
+.pp-arr, .pp-merge { color: var(--text-muted); font-size: 0.95rem; line-height: 1; }
+.pp-arr.ghost { opacity: 0.3; }
+.pp-trigger { font-size: 0.66rem; color: var(--text-muted); font-style: italic; margin-top: 3px; }
+.pp-outcome {
+  width: 100%; text-align: center; border: 1.5px solid var(--border-light); border-radius: 10px;
+  padding: 10px 8px; display: flex; flex-direction: column; gap: 2px;
+  .pp-out-title { font-weight: 700; font-size: 0.85rem; }
+  .pp-out-detail { font-size: 0.66rem; color: var(--text-dim); }
+}
+.pp-outcome.win { border-color: var(--green); background: var(--green-glow); .pp-out-title { color: var(--green); } }
+.pp-outcome.refund { border-color: var(--blue); background: var(--blue-glow); .pp-out-title { color: var(--blue); } }
+.pp-outcome.forfeit { border-color: var(--gold); background: var(--gold-glow); .pp-out-title { color: var(--gold); } }
+.scenario-note { font-size: 0.74rem; line-height: 1.55; color: var(--text-dim); margin: 2px 0 0; }
+
+@media (max-width: 720px) {
+  .overview-row { grid-template-columns: 1fr; }
 }
 
 /* Layer cards */

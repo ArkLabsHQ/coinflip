@@ -437,4 +437,28 @@ describe('trustless coin flow (server handlers)', () => {
     const row = await deps.repos.games.get(gameId)
     expect(row.status).toBe('resolved')
   }, 300_000)
+
+  it('reconcile re-settles a committed game whose sweep never landed (backend retry)', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    // Drive play + escrow, then simulate a /commit that PERSISTED the player's
+    // reveal but FAILED at the sweep (emulator/arkd hiccup, crash, exhausted
+    // retries): the game is left `pending` with the secret + escrow, unswept.
+    const { gameId, playerEscrow, playerSecretHex } = await playAndEscrow()
+    const before = await deps.repos.games.get(gameId)
+    const state = JSON.parse(before.house_vtxos_json as string)
+    await deps.repos.games.update(gameId, {
+      playerSecretHex,
+      houseVtxosJson: JSON.stringify({ ...state, playerEscrow }),
+    })
+    expect((await deps.repos.games.get(gameId)).status).toBe('pending') // still unresolved
+
+    // The backend must finish it autonomously — no client action, no forfeit.
+    const reconciled = await server.reconcilePendingSweeps(deps)
+    expect(reconciled).toBeGreaterThanOrEqual(1)
+
+    const resolved = await deps.repos.games.get(gameId)
+    expect(resolved.status).toBe('resolved')
+    expect(['house', 'player']).toContain(resolved.winner)
+    console.log(`[trustless-api] reconcile re-settled committed-but-unswept game → ${resolved.winner}`)
+  }, 300_000)
 })

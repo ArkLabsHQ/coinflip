@@ -704,20 +704,58 @@ export async function handleTrustlessCommit(
     const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
     const ctx = await buildCommitContext(game, state, req.playerSecretHex, req.playerEscrow, deps)
     const { result, sweepTx } = buildCommitResult(ctx, deps)
-    const resolveTxid = await submitCovenantSweep(sweepTx, deps)
-    result.txid = resolveTxid
 
-    const persisted: TrustlessState = { ...state, playerEscrow: req.playerEscrow, resolveTxid }
+    // Persist the player's reveal + escrow BEFORE attempting the sweep. If the
+    // sweep then fails (emulator/arkd hiccup, crash, exhausted retries), the
+    // game is left `pending` WITH the secret, so the background reconcile can
+    // finish settling it autonomously — instead of the secret being lost and
+    // the player forced down the forfeit path ("house didn't reveal").
+    const committed: TrustlessState = { ...state, playerEscrow: req.playerEscrow }
     await deps.repos.games.update(gameId, {
       playerSecretHex: req.playerSecretHex,
+      houseVtxosJson: JSON.stringify(committed),
+    })
+
+    const resolveTxid = await submitCovenantSweep(sweepTx, deps)
+    result.txid = resolveTxid
+    await deps.repos.games.update(gameId, {
       winner: ctx.winner,
       rakeAmount: 0,
       payoutAmount: result.payout,
       status: 'resolved',
-      houseVtxosJson: JSON.stringify(persisted),
+      houseVtxosJson: JSON.stringify({ ...committed, resolveTxid }),
     })
     reservations.release(gameId)
     return result
+  })
+}
+
+/**
+ * Finish a game the player already committed to (their reveal is persisted) but
+ * whose covenant sweep never landed — a transient /commit failure, exhausted
+ * retries, or a crash after persisting the reveal but before the sweep. Rebuilds
+ * the SAME sweep and re-submits it under the per-game lock so it can't race a
+ * client /commit retry. Returns 1 if it resolved the game, else 0.
+ */
+async function resettleCommittedGame(game: GameRow, state: TrustlessState, deps: AppDeps): Promise<number> {
+  return commitLocks.runExclusive(game.id, async () => {
+    const fresh = await deps.repos.games.get(game.id)
+    if (!fresh || fresh.status !== 'pending' || !fresh.player_secret_hex || !state.playerEscrow) return 0
+    try {
+      const ctx = await buildCommitContext(fresh, state, fresh.player_secret_hex, state.playerEscrow, deps)
+      const { result, sweepTx } = buildCommitResult(ctx, deps)
+      const resolveTxid = await submitCovenantSweep(sweepTx, deps)
+      await deps.repos.games.update(game.id, {
+        winner: ctx.winner, rakeAmount: 0, payoutAmount: result.payout,
+        status: 'resolved', houseVtxosJson: JSON.stringify({ ...state, resolveTxid }),
+      })
+      reservations.release(game.id)
+      console.log(`[reconcile] re-settled committed game ${game.id} (winner ${ctx.winner}, tx ${resolveTxid})`)
+      return 1
+    } catch (e) {
+      console.warn(`[reconcile] re-settle of ${game.id} failed (retry next tick): ${e instanceof Error ? e.message : e}`)
+      return 0
+    }
   })
 }
 
@@ -1005,7 +1043,17 @@ export async function reconcilePendingSweeps(
     try {
       const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid: state.houseEscrow.txid, vout: state.houseEscrow.vout }] })
       const v = vtxos.find((x) => x.txid === state.houseEscrow.txid && x.vout === state.houseEscrow.vout) ?? vtxos[0]
-      if (!v || !v.isSpent) continue // not swept → still genuinely pending
+      if (!v || !v.isSpent) {
+        // Escrow not yet spent → the sweep never landed. If the player already
+        // committed (their reveal is persisted), the server has everything it
+        // needs to finish settling — re-attempt the sweep so a transient commit
+        // failure resolves itself instead of stranding the game on the forfeit
+        // path. Otherwise it's genuinely pending (player hasn't revealed yet).
+        if (game.player_secret_hex && state.playerEscrow) {
+          reconciled += await resettleCommittedGame(game, state, deps)
+        }
+        continue
+      }
 
       const pot = state.houseEscrow.value + game.tier // house stake + player stake
       const winner: 'house' | 'player' = (await sweepPaidPlayer(indexer, v, state)) ? 'player' : 'house'

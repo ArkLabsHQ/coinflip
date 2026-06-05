@@ -47,3 +47,6 @@ docker-compose.mutinynet.yml
 
 # Trust-model audit — local-only research doc, not part of the shipped repo.
 docs/TRUSTLESS-AUDIT.md
+
+.attachments/
+.env.regtest.bak

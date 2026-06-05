@@ -159,6 +159,23 @@ jobs:
           EMULATOR_PUBLIC_URL: http://localhost:7073
         run: npx jest --runInBand --forceExit --testTimeout=300000 --ci
 
+      - name: Concurrent load test (100 games / 5 wallets)
+        working-directory: packages/e2e
+        # Gated behind LOAD_TEST (skipped in the run above). Its own DATA_DIR
+        # isolates the house wallet from the main suite. Proves the trustless
+        # flow sustains real concurrent play: distinct house-VTXO reservations,
+        # per-game commit locking, covenant settlement, and the VTXO_NOT_FOUND
+        # sweep-retry — none of which a unit test can cover. Scale via
+        # LOAD_WALLETS / LOAD_GAMES (defaults 5 × 20 = 100).
+        env:
+          DATA_DIR: ./data-load
+          LOAD_TEST: '1'
+          ARK_SERVER_URL: http://localhost:7070
+          ESPLORA_URL: http://localhost:3000/api
+          EMULATOR_URL: http://localhost:7073
+          EMULATOR_PUBLIC_URL: http://localhost:7073
+        run: npx jest --runInBand --forceExit --testTimeout=600000 src/load-100-games.test.ts
+
       - name: Capture logs on failure
         if: failure()
         run: |

@@ -188,10 +188,11 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
 
     const finalExpiration = BigInt(Math.floor(Date.now() / 1000) + FINAL_EXPIRATION_BUFFER)
 
+    const arkdServerPubkey = toXOnly(hex.decode(arkInfo.signerPubkey))
     const baseOpts = {
       creatorPubkey: houseXOnly,
       playerPubkey: playerXOnly,
-      serverPubkey: hex.decode(arkInfo.signerPubkey),  // arkd is the "server" cosigner per v2 convention
+      serverPubkey: arkdServerPubkey,  // arkd is the "server" cosigner per v2 convention
       creatorHash, playerHash,
       finalExpiration, exitDelay: EXIT_DELAY,
       oddsN: N, oddsTarget: TARGET, oddsLo: LO,
@@ -205,8 +206,8 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     }
     const playerEscrowScript = new CoinflipEscrowScriptV3({ ...baseOpts, refundPubkey: playerXOnly })
     const houseEscrowScript  = new CoinflipEscrowScriptV3({ ...baseOpts, refundPubkey: houseXOnly })
-    const playerEscrowAddr = playerEscrowScript.address('tark', hex.decode(arkInfo.signerPubkey))
-    const houseEscrowAddr  = houseEscrowScript.address('tark', hex.decode(arkInfo.signerPubkey))
+    const playerEscrowAddr = playerEscrowScript.address('tark', arkdServerPubkey)
+    const houseEscrowAddr  = houseEscrowScript.address('tark', arkdServerPubkey)
 
     // ── Fund both escrows ─────────────────────────────────────────────────
     async function fundEscrow(wallet: Wallet, identity: Identity, escrowAddr: ArkAddress) {
@@ -232,6 +233,23 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     const playerEscrow = { txid: playerEscrowTxid, vout: 0, value: BET }
     const houseEscrow  = { txid: houseEscrowTxid, vout: 0, value: BET }
 
+    // Wait for arkd to index both escrow VTXOs — without this the emulator's
+    // checkpoint lookup ("checkpoint not found for input 0") races the
+    // finalizeTx → indexer chain.
+    async function waitForEscrowIndexed(outpoint: { txid: string; vout: number }) {
+      for (let i = 0; i < 30; i++) {
+        const { vtxos } = await indexer.getVtxos({ outpoints: [outpoint] })
+        if (vtxos.length > 0 && !vtxos[0].isSpent) return
+        await sleep(1000)
+      }
+      throw new Error(`escrow ${outpoint.txid}:${outpoint.vout} not indexed`)
+    }
+    await Promise.all([
+      waitForEscrowIndexed(playerEscrow),
+      waitForEscrowIndexed(houseEscrow),
+    ])
+    console.log(`[v3-regtest] both escrows indexed; player=${playerEscrowTxid.slice(0,16)}… house=${houseEscrowTxid.slice(0,16)}…`)
+
     // ── Build the v3 covenant sweep ───────────────────────────────────────
     const { arkTx, checkpoints } = buildCovenantSweepTransactionV3(arkInfo, {
       winner: 'player',
@@ -245,21 +263,37 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
       creatorReveal,
     })
 
-    // ── Send to emulator (it runs the arkade-script + cosigns + forwards) ─
-    const sweepResp = await fetch(`${EMULATOR_URL}/v1/tx`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        arkTx: base64.encode(arkTx.toPSBT()),
-        checkpointTxs: checkpoints.map((c) => base64.encode(c.toPSBT())),
-      }),
+    // ── Send to emulator with retry on transient indexing lag ────────────
+    // Both escrows were JUST finalized; arkd can lag indexing their checkpoints
+    // by a beat. Mirror submitCovenantSweep's retry pattern: ~10s total backoff.
+    const payload = JSON.stringify({
+      arkTx: base64.encode(arkTx.toPSBT()),
+      checkpointTxs: checkpoints.map((c) => base64.encode(c.toPSBT())),
     })
-    if (!sweepResp.ok) {
-      throw new Error(`emulator rejected v3 sweep: ${sweepResp.status} ${await sweepResp.text()}`)
+    let sweepBody: { signedArkTx?: string } | null = null
+    let lastErr = ''
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const resp = await fetch(`${EMULATOR_URL}/v1/tx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+        signal: AbortSignal.timeout(20_000),
+      })
+      if (resp.ok) {
+        sweepBody = (await resp.json()) as { signedArkTx?: string }
+        break
+      }
+      lastErr = await resp.text()
+      // Same transient-retry condition v2's submitCovenantSweep uses.
+      const transient = resp.status >= 500 && /failed to process transaction|VTXO_NOT_FOUND|not found|checkpoint/i.test(lastErr)
+      if (transient && attempt < 7) {
+        await sleep(400 + attempt * 400)
+        continue
+      }
+      throw new Error(`emulator rejected v3 sweep (status ${resp.status}): ${lastErr}`)
     }
-    const sweepBody = (await sweepResp.json()) as { signedArkTx?: string }
-    expect(sweepBody.signedArkTx).toBeTruthy()
-    const settled = Transaction.fromPSBT(base64.decode(sweepBody.signedArkTx!))
+    if (!sweepBody?.signedArkTx) throw new Error(`emulator never accepted sweep after retries; last: ${lastErr}`)
+    const settled = Transaction.fromPSBT(base64.decode(sweepBody.signedArkTx))
     const settledTxid = settled.id
 
     await mineBlock(2)

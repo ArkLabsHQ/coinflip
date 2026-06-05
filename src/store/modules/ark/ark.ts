@@ -109,6 +109,19 @@ export interface StashedRefund {
   /** The player escrow's Ark address — its pkScript is the contract's key
    *  (and what we deactivate when the bet is done). */
   escrowAddress?: string
+  /**
+   * Contract version used by this game. 'v2' is the legacy length-encoded
+   * predicate; 'v3' uses the arkade-script + packet-borne reveals shape.
+   * Undefined means v2 (forward-compat with stashes written before this field).
+   * Drives which SDK contract handler type the ContractWatcher registers.
+   */
+  contractVersion?: 'v2' | 'v3'
+  /**
+   * v3 only — the player's commit (digit + salt). Salt stored hex-encoded for
+   * JSON serializability. Stored ONLY in the stash; never sent off-device
+   * except as the /commit payload at reveal time.
+   */
+  reveal?: { digit: number; salt: string }
 }
 
 // Stash backend moved to IndexedDB via @/utils/stashStore. The shape and

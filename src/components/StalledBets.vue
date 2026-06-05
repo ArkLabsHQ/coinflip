@@ -11,7 +11,7 @@
         <div class="bet-info">
           <span class="amount penalty-amount">Claim full pot — {{ b.tier.toLocaleString() }} sats (your stake + house)</span>
           <span class="state" :class="{ ready: isForfeitReady(b), auto: isAutoClaiming(b) }">{{ forfeitStatusLabel(b) }}</span>
-          <span class="penalty-note">The house didn't reveal its secret. Forfeit kicks in — you take everything.</span>
+          <span class="penalty-note">{{ forfeitNote(b) }}</span>
         </div>
         <div class="bet-actions">
           <button
@@ -115,6 +115,19 @@ export default defineComponent({
       return `Reclaimable in ~${mins} min (chain time)`
     }
 
+    /**
+     * CLTV-aware forfeit note. Before the forfeit is claimable a stalled game is
+     * almost always just settling (the operator finishes it autonomously), so we
+     * stay calm and frame the forfeit as the trustless backup. Once the CLTV is
+     * reached and the forfeit is genuinely claimable, we explain the take-the-pot
+     * outcome.
+     */
+    function forfeitNote(b: StashedRefund): string {
+      return isForfeitReady(b)
+        ? 'The house never revealed its secret. Forfeit kicks in — you take the whole pot.'
+        : 'Settling — the operator completes this automatically, usually within a minute. This is your trustless backup if it stalls.'
+    }
+
     function forfeitStatusLabel(b: StashedRefund): string {
       if (isAutoClaiming(b)) return 'Auto-claiming…'
       if (chainTime.value === null) return 'Checking chain time…'
@@ -185,7 +198,7 @@ export default defineComponent({
       bets, message,
       hasForfeit, isReady, isForfeitReady,
       isClaiming, isAutoClaiming,
-      statusLabel, forfeitStatusLabel, claimBtnLabel,
+      statusLabel, forfeitStatusLabel, forfeitNote, claimBtnLabel,
       reclaim, claimForfeit,
     }
   },

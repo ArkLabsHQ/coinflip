@@ -16,7 +16,7 @@ import {
   setArkPsbtField,
   getArkPsbtFields,
 } from '@arkade-os/sdk'
-import { CoinflipEscrowScript, VARIABLE_ODDS_BASE_LEN } from './script'
+import { CoinflipEscrowScript, VARIABLE_ODDS_BASE_LEN, type CoinflipEscrowOptions } from './script'
 import { Game } from './types'
 import {
   addEmulatorPacket,
@@ -90,6 +90,31 @@ export function getPlayerEscrowAddress(game: Game, networkHrp: string): ArkAddre
 
 export function getHouseEscrowAddress(game: Game, networkHrp: string): ArkAddress {
   return getHouseEscrowScript(game).address(networkHrp, game.serverPubkey!)
+}
+
+/**
+ * The exact `CoinflipEscrowOptions` that produced the house escrow's on-chain
+ * pkScript. `CoinflipEscrowScript` stores its constructor opts on the public
+ * `readonly options` field, so this is the single source of truth — serialize
+ * these through `CoinflipEscrowContractHandler.serializeParams` and the handler
+ * re-derives a byte-identical script. Used to register the house escrow as a
+ * first-class SDK contract.
+ */
+export function getHouseEscrowOptions(game: Game): CoinflipEscrowOptions {
+  return getHouseEscrowScript(game).options
+}
+
+/**
+ * The exact `CoinflipEscrowOptions` that produced the PLAYER escrow's on-chain
+ * pkScript — the player-side mirror of `getHouseEscrowOptions`. Same single
+ * source of truth: serialize these through
+ * `CoinflipEscrowContractHandler.serializeParams` and the handler re-derives a
+ * byte-identical script. Used by the client to register its own escrow as a
+ * first-class SDK contract so the ContractWatcher clears the stalled-bet stash
+ * the instant the atomic sweep spends it.
+ */
+export function getPlayerEscrowOptions(game: Game): CoinflipEscrowOptions {
+  return getPlayerEscrowScript(game).options
 }
 
 /** Get the pot amount (2x bet) */

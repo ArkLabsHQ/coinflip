@@ -16,11 +16,39 @@ FROM node:20-alpine AS client
 WORKDIR /app
 # Vendored @arkade-os/sdk tarball (file: dep) must be present before install.
 COPY vendor/ ./vendor/
+
+# The client depends on `arkade-coinflip` (file:packages/lib), which in turn
+# depends on @arklabshq/contract-workflows-prototype. Both must be BUILT before
+# the root `npm install` can resolve `file:packages/lib` to a usable dist and
+# the client bundle can import `arkade-coinflip/contract`. Mirror Stage 2.
+
+# contract-workflows-prototype first (file: dep of lib; its dist must exist
+# before lib's install/build can resolve it).
+COPY packages/contract-workflows-prototype/package.json packages/contract-workflows-prototype/package-lock.json* ./packages/contract-workflows-prototype/
+WORKDIR /app/packages/contract-workflows-prototype
+RUN npm install
+COPY packages/contract-workflows-prototype/ ./
+RUN npm run build
+
+# lib (client imports arkade-coinflip/contract from it)
+WORKDIR /app
+COPY packages/lib/package.json packages/lib/package-lock.json* ./packages/lib/
+WORKDIR /app/packages/lib
+RUN npm install
+COPY packages/lib/ ./
+RUN npm run build
+
+# client (root install now resolves file:packages/lib to a built dist)
+WORKDIR /app
 COPY package.json package-lock.json* yarn.lock* ./
 RUN npm install
 COPY src/ ./src/
 COPY public/ ./public/
 COPY tsconfig.json babel.config.js vue.config.js* ./
+# .eslintignore is load-bearing: vue-cli's build lints the project tree, and
+# with `transpileDependencies` the lib/cwp transpiled dist/*.js lands inside it.
+# Without these the eslint-loader rejects the transpiled JS (var / require()).
+COPY .eslintrc.js .eslintignore ./
 # BASE_URL defaults to '' → the client calls /api on its own origin, which the
 # bundled server serves. No VUE_APP_API_URL needed.
 RUN npm run build

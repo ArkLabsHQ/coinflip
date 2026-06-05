@@ -47,6 +47,8 @@ export {
   getHouseEscrowScript,
   getPlayerEscrowAddress,
   getHouseEscrowAddress,
+  getHouseEscrowOptions,
+  getPlayerEscrowOptions,
   getPotAmount,
   buildForfeitClaimTransaction,
   buildCovenantSweepTransaction,
@@ -76,6 +78,16 @@ export { coinSelect } from './coinselect'
 // dueling-instance issues when the SDK ends up installed in multiple
 // package node_modules trees.
 export { contractHandlers } from '@arkade-os/sdk'
+
+// Coinflip escrow registered as a first-class SDK contract type — lets the
+// ContractManager/ContractWatcher track each game's escrow and emit
+// vtxo_received / vtxo_spent events.
+export {
+  COINFLIP_ESCROW_TYPE,
+  CoinflipEscrowContractHandler,
+  registerCoinflipContracts,
+  type CoinflipContractRegistry,
+} from './contract'
 
 // Arkade-script forfeit support — see arkade-forfeit.ts module header.
 export {

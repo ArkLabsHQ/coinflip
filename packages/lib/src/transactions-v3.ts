@@ -12,12 +12,24 @@
  * server's commit handler, not here — this module stays transport-free).
  */
 
-import { ArkAddress } from '@arkade-os/sdk'
+import { hex } from '@scure/base'
+import {
+  ArkAddress,
+  ArkInfo,
+  buildOffchainTx,
+  CSVMultisigTapscript,
+  decodeTapscript,
+  Transaction,
+  type TapLeafScript,
+} from '@arkade-os/sdk'
+import { emulator, packets } from '@arklabshq/contract-workflows-prototype'
 import {
   CoinflipEscrowScriptV3,
   type CoinflipEscrowOptionsV3,
 } from './script-v3'
+import { type DigitCommit } from './arkade-win'
 import type { Game } from './types'
+import type { BuiltOffchainTx } from './transactions'
 
 function assertDefined<T>(v: T | undefined | null, name: string): asserts v is T {
   if (v === undefined || v === null) throw new Error(`${name} is required for v3`)
@@ -87,3 +99,109 @@ export function getPlayerEscrowOptionsV3(game: Game): CoinflipEscrowOptionsV3 {
 export function getHouseEscrowOptionsV3(game: Game): CoinflipEscrowOptionsV3 {
   return getHouseEscrowScriptV3(game).options
 }
+
+export interface EscrowInputV3 {
+  script: CoinflipEscrowScriptV3
+  txid: string
+  vout: number
+  value: number
+}
+
+export interface CovenantSweepArgsV3 {
+  winner: 'player' | 'house'
+  /** Exactly 2 escrows: player's escrow and house's escrow. */
+  escrows: [EscrowInputV3, EscrowInputV3]
+  /** Address the pot is paid to (winner's Ark address). */
+  payoutAddress: string
+  /** Total pot = sum of both stakes. */
+  potAmount: bigint
+  /** Both parties' digit + salt reveals (server holds both at commit time). */
+  playerReveal: DigitCommit
+  creatorReveal: DigitCommit
+}
+
+/**
+ * Build the v3 covenant sweep transaction.
+ *
+ * Two-input → one-output atomic sweep:
+ *   - Inputs: both escrow VTXOs spent via the winner's covenant leaf.
+ *   - Output: full pot to winner's payout address.
+ *
+ * Witness components per input:
+ *   - Multisig sigs: [server_sig, emu_sig] (server signs at /commit, emu cosigns
+ *     after running the arkade-script).
+ *   - EmulatorPacket: carries the full arkade-script (predicate + atomic-sweep
+ *     covenant) committed via the emu-tweaked key. Per-input witness =
+ *     `[output_index=0, other_input_index=1-i]`.
+ *
+ * Extension packets on the tx (NEW in v3 — read by OP_INSPECTPACKET):
+ *   - 0x10 (REVEAL_PLAYER_PACKET_TYPE):  `[playerDigit] ‖ playerSalt`
+ *   - 0x11 (REVEAL_CREATOR_PACKET_TYPE): `[creatorDigit] ‖ creatorSalt`
+ *
+ * NO ConditionWitness — v3 leaves are plain Multisig (predicate moved into
+ * arkade-script). NO secret bytes in the witness stack — reveals ride packets.
+ */
+export function buildCovenantSweepTransactionV3(
+  arkInfo: ArkInfo,
+  args: CovenantSweepArgsV3,
+): BuiltOffchainTx & {
+  emulatorEntries: { vin: number; script: Uint8Array; witness: Uint8Array }[]
+} {
+  if (args.potAmount <= 0n) {
+    throw new Error('buildCovenantSweepTransactionV3: potAmount must be positive')
+  }
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const leafFor = (s: CoinflipEscrowScriptV3): TapLeafScript =>
+    args.winner === 'player' ? s.playerWinCovenant() : s.creatorWinCovenant()
+  const arkadeFor = (s: CoinflipEscrowScriptV3): Uint8Array =>
+    args.winner === 'player' ? s.playerWinFullArkadeScript : s.creatorWinFullArkadeScript
+
+  const inputs = args.escrows.map((e) => ({
+    txid: e.txid,
+    vout: e.vout,
+    value: e.value,
+    tapLeafScript: leafFor(e.script),
+    tapTree: e.script.encode(),
+  }))
+
+  const payoutAddr = ArkAddress.decode(args.payoutAddress)
+  const outputs = [{ script: payoutAddr.pkScript, amount: args.potAmount }]
+
+  const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
+
+  // EmulatorPacket per input: arkade-script + covenant witness args.
+  // Witness layout: `[out_idx=0, other_in_idx=(1-i)]` — covenant pops these in
+  // order. EmulatorPacket entries carry the script + per-input witness so the
+  // emulator can re-run each leaf's commitment under its specific witness.
+  const emulatorEntries = args.escrows.map((_e, i) => ({
+    vin: i,
+    script: arkadeFor(args.escrows[i].script),
+    witness: emulator.encodeWitness([
+      emulator.encodeIndex(0),
+      emulator.encodeIndex(1 - i),
+    ]),
+  }))
+  emulator.addPacket(arkTx, emulatorEntries)
+
+  // Reveal packets — game-specific digit+salt reveals read by OP_INSPECTPACKET.
+  // Attached to the arkTx; both inputs' scripts see them (OP_INSPECTPACKET
+  // reads from the spending tx, not a specific input's previous tx).
+  const playerData = packets.encodeReveal(args.playerReveal.digit, args.playerReveal.salt)
+  const creatorData = packets.encodeReveal(args.creatorReveal.digit, args.creatorReveal.salt)
+  packets.addRevealPacket(arkTx, packets.REVEAL_PLAYER_PACKET_TYPE, playerData)
+  packets.addRevealPacket(arkTx, packets.REVEAL_CREATOR_PACKET_TYPE, creatorData)
+  // Checkpoints also need the reveal packets — arkd validates the same
+  // script against each signed psbt.
+  for (const cp of checkpoints) {
+    packets.addRevealPacket(cp, packets.REVEAL_PLAYER_PACKET_TYPE, playerData)
+    packets.addRevealPacket(cp, packets.REVEAL_CREATOR_PACKET_TYPE, creatorData)
+  }
+
+  return { arkTx, checkpoints, emulatorEntries }
+}
+
+// Ensure the unused parameter import is not flagged.
+void Transaction

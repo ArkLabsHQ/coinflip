@@ -127,4 +127,7 @@ export {
   getHouseEscrowAddressV3,
   getPlayerEscrowOptionsV3,
   getHouseEscrowOptionsV3,
+  buildCovenantSweepTransactionV3,
+  type EscrowInputV3,
+  type CovenantSweepArgsV3,
 } from './transactions-v3'

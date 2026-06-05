@@ -82,15 +82,16 @@ describe('CoinflipEscrowScriptV3 — taptree shape', () => {
     expect(new Set(leafHexes).size).toBe(10)
   })
 
-  it('cooperativeSpend is a plain 2-of-2 Multisig[player, creator] — no emu, no CSV, no covenant', () => {
+  it('cooperativeSpend is Multisig[player, creator, server] — no emu, no CSV, no covenant; server is a passive co-signer required by arkd', () => {
     const s = new CoinflipEscrowScriptV3(baseOpts)
     const body = hex.encode(s.cooperativeSpend()[1])
-    // Both pubkeys present.
+    // Player + creator + server present (arkd's vtxo-script validator
+    // requires every Multisig closure to contain the signer pubkey).
     expect(body.includes(hex.encode(PLAYER))).toBe(true)
     expect(body.includes(hex.encode(CREATOR))).toBe(true)
-    // No emu, no server (it's pure peer-to-peer).
+    expect(body.includes(hex.encode(SERVER))).toBe(true)
+    // No emu — emu-offline recovery is the whole point.
     expect(body.includes(hex.encode(EMU))).toBe(false)
-    expect(body.includes(hex.encode(SERVER))).toBe(false)
     // No CSV opcode (b2) — leaf 9 is immediately spendable.
     expect(body.includes('b2')).toBe(false)
   })

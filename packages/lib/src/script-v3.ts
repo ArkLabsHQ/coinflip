@@ -172,8 +172,24 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
     })
 
     // ── Leaves 9, 10 — NEW: cooperative spend + CSV mirror ──────────────
+    //
+    // arkd validates that every MultisigClosure / CLTVMultisigClosure /
+    // ConditionMultisigClosure leaf in the taptree contains the arkd signer
+    // pubkey (see arkd's `pkg/ark-lib/script/vtxo_script.go:97-133`,
+    // `Validate` → `ForfeitClosures()`). Without this, arkd rejects the whole
+    // VTXO with "invalid forfeit closure, signer pubkey not found".
+    //
+    // Adding `serverPubkey` to the cooperative leaf doesn't change the
+    // semantics: arkd's co-sig is automatic for valid spends, so player +
+    // creator can still cooperatively settle whenever they agree — the server
+    // is a passive co-signer, not a veto. This still lets the parties bypass
+    // the emulator entirely (emu-offline recovery).
+    //
+    // CSV-mirror leaves are ExitClosures (`CSVMultisigClosure`) and are NOT
+    // checked for the signer pubkey — so leaf 10 stays a pure player+creator
+    // 2-of-2.
     const cooperativeSpendScript = MultisigTapscript.encode({
-      pubkeys: [playerPubkey, creatorPubkey],
+      pubkeys: [playerPubkey, creatorPubkey, serverPubkey],
     }).script
     const cooperativeSpendExitScript = CSVMultisigTapscript.encode({
       timelock: { value: exitDelay, type: 'seconds' },

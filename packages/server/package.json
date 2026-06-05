@@ -1,6 +1,6 @@
 {
   "name": "arkade-coinflip-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Coinflip house mode server with admin dashboard",
   "main": "dist/index.js",
   "scripts": {

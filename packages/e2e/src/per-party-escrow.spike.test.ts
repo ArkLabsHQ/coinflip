@@ -1,24 +1,21 @@
 /**
- * Per-party escrow spike.
+ * Per-party escrow spike — player self-refund path.
  *
- * Proves the architecture that makes trustless settlement wireable in a real
- * client/server (the co-funded setup needed both parties to co-sign post-submit
- * checkpoints — impossible across an HTTP boundary). Here:
+ * Proves the per-party architecture now shipped as the live CoinflipEscrowScript:
+ * each party sends its stake to the SAME escrow address with an ordinary
+ * SINGLE-PARTY offchain tx (the sender signs its own input + checkpoint), so no
+ * step needs the counterparty to co-sign a checkpoint — impossible across an
+ * HTTP boundary. That maps cleanly onto: client sends player stake, server sends
+ * house stake.
  *
- *   - escrow contract = CoinflipFinalScript (creatorWin / playerWin / abort)
- *   - each party sends their stake to the SAME escrow address with an ordinary
- *     SINGLE-PARTY offchain tx (the sender signs its own input + checkpoint)
- *   - the winner sweeps BOTH escrow VTXOs through their leaf in one tx — also
- *     single-party (winner + arkd server), with both secrets as witness.
- *
- * No step needs the counterparty to sign a checkpoint, so this maps cleanly
- * onto: client sends player stake, server sends house stake, winner sweeps.
+ * This spike exercises the player's CLTV self-refund leaf after a house stall:
+ * the player reclaims its own escrow with only player+server sigs (no emulator),
+ * via buildRefundTransaction against a real CoinflipEscrowScript.
  */
 
 import { base64, hex } from '@scure/base'
 import { createHash } from 'crypto'
 import {
-  CoinflipFinalScript,
   CoinflipEscrowScript,
   buildRefundTransaction,
   generateSecret,
@@ -160,62 +157,6 @@ describe('spike: per-party escrow + winner sweep', () => {
     const txid = await spend(arkTx, checkpoints, id, [0])
     return { txid, vout: 0, value: amount }
   }
-
-  it('escrows both stakes via single-party sends and the winner sweeps the pot', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
-
-    const houseId = SingleKey.fromRandomBytes()
-    const playerId = SingleKey.fromRandomBytes()
-    const houseW = await makeWallet(houseId)
-    const playerW = await makeWallet(playerId)
-    await faucet(await houseW.getBoardingAddress(), FUND_BTC)
-    await faucet(await playerW.getBoardingAddress(), FUND_BTC)
-    await waitFor(houseW, 'boarding', BET); await waitFor(playerW, 'boarding', BET)
-    await settleWithRetry(houseW); await settleWithRetry(playerW)
-    await waitFor(houseW, 'settled', BET); await waitFor(playerW, 'settled', BET)
-
-    const housePub = await houseId.xOnlyPublicKey()
-    const playerPub = await playerId.xOnlyPublicKey()
-    const serverPubkey = toXOnly(hex.decode(arkInfo.signerPubkey))
-    const creatorSecret = generateSecret('heads') // 15 → house (creator) wins vs tails
-    const playerSecret = generateSecret('tails')
-    const now = Math.floor(Date.now() / 1000)
-
-    // Escrow contract: the same CoinflipFinalScript both parties fund.
-    const escrowScript = new CoinflipFinalScript({
-      creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey,
-      creatorHash: sha(creatorSecret), playerHash: sha(playerSecret), finalExpiration: BigInt(now + 1200),
-    })
-    const escrowAddr = escrowScript.address(NETWORK_HRP, serverPubkey)
-    console.log('[escrow] address:', escrowAddr.encode())
-
-    // Each party escrows its stake — single-party sends.
-    const houseEscrow = await escrow(houseW, houseId, escrowAddr.pkScript, await houseW.getAddress(), BET)
-    const playerEscrow = await escrow(playerW, playerId, escrowAddr.pkScript, await playerW.getAddress(), BET)
-    console.log('[escrow] house:', houseEscrow.txid, 'player:', playerEscrow.txid)
-
-    // House won (different secret sizes). Sweep BOTH escrow VTXOs via creatorWin.
-    const leaf = escrowScript.creatorWin()
-    const tapTree = escrowScript.encode()
-    const sweepInputs: ArkTxInput[] = [houseEscrow, playerEscrow].map((e) => ({
-      txid: e.txid, vout: e.vout, value: e.value, tapLeafScript: leaf, tapTree,
-    }))
-    const pot = houseEscrow.value + playerEscrow.value
-    const houseAddr = ArkAddress.decode(await houseW.getAddress())
-    const { arkTx: sweep, checkpoints: sweepCps } = buildOffchainTx(
-      sweepInputs, [{ script: houseAddr.pkScript, amount: BigInt(pot) }], serverUnroll,
-    )
-
-    const vtxoTotal = async () => (await houseW.getVtxos()).reduce((a, v) => a + v.value, 0)
-    const before = await vtxoTotal()
-    const sweepTxid = await spend(sweep, sweepCps, houseId, [0, 1], [creatorSecret, playerSecret])
-    console.log('[escrow] sweep:', sweepTxid)
-
-    await sleep(6000)
-    const after = await vtxoTotal()
-    console.log('[escrow] house total before sweep:', before, 'after:', after)
-    expect(after - before).toBeGreaterThanOrEqual(pot - 100)
-  }, 300_000)
 
   it('player refunds its own escrow after a stall (house griefs)', async () => {
     if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }

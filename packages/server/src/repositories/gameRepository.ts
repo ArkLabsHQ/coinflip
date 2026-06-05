@@ -15,10 +15,8 @@ export class SQLiteGameRepository implements GameRepository {
     await this.db.run(
       `INSERT INTO games (
          id, tier, player_pubkey, player_choice, player_hash,
-         player_change_address, house_secret_hex,
-         setup_tx_hex, final_tx_hex, setup_script_hex, final_script_hex,
-         setup_checkpoints_json, final_checkpoints_json, house_vtxos_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         player_change_address, house_secret_hex, house_vtxos_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         game.id,
         game.tier,
@@ -27,12 +25,6 @@ export class SQLiteGameRepository implements GameRepository {
         game.playerHash,
         game.playerChangeAddress || null,
         game.houseSecretHex,
-        game.setupTxHex || null,
-        game.finalTxHex || null,
-        game.setupScriptHex || null,
-        game.finalScriptHex || null,
-        game.setupCheckpointsJson || null,
-        game.finalCheckpointsJson || null,
         game.houseVtxosJson || null,
       ],
     )
@@ -75,13 +67,6 @@ export class SQLiteGameRepository implements GameRepository {
     return this.db.all<GameRow>(
       'SELECT * FROM games ORDER BY created_at DESC LIMIT ? OFFSET ?',
       [limit, offset],
-    )
-  }
-
-  async findByContractScript(scriptHex: string): Promise<GameRow | undefined> {
-    return this.db.get<GameRow>(
-      'SELECT * FROM games WHERE setup_script_hex = ? OR final_script_hex = ? LIMIT 1',
-      [scriptHex, scriptHex],
     )
   }
 

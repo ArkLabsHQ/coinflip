@@ -35,8 +35,11 @@ import {
   SingleKey,
   InMemoryWalletRepository,
   InMemoryContractRepository,
+  PrevArkTxField,
   RestArkProvider,
   RestIndexerProvider,
+  RestEmulatorProvider,
+  setArkPsbtField,
   type ArkProvider,
   type Identity,
   type IndexerProvider,
@@ -209,8 +212,10 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     const playerEscrowAddr = playerEscrowScript.address('tark', arkdServerPubkey)
     const houseEscrowAddr  = houseEscrowScript.address('tark', arkdServerPubkey)
 
-    // ── Fund both escrows ─────────────────────────────────────────────────
-    async function fundEscrow(wallet: Wallet, identity: Identity, escrowAddr: ArkAddress) {
+    // ── Fund both escrows. Return the FINAL ark tx bytes too — the sweep
+    //    needs them set via PrevArkTxField for the emu's checkpoint
+    //    resolution.
+    async function fundEscrow(wallet: Wallet, identity: Identity, escrowAddr: ArkAddress): Promise<{ txid: string; fundingArkTxBytes: Uint8Array }> {
       const vtxos = await wallet.getVtxos()
       const v = vtxos[0]
       const change = v.value - BET
@@ -225,13 +230,31 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
         outputs,
         serverUnroll,
       )
-      return await submitSingleParty(ark, identity, offchainTx.arkTx, offchainTx.checkpoints, 0)
+      const txid = await submitSingleParty(ark, identity, offchainTx.arkTx, offchainTx.checkpoints, 0)
+      // Query arkd for the finalized funding-tx wire-format bytes — needed
+      // by PrevArkTxField so the emu can resolve the prev tx for our sweep.
+      let fundingArkTxBytes: Uint8Array = new Uint8Array(0)
+      for (let i = 0; i < 20; i++) {
+        try {
+          const out = await indexer.getVirtualTxs([txid])
+          const txs = (out as { txs?: string[] }).txs ?? []
+          if (txs.length > 0 && txs[0]) {
+            fundingArkTxBytes = hex.decode(txs[0])
+            break
+          }
+        } catch { /* indexing lag — retry */ }
+        await sleep(500)
+      }
+      if (fundingArkTxBytes.length === 0) throw new Error(`could not fetch funding tx ${txid}`)
+      return { txid, fundingArkTxBytes }
     }
 
-    const playerEscrowTxid = await fundEscrow(playerW, playerId, playerEscrowAddr)
-    const houseEscrowTxid  = await fundEscrow(houseW, houseId, houseEscrowAddr)
-    const playerEscrow = { txid: playerEscrowTxid, vout: 0, value: BET }
-    const houseEscrow  = { txid: houseEscrowTxid, vout: 0, value: BET }
+    const playerFunding = await fundEscrow(playerW, playerId, playerEscrowAddr)
+    const houseFunding  = await fundEscrow(houseW, houseId, houseEscrowAddr)
+    const playerEscrow = { txid: playerFunding.txid, vout: 0, value: BET }
+    const houseEscrow  = { txid: houseFunding.txid, vout: 0, value: BET }
+    // Stash funding bytes for PrevArkTxField below.
+    const prevArkTxs: Uint8Array[] = [playerFunding.fundingArkTxBytes, houseFunding.fundingArkTxBytes]
 
     // Wait for arkd to index both escrow VTXOs — without this the emulator's
     // checkpoint lookup ("checkpoint not found for input 0") races the
@@ -248,7 +271,7 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
       waitForEscrowIndexed(playerEscrow),
       waitForEscrowIndexed(houseEscrow),
     ])
-    console.log(`[v3-regtest] both escrows indexed; player=${playerEscrowTxid.slice(0,16)}… house=${houseEscrowTxid.slice(0,16)}…`)
+    console.log(`[v3-regtest] both escrows indexed; player=${playerEscrow.txid.slice(0,16)}… house=${houseEscrow.txid.slice(0,16)}…`)
 
     // ── Build the v3 covenant sweep ───────────────────────────────────────
     const { arkTx, checkpoints } = buildCovenantSweepTransactionV3(arkInfo, {
@@ -263,37 +286,35 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
       creatorReveal,
     })
 
-    // ── Send to emulator with retry on transient indexing lag ────────────
-    // Both escrows were JUST finalized; arkd can lag indexing their checkpoints
-    // by a beat. Mirror submitCovenantSweep's retry pattern: ~10s total backoff.
-    const payload = JSON.stringify({
-      arkTx: base64.encode(arkTx.toPSBT()),
-      checkpointTxs: checkpoints.map((c) => base64.encode(c.toPSBT())),
-    })
-    let sweepBody: { signedArkTx?: string } | null = null
+    // Set PrevArkTxField on each input — emu uses this to resolve the prev
+    // ark tx for checkpoint validation. The v2 server-side path gets this
+    // implicitly through the wallet's VTXO cache; here we build it by hand.
+    for (let i = 0; i < prevArkTxs.length; i++) {
+      setArkPsbtField(arkTx, i, PrevArkTxField, prevArkTxs[i])
+    }
+
+    // ── Send to emulator via SDK provider (proper normalization + retry) ─
+    const emu = new RestEmulatorProvider(EMULATOR_URL)
+    const encodedArkTx = base64.encode(arkTx.toPSBT())
+    const encodedCheckpoints = checkpoints.map((c) => base64.encode(c.toPSBT()))
+    let signedArkTx = ''
     let lastErr = ''
     for (let attempt = 0; attempt < 8; attempt++) {
-      const resp = await fetch(`${EMULATOR_URL}/v1/tx`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: payload,
-        signal: AbortSignal.timeout(20_000),
-      })
-      if (resp.ok) {
-        sweepBody = (await resp.json()) as { signedArkTx?: string }
+      try {
+        const out = await emu.submitTx(encodedArkTx, encodedCheckpoints)
+        signedArkTx = out.signedArkTx
+        if (!signedArkTx) throw new Error('emulator returned no signedArkTx')
         break
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : String(e)
+        if (attempt < 7 && /failed to process transaction|VTXO_NOT_FOUND|not found|checkpoint/i.test(lastErr)) {
+          await sleep(400 + attempt * 400)
+          continue
+        }
+        throw new Error(`emulator rejected v3 sweep: ${lastErr}`)
       }
-      lastErr = await resp.text()
-      // Same transient-retry condition v2's submitCovenantSweep uses.
-      const transient = resp.status >= 500 && /failed to process transaction|VTXO_NOT_FOUND|not found|checkpoint/i.test(lastErr)
-      if (transient && attempt < 7) {
-        await sleep(400 + attempt * 400)
-        continue
-      }
-      throw new Error(`emulator rejected v3 sweep (status ${resp.status}): ${lastErr}`)
     }
-    if (!sweepBody?.signedArkTx) throw new Error(`emulator never accepted sweep after retries; last: ${lastErr}`)
-    const settled = Transaction.fromPSBT(base64.decode(sweepBody.signedArkTx))
+    const settled = Transaction.fromPSBT(base64.decode(signedArkTx))
     const settledTxid = settled.id
 
     await mineBlock(2)

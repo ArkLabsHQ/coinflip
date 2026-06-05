@@ -16,6 +16,7 @@ import { hex } from '@scure/base'
 import {
   ArkAddress,
   ArkInfo,
+  ArkTxInput,
   buildOffchainTx,
   CSVMultisigTapscript,
   decodeTapscript,
@@ -225,6 +226,161 @@ export function buildCovenantSweepTransactionV3(
   packets.addRevealPacket(arkTx, packets.REVEAL_CREATOR_PACKET_TYPE, creatorData)
 
   return { arkTx, checkpoints, emulatorEntries }
+}
+
+/**
+ * v3 refund builder — same shape as v2 `buildRefundTransaction` but binds to
+ * the v3 escrow's `refund()` leaf (UNCHANGED from v2 at the leaf-script level,
+ * but lives in a different tap-tree shape, so encode()/refund() differ).
+ */
+export interface RefundArgsV3 {
+  escrowScript: CoinflipEscrowScriptV3
+  txid: string
+  vout: number
+  value: number
+  refundAddress: string
+}
+
+export function buildRefundTransactionV3(
+  arkInfo: ArkInfo,
+  args: RefundArgsV3,
+): BuiltOffchainTx {
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const input: ArkTxInput = {
+    txid: args.txid,
+    vout: args.vout,
+    value: args.value,
+    tapLeafScript: args.escrowScript.refund(),
+    tapTree: args.escrowScript.encode(),
+  }
+  const refundAddr = ArkAddress.decode(args.refundAddress)
+  const { arkTx, checkpoints } = buildOffchainTx(
+    [input],
+    [{ script: refundAddr.pkScript, amount: BigInt(args.value) }],
+    serverUnrollScript,
+  )
+
+  return { arkTx, checkpoints }
+}
+
+/**
+ * v3 R1 forfeit-claim builder. Two-input → one-output atomic sweep through each
+ * escrow's `playerForfeit` (CLTV) leaf, paying the full pot to the player.
+ *
+ * The leaf is `CLTVMultisig[player, server, emu_tweaked(forfeitArkadeScript)]`,
+ * same shape as v2. Difference vs v2: the escrow's TAP TREE uses btcd's
+ * algorithm (`CoinflipEscrowScriptV3` overrides the parent's huffman build),
+ * so the tap-key + per-leaf merkle proof differ. Using `e.script.encode()` +
+ * `e.script.playerForfeit()` from v3 keeps the consensus side correct.
+ *
+ * Like v3 covenant-sweep: NO ConditionWitness needed (no condition-multisig
+ * closure on this leaf), and we patch each checkpoint's witnessUtxo to the
+ * btcd-correct pkScript (the SDK's buildOffchainTx re-derives it from the
+ * tapTree via the SDK's Huffman builder, which is wrong for 10 leaves).
+ */
+export interface ForfeitClaimArgsV3 {
+  /** Exactly 2 escrows: player's escrow and house's escrow. */
+  escrows: [EscrowInputV3, EscrowInputV3]
+  /** Player's payout address (the covenant pins this exactly). */
+  payoutAddress: string
+  /** Full pot = sum of both stakes. */
+  potAmount: bigint
+}
+
+export function buildForfeitClaimTransactionV3(
+  arkInfo: ArkInfo,
+  args: ForfeitClaimArgsV3,
+): BuiltOffchainTx & {
+  emulatorEntries: { vin: number; script: Uint8Array; witness: Uint8Array }[]
+} {
+  if (args.potAmount <= 0n) {
+    throw new Error('buildForfeitClaimTransactionV3: potAmount must be positive')
+  }
+  const serverUnrollScript = decodeTapscript(
+    hex.decode(arkInfo.checkpointTapscript),
+  ) as CSVMultisigTapscript.Type
+
+  const inputs: ArkTxInput[] = args.escrows.map((e) => ({
+    txid: e.txid,
+    vout: e.vout,
+    value: e.value,
+    tapLeafScript: e.script.playerForfeit(),
+    tapTree: e.script.encode(),
+  }))
+
+  const payoutAddr = ArkAddress.decode(args.payoutAddress)
+  const outputs = [{ script: payoutAddr.pkScript, amount: args.potAmount }]
+
+  const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
+
+  // Same checkpoint witnessUtxo patch as buildCovenantSweepTransactionV3 — see
+  // the comment block there for the root-cause rationale (SDK Huffman vs btcd
+  // tap-key mismatch on 10-leaf taptrees).
+  for (let i = 0; i < args.escrows.length; i++) {
+    const cp = checkpoints[i]
+    const cpInput = cp.getInput(0)
+    if (cpInput?.witnessUtxo) {
+      cp.updateInput(0, {
+        witnessUtxo: {
+          script: args.escrows[i].script.pkScript,
+          amount: cpInput.witnessUtxo.amount,
+        },
+      })
+    }
+  }
+
+  const emulatorEntries = args.escrows.map((_e, i) => ({
+    vin: i,
+    script: args.escrows[i].script.forfeitArkadeScript,
+    witness: emulator.encodeWitness([
+      emulator.encodeIndex(0),
+      emulator.encodeIndex(1 - i),
+    ]),
+  }))
+  emulator.addPacket(arkTx, emulatorEntries)
+
+  return { arkTx, checkpoints, emulatorEntries }
+}
+
+/**
+ * v3 winner determination — mirrors the on-chain arkade-script in
+ * `buildVariableOddsWinPredicate`. Bad creator → player wins; bad player →
+ * creator wins; else `(digitC + digitP) mod n` in `[lo, target)` → player wins.
+ *
+ * Inputs are the FULL reveal bytes — `[digitByte] ‖ salt` produced by
+ * `packets.encodeReveal(digit, salt)`. The first byte IS the digit, by
+ * construction (`pushNum(1) OP_LEFT OP_BIN2NUM` reads it on-chain).
+ */
+export function determineWinnerV3(
+  creatorReveal: DigitCommit,
+  playerReveal: DigitCommit,
+  n: number,
+  target: number,
+  lo: number,
+): 'creator' | 'player' {
+  const dC = creatorReveal.digit
+  const dP = playerReveal.digit
+  if (dC < 0 || dC >= n) return 'player' // bad creator → player wins
+  if (dP < 0 || dP >= n) return 'creator' // bad player → creator wins
+  const roll = (dC + dP) % n
+  return roll >= lo && roll < target ? 'player' : 'creator'
+}
+
+/**
+ * Roll value `(digitC + digitP) mod n` for display, or null if either digit
+ * is out of `[0, n)` (winner was decided by the cheat-penalty, not a fair roll).
+ */
+export function computeRollV3(
+  creatorReveal: DigitCommit,
+  playerReveal: DigitCommit,
+  n: number,
+): number | null {
+  const dC = creatorReveal.digit, dP = playerReveal.digit
+  if (dC < 0 || dC >= n || dP < 0 || dP >= n) return null
+  return (dC + dP) % n
 }
 
 // Ensure the unused parameter import is not flagged.

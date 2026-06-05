@@ -12,6 +12,7 @@ import {
 import { HouseBusyError, BetExceedsCapacityError } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import { loadEmulatorConfig } from './emulator.js'
+import { newGameEscrowVersion } from './trustless-game.js'
 
 export function createPublicRoutes(deps: AppDeps): Router {
   const router = Router()
@@ -33,6 +34,14 @@ export function createPublicRoutes(deps: AppDeps): Router {
       emulator: emu
         ? { url: emu.publicUrl, signerPubkey: emu.signerPubkeyHex, version: emu.version }
         : null,
+      /**
+       * Escrow contract version this server mints NEW games with. Lets the
+       * client pick the matching playerHash format BEFORE calling /play —
+       * v2 = raw bytes (variable length), v3 = `[digit] ‖ salt` from
+       * `commitDigit(d, n)`. The server echoes the version back on /play
+       * for verification.
+       */
+      escrowVersion: newGameEscrowVersion(),
     })
   })
 

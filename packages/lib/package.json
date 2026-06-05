@@ -16,6 +16,11 @@
       "import": "./dist/contract.js",
       "require": "./dist/contract.js"
     },
+    "./arkade-win": {
+      "types": "./dist/arkade-win.d.ts",
+      "import": "./dist/arkade-win.js",
+      "require": "./dist/arkade-win.js"
+    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },

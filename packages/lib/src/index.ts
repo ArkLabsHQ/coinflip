@@ -128,6 +128,12 @@ export {
   getPlayerEscrowOptionsV3,
   getHouseEscrowOptionsV3,
   buildCovenantSweepTransactionV3,
+  buildRefundTransactionV3,
+  buildForfeitClaimTransactionV3,
+  determineWinnerV3,
+  computeRollV3,
   type EscrowInputV3,
   type CovenantSweepArgsV3,
+  type RefundArgsV3,
+  type ForfeitClaimArgsV3,
 } from './transactions-v3'

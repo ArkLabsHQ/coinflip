@@ -7,7 +7,13 @@ import {
   contractHandlers,
   type WalletBalance, type ExtendedVirtualCoin, type ArkTxInput, type ArkProvider, type Identity,
 } from '@arkade-os/sdk'
-import { COINFLIP_ESCROW_TYPE, registerCoinflipContracts } from 'arkade-coinflip/contract'
+import {
+  COINFLIP_ESCROW_TYPE,
+  COINFLIP_ESCROW_V3_TYPE,
+  registerCoinflipContracts,
+} from 'arkade-coinflip/contract'
+import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
+import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
@@ -378,7 +384,7 @@ async function registerEscrowContract(stash: StashedRefund): Promise<void> {
   try {
     const cm = await sdkWallet.getContractManager()
     await cm.createContract({
-      type: COINFLIP_ESCROW_TYPE,
+      type: stash.contractVersion === 'v3' ? COINFLIP_ESCROW_V3_TYPE : COINFLIP_ESCROW_TYPE,
       params: stash.escrowContractParams,
       script: hex.encode(ArkAddress.decode(stash.escrowAddress).pkScript),
       address: stash.escrowAddress,
@@ -421,7 +427,10 @@ async function startEscrowContractWatch(dispatch: (type: string, payload?: unkno
   if (!sdkWallet) return () => {}
   const cm = await sdkWallet.getContractManager()
   return cm.onContractEvent((event) => {
-    if (event.type !== 'vtxo_spent' || event.contract.type !== COINFLIP_ESCROW_TYPE) return
+    if (
+      event.type !== 'vtxo_spent' ||
+      (event.contract.type !== COINFLIP_ESCROW_TYPE && event.contract.type !== COINFLIP_ESCROW_V3_TYPE)
+    ) return
     void (async () => {
       try {
         const gameId = event.contract.label
@@ -930,18 +939,37 @@ const ark: Module<ArkState, RootState> = {
       const arkInfo = await arkProvider.getInfo()
       const serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
 
-      // 1. Commit a secret + start the game. Coin: 15B heads / 16B tails.
-      // Variable-odds: encode a uniform digit in [0, oddsN) as the secret LENGTH
-      // (base 16 = the lib's VARIABLE_ODDS_BASE_LEN), so the summed roll is fair.
+      // 1. Commit a secret + start the game. The escrow version is set by the
+      // server (env: ESCROW_VERSION) and published via /api/network. Generate
+      // the appropriate secret format:
+      //   v2 (legacy): random bytes whose LENGTH encodes the digit. Coin: 15B
+      //                heads / 16B tails. Variable-odds: base16 + digit bytes.
+      //   v3:          `[digitByte] ‖ salt` (= packets.encodeReveal) — a
+      //                fixed-length 17-byte reveal. Coin maps to n=2, digit
+      //                ∈ {0, 1}: side=heads → 0, side=tails → 1. Variable-
+      //                odds: digit picked uniformly in [0, oddsN).
       const isVariable = oddsN !== undefined && oddsTarget !== undefined
+      const netInfo = await getNetwork()
+      const contractVersion: 'v2' | 'v3' = netInfo.escrowVersion === 'v3' ? 'v3' : 'v2'
       let secretBytes: Uint8Array
-      if (isVariable) {
-        const VARIABLE_ODDS_BASE_LEN = 16 // must match arkade-coinflip's constant
-        secretBytes = new Uint8Array(VARIABLE_ODDS_BASE_LEN + uniformRandomInt(oddsN as number))
+      let v3Reveal: { digit: number; salt: Uint8Array } | undefined
+      if (contractVersion === 'v3') {
+        // v3 coin → n=2, target=1, lo=0 (server applies the same default).
+        const n = isVariable ? (oddsN as number) : 2
+        const digit = isVariable
+          ? uniformRandomInt(n)
+          : (side === 'tails' ? 1 : 0)
+        v3Reveal = v3CommitDigit(digit, n)
+        secretBytes = cwpPackets.encodeReveal(v3Reveal.digit, v3Reveal.salt)
       } else {
-        secretBytes = new Uint8Array(side === 'tails' ? 16 : 15)
+        if (isVariable) {
+          const VARIABLE_ODDS_BASE_LEN = 16 // must match arkade-coinflip's constant
+          secretBytes = new Uint8Array(VARIABLE_ODDS_BASE_LEN + uniformRandomInt(oddsN as number))
+        } else {
+          secretBytes = new Uint8Array(side === 'tails' ? 16 : 15)
+        }
+        crypto.getRandomValues(secretBytes)
       }
-      crypto.getRandomValues(secretBytes)
       const playerSecretHex = Array.from(secretBytes).map((b) => b.toString(16).padStart(2, '0')).join('')
       const playerHash = await createHash(secretBytes)
 
@@ -996,6 +1024,12 @@ const ark: Module<ArkState, RootState> = {
           // can re-register it and re-arm the vtxo_spent watcher.
           escrowContractParams: playRes.escrowContractParams,
           escrowAddress: playRes.escrowAddress,
+          // Persist the contract version + (for v3) the reveal so a page
+          // reload reconstructs the right /commit payload.
+          contractVersion: playRes.contractVersion ?? contractVersion,
+          ...(v3Reveal
+            ? { reveal: { digit: v3Reveal!.digit, salt: hex.encode(v3Reveal!.salt) } }
+            : {}),
         }
         await stashRefund(stash)
         // Register the player escrow as a coinflip-escrow contract so the

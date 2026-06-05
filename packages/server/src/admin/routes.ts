@@ -146,6 +146,31 @@ export function createAdminRoutes(deps: AppDeps): Router {
     })))
   })
 
+  // POST /api/games/expire-pending — release stranded pending games on demand.
+  // Pending games already auto-expire after 5 min (startExpiryTimer), which frees
+  // the per-player cap and the VTXO reservations. This is the admin override to
+  // clear them immediately — e.g. to unblock a player stuck at the cap — instead
+  // of waiting for the timer. `olderThanMinutes` (default 0) expires every pending
+  // game at/over that age; pass a higher value to spare just-created in-flight
+  // games. Expiring a row never strands funds: the player reclaims any funded
+  // escrow via the CLTV refund path and recoverOrphanedHouseEscrows reclaims the
+  // house side once their CLTV matures.
+  router.post('/api/games/expire-pending', async (req: Request, res: Response) => {
+    const raw = (req.body ?? {}).olderThanMinutes
+    const olderThanMinutes = raw === undefined ? 0 : Number(raw)
+    if (!Number.isFinite(olderThanMinutes) || olderThanMinutes < 0) {
+      res.status(400).json({ error: 'olderThanMinutes must be a non-negative number' })
+      return
+    }
+    try {
+      const { expired, rows } = await deps.repos.games.expirePending(olderThanMinutes)
+      for (const g of rows) reservations.release(g.id)
+      res.json({ expired, ids: rows.map((g) => g.id) })
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+    }
+  })
+
   // GET /api/wallet — addresses, balance, VTXOs
   router.get('/api/wallet', async (_req: Request, res: Response) => {
     try {

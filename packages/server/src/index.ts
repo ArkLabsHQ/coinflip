@@ -16,7 +16,7 @@ import express from 'express'
 import cors from 'cors'
 import path from 'path'
 import fs from 'fs'
-import { getSqlExecutor, initDb } from './db.js'
+import { getSqlExecutor, initDb, closeDb } from './db.js'
 import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
 import { startExpiryTimer, startRenewalTimer } from './game-engine.js'
@@ -160,6 +160,17 @@ async function main() {
   adminApp.listen(ADMIN_PORT, ADMIN_HOST, () => {
     console.log(`Admin dashboard listening on ${ADMIN_HOST}:${ADMIN_PORT}`)
   })
+
+  // Graceful shutdown: `docker stop` (SIGTERM) and Ctrl-C (SIGINT) checkpoint the
+  // WAL into coinflip.db so the persisted volume is left fully merged, not a main
+  // file plus an un-applied -wal sidecar.
+  const shutdown = (sig: string) => {
+    console.log(`Received ${sig} — closing database and exiting.`)
+    try { closeDb() } catch (err) { console.error('closeDb failed:', err) }
+    process.exit(0)
+  }
+  process.once('SIGTERM', () => shutdown('SIGTERM'))
+  process.once('SIGINT', () => shutdown('SIGINT'))
 }
 
 // Only auto-start when this file is the process entrypoint. Importing the

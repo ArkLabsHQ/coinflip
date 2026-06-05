@@ -92,6 +92,16 @@ function bindParams(params?: unknown[]): unknown[] {
   )
 }
 
+/**
+ * Close the database on graceful shutdown. better-sqlite3 checkpoints the WAL
+ * into the main file on close, so a `docker stop` (SIGTERM) leaves a clean,
+ * fully-merged coinflip.db rather than a growing -wal sidecar. Safe to call
+ * more than once.
+ */
+export function closeDb(): void {
+  if (db && db.open) db.close()
+}
+
 export function getSqlExecutor(): SQLExecutor {
   return {
     run: async (sql: string, params?: unknown[]): Promise<void> => {

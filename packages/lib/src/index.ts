@@ -77,6 +77,16 @@ export { coinSelect } from './coinselect'
 // package node_modules trees.
 export { contractHandlers } from '@arkade-os/sdk'
 
+// Coinflip escrow registered as a first-class SDK contract type — lets the
+// ContractManager/ContractWatcher track each game's escrow and emit
+// vtxo_received / vtxo_spent events.
+export {
+  COINFLIP_ESCROW_TYPE,
+  CoinflipEscrowContractHandler,
+  registerCoinflipContracts,
+  type CoinflipContractRegistry,
+} from './contract'
+
 // Arkade-script forfeit support — see arkade-forfeit.ts module header.
 export {
   ARKADE_OP,

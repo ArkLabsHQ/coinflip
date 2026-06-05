@@ -17,6 +17,7 @@
           <button
             class="claim-btn"
             :disabled="!isForfeitReady(b) || isClaiming(b)"
+            :title="isForfeitReady(b) ? '' : forfeitStatusLabel(b)"
             @click="claimForfeit(b.gameId)"
           >
             {{ claimBtnLabel(b, 'forfeit') }}
@@ -24,6 +25,7 @@
           <button
             class="reclaim-link"
             :disabled="!isReady(b) || isClaiming(b)"
+            :title="isReady(b) ? '' : statusLabel(b)"
             @click="reclaim(b.gameId)"
           >
             {{ claimBtnLabel(b, 'refund-link') }}
@@ -40,6 +42,7 @@
         <button
           class="reclaim-btn"
           :disabled="!isReady(b) || isClaiming(b)"
+          :title="isReady(b) ? '' : statusLabel(b)"
           @click="reclaim(b.gameId)"
         >
           {{ claimBtnLabel(b, 'refund') }}
@@ -161,10 +164,13 @@ export default defineComponent({
     onMounted(() => {
       refresh()
       refreshChainTime()
-      // Track the chain tip for the CLTV refund countdown — but only while
-      // there's actually a stalled bet to track, and on a 30s cadence (mutinynet
-      // block time), not 5s. Idle/no-stall sessions make zero /blocks/tip calls.
-      timer = window.setInterval(() => { if (bets.value.length) refreshChainTime() }, 30000)
+      // Track the chain tip for the CLTV countdown + claim readiness — but only
+      // while there's actually a stalled bet (the panel only renders then), so
+      // idle/no-stall sessions make zero /blocks/tip calls. 5s keeps it
+      // responsive: chain time gates EVERY claim button, so a slow poll strands
+      // them on "Checking chain time…" (and a failed first read on a cold wallet
+      // would otherwise take a full cycle to recover).
+      timer = window.setInterval(() => { if (bets.value.length) refreshChainTime() }, 5000)
       // Re-read the stash list periodically so an auto-claim that
       // succeeded in the background removes its row without the user
       // having to refresh. Cheap (localStorage read) so 5s is fine.

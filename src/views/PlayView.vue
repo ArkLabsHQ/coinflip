@@ -82,7 +82,10 @@
            more coins / reels / dice (lower win rate, bigger payout). The exact
            win chance + multiple update live; all enforced on-chain. The top end
            is clamped to what the house bankroll can cover for this stake. -->
-      <div v-if="!isAutoMode" class="odds-slider">
+      <!-- Visible in auto mode too — the player needs to see (and set) the odds
+           and payout they're auto-betting at; the input only locks while a batch
+           is actually running. -->
+      <div class="odds-slider">
         <div class="odds-readout">
           <span class="odds-step-label">{{ stepLabel }}</span>
           <span class="odds-stats">
@@ -97,6 +100,7 @@
           :max="maxStep"
           step="1"
           v-model.number="sliderIndex"
+          :disabled="isAutoRunning"
           aria-label="Odds"
         />
         <div class="odds-ends">

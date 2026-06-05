@@ -384,6 +384,13 @@ export default defineComponent({
     }
     watch(tab, loadActivityIfViewing)
 
+    // Live Activity: the SDK contract-watcher commits a new walletBalance on
+    // every vtxo_received / vtxo_spent. When that happens while the Activity
+    // tab is open, refresh the history in place so a settled flip appears
+    // without the user reopening the tab. Other tabs / idle sessions stay
+    // zero-fetch (loadActivityIfViewing is gated on tab === 'activity').
+    watch(() => store.state.ark.walletBalance, loadActivityIfViewing)
+
     // ── Deposit state ─────────────────────────────────────────────
     const depositAmount = ref<number | null>(null)
     const depositInvoice = ref('')

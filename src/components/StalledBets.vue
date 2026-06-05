@@ -161,9 +161,10 @@ export default defineComponent({
     onMounted(() => {
       refresh()
       refreshChainTime()
-      // Poll so "Checking…" clears soon after the wallet connects and the
-      // countdown tracks the chain as blocks are mined.
-      timer = window.setInterval(refreshChainTime, 5000)
+      // Track the chain tip for the CLTV refund countdown — but only while
+      // there's actually a stalled bet to track, and on a 30s cadence (mutinynet
+      // block time), not 5s. Idle/no-stall sessions make zero /blocks/tip calls.
+      timer = window.setInterval(() => { if (bets.value.length) refreshChainTime() }, 30000)
       // Re-read the stash list periodically so an auto-claim that
       // succeeded in the background removes its row without the user
       // having to refresh. Cheap (localStorage read) so 5s is fine.

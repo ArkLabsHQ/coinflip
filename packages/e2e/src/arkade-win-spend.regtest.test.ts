@@ -268,6 +268,18 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     })
 
 
+    // Diagnostic: inspect the sweep tx structure before submission.
+    console.log(`[v3-regtest] sweep arkTx inputs=${arkTx.inputsLength} outputs=${arkTx.outputsLength}; checkpoints=${checkpoints.length}`)
+    for (let i = 0; i < checkpoints.length; i++) {
+      const cp = checkpoints[i]
+      const cpIn = cp.getInput(0)
+      console.log(`[v3-regtest] checkpoint[${i}] inputs=${cp.inputsLength} outputs=${cp.outputsLength} cpIn0.txid=${cpIn?.txid ? Buffer.from(cpIn.txid).reverse().toString('hex').slice(0, 16) : 'undef'}…`)
+    }
+    for (let i = 0; i < arkTx.inputsLength; i++) {
+      const inp = arkTx.getInput(i)
+      console.log(`[v3-regtest] arkTx.in[${i}].txid=${inp?.txid ? Buffer.from(inp.txid).reverse().toString('hex').slice(0, 16) : 'undef'}…`)
+    }
+
     // ── Send to emulator via SDK provider (proper normalization + retry) ─
     const emu = new RestEmulatorProvider(EMULATOR_URL)
     const encodedArkTx = base64.encode(arkTx.toPSBT())

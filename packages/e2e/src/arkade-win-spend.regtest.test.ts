@@ -44,11 +44,15 @@ import {
 } from '@arkade-os/sdk'
 import {
   CoinflipEscrowScriptV3,
+  CoinflipEscrowV3ContractHandler,
+  COINFLIP_ESCROW_V3_TYPE,
   commitDigit,
   digitHash,
   buildCovenantSweepTransactionV3,
+  registerCoinflipContracts,
   type DigitCommit,
 } from 'arkade-coinflip'
+import { contractHandlers } from '@arkade-os/sdk'
 import { faucet, mineBlock, sleep } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
@@ -232,10 +236,31 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
       return { txid }
     }
 
+    // Register both escrows as v3 contracts BEFORE funding — so the wallet
+    // subscribes arkd to the escrow scripts and tracks the funded VTXOs.
+    registerCoinflipContracts(contractHandlers)
+    const playerEscrowParams = CoinflipEscrowV3ContractHandler.serializeParams(playerEscrowScript.options)
+    const houseEscrowParams  = CoinflipEscrowV3ContractHandler.serializeParams(houseEscrowScript.options)
+    for (const [wallet, address, params] of [
+      [playerW, playerEscrowAddr.encode(), playerEscrowParams] as const,
+      [houseW,  houseEscrowAddr.encode(),  houseEscrowParams] as const,
+    ]) {
+      const cm = await wallet.getContractManager()
+      await cm.createContract({
+        type: COINFLIP_ESCROW_V3_TYPE,
+        params,
+        script: hex.encode(ArkAddress.decode(address).pkScript),
+        address,
+        state: 'active',
+        label: address.slice(0, 12),
+      })
+    }
+
     const playerFunding = await fundEscrow(playerW, playerId, playerEscrowAddr)
     const houseFunding  = await fundEscrow(houseW, houseId, houseEscrowAddr)
     const playerEscrow = { txid: playerFunding.txid, vout: 0, value: BET }
     const houseEscrow  = { txid: houseFunding.txid, vout: 0, value: BET }
+
 
     // Wait for arkd to index both escrow VTXOs — without this the emulator's
     // checkpoint lookup ("checkpoint not found for input 0") races the
@@ -268,16 +293,13 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     })
 
 
-    // Diagnostic: inspect the sweep tx structure before submission.
-    console.log(`[v3-regtest] sweep arkTx inputs=${arkTx.inputsLength} outputs=${arkTx.outputsLength}; checkpoints=${checkpoints.length}`)
-    for (let i = 0; i < checkpoints.length; i++) {
-      const cp = checkpoints[i]
-      const cpIn = cp.getInput(0)
-      console.log(`[v3-regtest] checkpoint[${i}] inputs=${cp.inputsLength} outputs=${cp.outputsLength} cpIn0.txid=${cpIn?.txid ? Buffer.from(cpIn.txid).reverse().toString('hex').slice(0, 16) : 'undef'}…`)
-    }
+    // Sanity: confirm sweep tx structure links arkTx inputs to checkpoint ids.
     for (let i = 0; i < arkTx.inputsLength; i++) {
       const inp = arkTx.getInput(i)
-      console.log(`[v3-regtest] arkTx.in[${i}].txid=${inp?.txid ? Buffer.from(inp.txid).reverse().toString('hex').slice(0, 16) : 'undef'}…`)
+      const inpHex = inp?.txid ? Buffer.from(inp.txid).toString('hex') : 'undef'
+      if (inpHex !== checkpoints[i].id) {
+        throw new Error(`arkTx.in[${i}].txid ${inpHex} ≠ checkpoint[${i}].id ${checkpoints[i].id} — mutation after buildOffchainTx broke linkage`)
+      }
     }
 
     // ── Send to emulator via SDK provider (proper normalization + retry) ─

@@ -187,18 +187,16 @@ export function buildCovenantSweepTransactionV3(
   emulator.addPacket(arkTx, emulatorEntries)
 
   // Reveal packets — game-specific digit+salt reveals read by OP_INSPECTPACKET.
-  // Attached to the arkTx; both inputs' scripts see them (OP_INSPECTPACKET
-  // reads from the spending tx, not a specific input's previous tx).
+  // Attached to the arkTx ONLY (the spending tx the emu sees when running the
+  // arkade-script). DO NOT add them to checkpoints — that would mutate the
+  // checkpoint txs, changing their hashes, and breaking the
+  // arkTx.input[i].txid → checkpoint[i].id linkage that buildOffchainTx
+  // established at construction time. The emu's checkpoint resolution would
+  // then fail with "checkpoint not found for input i".
   const playerData = packets.encodeReveal(args.playerReveal.digit, args.playerReveal.salt)
   const creatorData = packets.encodeReveal(args.creatorReveal.digit, args.creatorReveal.salt)
   packets.addRevealPacket(arkTx, packets.REVEAL_PLAYER_PACKET_TYPE, playerData)
   packets.addRevealPacket(arkTx, packets.REVEAL_CREATOR_PACKET_TYPE, creatorData)
-  // Checkpoints also need the reveal packets — arkd validates the same
-  // script against each signed psbt.
-  for (const cp of checkpoints) {
-    packets.addRevealPacket(cp, packets.REVEAL_PLAYER_PACKET_TYPE, playerData)
-    packets.addRevealPacket(cp, packets.REVEAL_CREATOR_PACKET_TYPE, creatorData)
-  }
 
   return { arkTx, checkpoints, emulatorEntries }
 }

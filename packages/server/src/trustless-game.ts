@@ -24,9 +24,12 @@ import {
   getHouseEscrowScript,
   getPlayerEscrowAddress,
   getHouseEscrowAddress,
+  getHouseEscrowOptions,
   buildCovenantSweepTransaction,
   buildRefundTransaction,
   buildForfeitClaimTransaction,
+  COINFLIP_ESCROW_TYPE,
+  CoinflipEscrowContractHandler,
   type Game,
   type EscrowInput,
   type BuiltOffchainTx,
@@ -504,6 +507,25 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     throw err
   }
 
+  // Best-effort: register the house escrow as an ACTIVE contract so the
+  // ContractManager/ContractWatcher tracks it and emits a `vtxo_spent` event
+  // when it settles, letting `startContractWatch` reconcile the game eagerly.
+  // The serialized params are the EXACT options that produced the on-chain
+  // pkScript, so the handler re-derives a byte-identical script. A failure here
+  // MUST NOT fail the play — the failsafe reconcile still resolves the game.
+  try {
+    await deps.contractManager?.createContract({
+      type: COINFLIP_ESCROW_TYPE,
+      params: CoinflipEscrowContractHandler.serializeParams(getHouseEscrowOptions(game)),
+      script: hex.encode(houseEscrowScript.pkScript),
+      address: getHouseEscrowAddress(game, networkHrp).encode(),
+      state: 'active',
+      label: gameId,
+    })
+  } catch (err) {
+    console.warn(`[contract] could not register house escrow for game ${gameId}:`, err instanceof Error ? err.message : err)
+  }
+
   return {
     gameId,
     escrowAddress: playerEscrowAddress,
@@ -685,6 +707,21 @@ async function submitCovenantSweep(
   throw new Error(lastErr)
 }
 
+/**
+ * Best-effort: mark a finished bet's house-escrow contract `inactive` so the
+ * ContractManager/ContractWatcher stops watching it. Called at every point a
+ * game resolves or its house escrow is reclaimed ("when a bet is done,
+ * deactivate its contract"). A no-op when the ContractManager is absent or the
+ * contract was never registered; never throws.
+ */
+async function deactivateHouseEscrowContract(deps: AppDeps, houseEscrowScriptHex: string): Promise<void> {
+  try {
+    await deps.contractManager?.setContractState(houseEscrowScriptHex, 'inactive')
+  } catch (err) {
+    console.warn('[contract] could not deactivate house escrow contract:', err instanceof Error ? err.message : err)
+  }
+}
+
 export async function handleTrustlessCommit(
   gameId: string,
   req: TrustlessCommitRequest,
@@ -726,6 +763,8 @@ export async function handleTrustlessCommit(
       houseVtxosJson: JSON.stringify({ ...committed, resolveTxid }),
     })
     reservations.release(gameId)
+    // Bet done → stop watching its house escrow. escrows[0] is the house escrow.
+    await deactivateHouseEscrowContract(deps, hex.encode(ctx.escrows[0].script.pkScript))
     return result
   })
 }
@@ -734,29 +773,32 @@ export async function handleTrustlessCommit(
  * Finish a game the player already committed to (their reveal is persisted) but
  * whose covenant sweep never landed — a transient /commit failure, exhausted
  * retries, or a crash after persisting the reveal but before the sweep. Rebuilds
- * the SAME sweep and re-submits it under the per-game lock so it can't race a
- * client /commit retry. Returns 1 if it resolved the game, else 0.
+ * the SAME sweep and re-submits it. Returns 1 if it resolved the game, else 0.
+ *
+ * Lock-free: assumes the per-game `commitLocks` mutex is ALREADY held by the
+ * caller (`reconcileGame`). The KeyedMutex is non-reentrant, so re-acquiring it
+ * here would deadlock; the sole caller already holds the lock, which is what
+ * keeps this from racing a live `/commit`.
  */
-async function resettleCommittedGame(game: GameRow, state: TrustlessState, deps: AppDeps): Promise<number> {
-  return commitLocks.runExclusive(game.id, async () => {
-    const fresh = await deps.repos.games.get(game.id)
-    if (!fresh || fresh.status !== 'pending' || !fresh.player_secret_hex || !state.playerEscrow) return 0
-    try {
-      const ctx = await buildCommitContext(fresh, state, fresh.player_secret_hex, state.playerEscrow, deps)
-      const { result, sweepTx } = buildCommitResult(ctx, deps)
-      const resolveTxid = await submitCovenantSweep(sweepTx, deps)
-      await deps.repos.games.update(game.id, {
-        winner: ctx.winner, rakeAmount: 0, payoutAmount: result.payout,
-        status: 'resolved', houseVtxosJson: JSON.stringify({ ...state, resolveTxid }),
-      })
-      reservations.release(game.id)
-      console.log(`[reconcile] re-settled committed game ${game.id} (winner ${ctx.winner}, tx ${resolveTxid})`)
-      return 1
-    } catch (e) {
-      console.warn(`[reconcile] re-settle of ${game.id} failed (retry next tick): ${e instanceof Error ? e.message : e}`)
-      return 0
-    }
-  })
+async function resettleCommittedGameLocked(game: GameRow, state: TrustlessState, deps: AppDeps): Promise<number> {
+  const fresh = await deps.repos.games.get(game.id)
+  if (!fresh || fresh.status !== 'pending' || !fresh.player_secret_hex || !state.playerEscrow) return 0
+  try {
+    const ctx = await buildCommitContext(fresh, state, fresh.player_secret_hex, state.playerEscrow, deps)
+    const { result, sweepTx } = buildCommitResult(ctx, deps)
+    const resolveTxid = await submitCovenantSweep(sweepTx, deps)
+    await deps.repos.games.update(game.id, {
+      winner: ctx.winner, rakeAmount: 0, payoutAmount: result.payout,
+      status: 'resolved', houseVtxosJson: JSON.stringify({ ...state, resolveTxid }),
+    })
+    reservations.release(game.id)
+    await deactivateHouseEscrowContract(deps, hex.encode(ctx.escrows[0].script.pkScript))
+    console.log(`[reconcile] re-settled committed game ${game.id} (winner ${ctx.winner}, tx ${resolveTxid})`)
+    return 1
+  } catch (e) {
+    console.warn(`[reconcile] re-settle of ${game.id} failed (retry next tick): ${e instanceof Error ? e.message : e}`)
+    return 0
+  }
 }
 
 export interface TrustlessRefundRequest {
@@ -957,6 +999,8 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
         houseVtxosJson: JSON.stringify({ ...state, houseRefundTxid: txid } as TrustlessState),
       })
       reservations.release(game.id)
+      // Bet done (house stake reclaimed) → stop watching its house escrow.
+      await deactivateHouseEscrowContract(deps, hex.encode(houseEscrowScript.pkScript))
       recovered++
       console.log(`[recovery] reclaimed house escrow for stalled game ${game.id} (${state.houseEscrow.value} sats), txid ${txid}`)
     } catch (err) {
@@ -1045,13 +1089,36 @@ export async function reconcilePendingSweeps(
   const indexer = indexerOverride ?? new RestIndexerProvider(ARK_SERVER_URL)
   let reconciled = 0
   for (const game of trustless) {
+    reconciled += await reconcileGame(game, deps, indexer)
+  }
+  if (reconciled > 0) console.log(`[reconcile] resolved ${reconciled} crash-mid-sweep game(s)`)
+  return reconciled
+}
+
+/**
+ * Reconcile a single pending trustless game against the indexer. Shared by the
+ * failsafe `reconcilePendingSweeps` loop and the eager `startContractWatch`
+ * event handler so both resolve a crash-mid-sweep / R1-forfeit game identically.
+ *
+ * Runs under the per-game `commitLocks` mutex so it can't race a live `/commit`,
+ * re-fetching the game inside the lock (it may have resolved between selection
+ * and acquisition). If the house escrow is already spent on-Ark, it decodes the
+ * spending arkTx to attribute the winner (`sweepPaidPlayer`) and marks the game
+ * resolved + releases its reservation. If the escrow is still unspent but the
+ * player already committed, it re-attempts the sweep (`resettleCommittedGameLocked`,
+ * lock-free — the lock is already held). Returns the number reconciled (0 or 1).
+ */
+async function reconcileGame(game: GameRow, deps: AppDeps, indexer: IndexerProvider): Promise<number> {
+  return commitLocks.runExclusive(game.id, async () => {
+    const fresh = await deps.repos.games.get(game.id)
+    if (!fresh || fresh.status !== 'pending') return 0
     let state: TrustlessState
     try {
-      state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+      state = JSON.parse(fresh.house_vtxos_json as string) as TrustlessState
     } catch {
-      continue
+      return 0
     }
-    if (!state.houseEscrow) continue
+    if (!state.houseEscrow) return 0
     try {
       const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid: state.houseEscrow.txid, vout: state.houseEscrow.vout }] })
       const v = vtxos.find((x) => x.txid === state.houseEscrow.txid && x.vout === state.houseEscrow.vout) ?? vtxos[0]
@@ -1061,34 +1128,79 @@ export async function reconcilePendingSweeps(
         // needs to finish settling — re-attempt the sweep so a transient commit
         // failure resolves itself instead of stranding the game on the forfeit
         // path. Otherwise it's genuinely pending (player hasn't revealed yet).
-        if (game.player_secret_hex && state.playerEscrow) {
-          reconciled += await resettleCommittedGame(game, state, deps)
+        if (fresh.player_secret_hex && state.playerEscrow) {
+          return await resettleCommittedGameLocked(fresh, state, deps)
         }
-        continue
+        return 0
       }
 
-      const pot = state.houseEscrow.value + game.tier // house stake + player stake
+      const pot = state.houseEscrow.value + fresh.tier // house stake + player stake
       const winner: 'house' | 'player' = (await sweepPaidPlayer(indexer, v, state)) ? 'player' : 'house'
-      await deps.repos.games.update(game.id, {
+      await deps.repos.games.update(fresh.id, {
         winner,
         rakeAmount: 0,
         payoutAmount: pot,
         status: 'resolved',
         houseVtxosJson: JSON.stringify({ ...state, resolveTxid: v.arkTxId ?? v.spentBy ?? state.resolveTxid } as TrustlessState),
       })
-      reservations.release(game.id)
-      reconciled++
+      reservations.release(fresh.id)
+      // Bet done → stop watching its house escrow. The escrow's pkScript hex is
+      // the contract key the escrow was registered under at /play.
+      await deactivateHouseEscrowContract(deps, v.script)
       console.log(
         winner === 'player'
-          ? `[reconcile] R1 forfeit player win ${game.id} resolved (player swept the pot, tx ${v.arkTxId})`
-          : `[reconcile] crash-mid-sweep house win ${game.id} resolved (escrow spent by ${v.spentBy ?? 'unknown'})`,
+          ? `[reconcile] R1 forfeit player win ${fresh.id} resolved (player swept the pot, tx ${v.arkTxId})`
+          : `[reconcile] crash-mid-sweep house win ${fresh.id} resolved (escrow spent by ${v.spentBy ?? 'unknown'})`,
       )
+      return 1
     } catch (err) {
-      console.warn(`[reconcile] spent-check failed for game ${game.id}:`, err instanceof Error ? err.message : err)
+      console.warn(`[reconcile] spent-check failed for game ${fresh.id}:`, err instanceof Error ? err.message : err)
+      return 0
     }
-  }
-  if (reconciled > 0) console.log(`[reconcile] resolved ${reconciled} crash-mid-sweep game(s)`)
-  return reconciled
+  })
+}
+
+/**
+ * Subscribe to the wallet's ContractManager so a house escrow being spent
+ * on-Ark reconciles its game EAGERLY — instead of waiting up to 120s for the
+ * failsafe `reconcilePendingSweeps` tick. On a `vtxo_spent` event for a
+ * `coinflip-escrow` contract, look the game up by the contract's `label` (the
+ * gameId set at /play) and run the SAME `reconcileGame` the failsafe uses, then
+ * deactivate the contract. This is purely an optimization: if the
+ * ContractManager is absent or an event is missed, the failsafe still resolves
+ * the game. The handler body is wrapped in try/catch so a single bad event
+ * never tears down the subscription. Returns the unsubscribe function (or a
+ * no-op when there's no ContractManager).
+ */
+export function startContractWatch(deps: AppDeps): () => void {
+  if (!deps.contractManager) return () => {}
+  // Build our own indexer (mirrors reconcilePendingSweeps' production default)
+  // so the eager path shares the exact reconcile logic + provider shape.
+  const indexer = new RestIndexerProvider(ARK_SERVER_URL)
+  return deps.contractManager.onContractEvent((event) => {
+    if (event.type !== 'vtxo_spent' || event.contract.type !== COINFLIP_ESCROW_TYPE) return
+    void (async () => {
+      try {
+        const gameId = event.contract.label
+        if (!gameId) {
+          console.warn(`[contract] vtxo_spent for ${event.contractScript} has no game label; leaving to failsafe`)
+          return
+        }
+        const game = await deps.repos.games.get(gameId)
+        if (!game) {
+          console.warn(`[contract] vtxo_spent for game ${gameId} but no such row; leaving to failsafe`)
+          return
+        }
+        const reconciled = await reconcileGame(game, deps, indexer)
+        if (reconciled > 0) console.log(`[contract] eagerly reconciled game ${gameId} from vtxo_spent event`)
+        // Bet done → stop watching this escrow (idempotent with reconcileGame's
+        // own deactivation; harmless if already inactive).
+        await deactivateHouseEscrowContract(deps, event.contract.script)
+      } catch (err) {
+        console.error('[contract] vtxo_spent handler failed:', err instanceof Error ? err.message : err)
+      }
+    })()
+  })
 }
 
 /**

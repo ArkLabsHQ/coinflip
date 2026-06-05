@@ -471,6 +471,24 @@ export class CoinflipEscrowScript extends VtxoScript {
     return this.findLeaf(this.refundScriptHex)
   }
 
+  /**
+   * The "forfeit" / intent tapleaf the SDK's contract-annotation path
+   * (`deriveContractTapscripts` → `forfeitTapLeafScript` / `intentTapLeafScript`)
+   * requires every tracked contract's script to expose. The base `VtxoScript`
+   * leaves it unimplemented; without it, registering this escrow as an SDK
+   * contract makes any later `wallet.getVtxos()` (which annotates every tracked
+   * contract's VTXOs) throw `script.forfeit is not a function`.
+   *
+   * The coinflip flow NEVER spends through the wallet's forfeit/settlement path
+   * — every settlement (covenant win, R1 forfeit, refund) is built directly in
+   * `transactions.ts`. So this only needs to resolve to a valid leaf for
+   * annotation bookkeeping; the funder+server `refund` leaf is the closest
+   * collaborative analog and is what we surface here.
+   */
+  forfeit(): TapLeafScript {
+    return this.findLeaf(this.refundScriptHex)
+  }
+
   /** Unilateral mirror of playerWinCovenant — player alone, CSV exit_delay. */
   playerWinExit(): TapLeafScript {
     return this.findLeaf(this.playerWinExitScriptHex)

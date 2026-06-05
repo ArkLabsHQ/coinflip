@@ -47,6 +47,7 @@ export {
   getHouseEscrowScript,
   getPlayerEscrowAddress,
   getHouseEscrowAddress,
+  getHouseEscrowOptions,
   getPotAmount,
   buildForfeitClaimTransaction,
   buildCovenantSweepTransaction,

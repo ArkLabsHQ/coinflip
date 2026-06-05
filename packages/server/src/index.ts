@@ -20,7 +20,9 @@ import { getSqlExecutor, initDb, closeDb } from './db.js'
 import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
 import { startExpiryTimer, startRenewalTimer } from './game-engine.js'
-import { startEscrowRecoveryTimer, reconcilePendingSweeps } from './trustless-game.js'
+import { startEscrowRecoveryTimer, reconcilePendingSweeps, startContractWatch } from './trustless-game.js'
+import { contractHandlers } from '@arkade-os/sdk'
+import { registerCoinflipContracts } from 'arkade-coinflip'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
 import { createAdminRoutes } from './admin/routes.js'
@@ -42,6 +44,7 @@ export {
   recoverOrphanedHouseEscrows,
   reconcilePendingSweeps,
   startEscrowRecoveryTimer,
+  startContractWatch,
   type TrustlessPlayRequest,
   type TrustlessPlayResult,
   type TrustlessCommitRequest,
@@ -73,6 +76,12 @@ export interface BootstrapOptions {
 export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<AppDeps> {
   await initDb()
   const repos = makeRepos(getSqlExecutor())
+  // Register the coinflip escrow contract handler into the SERVER's OWN SDK
+  // contract registry BEFORE the wallet boots. The wallet's ContractManager
+  // resolves handlers from this same module-scoped singleton, so registering
+  // here (rather than relying on the lib's separate SDK copy) avoids the
+  // dueling-instance "No handler registered for type coinflip-escrow" failure.
+  registerCoinflipContracts(contractHandlers)
   // Default the SDK's auto-renewal loop OFF (settlementConfig:false). It fires a
   // settle every ~30s that arkd rejects with INTENT_INSUFFICIENT_FEE, churning
   // and slowly degrading the house VTXO pool. Renewal is instead driven by the
@@ -82,6 +91,14 @@ export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<App
     settlementConfig: options.walletSettlementConfig ?? false,
   })
   const deps: AppDeps = { repos, wallet, identity, arkInfo }
+  // Best-effort: attach the wallet's ContractManager so trustless settlement can
+  // track each escrow and react to its on-chain spend eagerly. A failure here is
+  // non-fatal — the 120s failsafe reconcile resolves games regardless.
+  try {
+    deps.contractManager = await wallet.getContractManager()
+  } catch (err) {
+    console.warn('[contract] getContractManager failed; continuing without eager contract watch:', err instanceof Error ? err.message : err)
+  }
   return deps
 }
 
@@ -114,6 +131,10 @@ async function main() {
   // Reclaim orphaned house escrows from stalled games once their refund CLTV
   // matures, so abandoned games don't slowly lock up house funds.
   startEscrowRecoveryTimer(deps)
+
+  // Subscribe to the ContractManager so a house escrow's `vtxo_spent` event
+  // reconciles its game eagerly (the failsafe timer above still backstops it).
+  startContractWatch(deps)
 
   // Renew expiring VTXOs + confirm boarding deposits on a long cadence (only
   // when there's something to do — no per-poll batch-fee drain).

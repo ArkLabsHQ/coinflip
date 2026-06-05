@@ -35,6 +35,7 @@ function gameRow() {
   return {
     id: 'g-pending',
     tier: 1000,
+    status: 'pending',
     player_choice: 'trustless',
     house_vtxos_json: JSON.stringify({
       finalExpiration: 1,
@@ -51,10 +52,15 @@ function gameRow() {
 /** deps with a captured games.update + a fake indexer whose sweep tx pays `payoutScript`. */
 function makeDepsAndIndexer(payoutScript: string) {
   const updates: any[] = []
+  // reconcileGame re-fetches the game inside the per-game lock (it may have
+  // resolved between list() and lock acquisition), so the fake repo must answer
+  // get() as well — it returns the same pending row list() surfaced.
+  const row = gameRow()
   const deps = {
     repos: {
       games: {
-        list: async () => [gameRow()],
+        list: async () => [row],
+        get: async (id: string) => (id === row.id ? row : undefined),
         update: async (id: string, patch: any) => { updates.push({ id, patch }) },
       },
     },

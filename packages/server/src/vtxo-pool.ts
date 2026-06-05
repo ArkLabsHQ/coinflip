@@ -295,14 +295,23 @@ export function pickEscrowVtxo<T extends { value: number }>(
   amount: number,
   dust: number,
 ): T | undefined {
-  let best: T | undefined
+  // Prefer the smallest VTXO whose change is clean (0 or >= dust) — that
+  // preserves large VTXOs for bigger bets and avoids cluttering the pool with
+  // sub-dust change. But if NO candidate leaves clean change, fall back to the
+  // smallest covering VTXO and accept a sub-dust change rather than strand the
+  // game: the change is a separate output and never affects the escrow (which
+  // is exactly `amount`) or the game itself.
+  let bestClean: T | undefined
+  let bestAny: T | undefined
   for (const v of candidates) {
     if (v.value < amount) continue
+    if (!bestAny || v.value < bestAny.value) bestAny = v
     const change = v.value - amount
-    if (change !== 0 && change < dust) continue // would create a sub-dust change output
-    if (!best || v.value < best.value) best = v
+    if (change === 0 || change >= dust) {
+      if (!bestClean || v.value < bestClean.value) bestClean = v
+    }
   }
-  return best
+  return bestClean ?? bestAny
 }
 
 /**

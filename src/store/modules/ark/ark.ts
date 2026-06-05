@@ -3,7 +3,7 @@ import { hex, base64 } from '@scure/base'
 import type { State as RootState } from '@/store'
 import {
   Wallet, SingleKey, VtxoScript,
-  buildOffchainTx, decodeTapscript, CSVMultisigTapscript, ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
+  buildOffchainTx, decodeTapscript, CSVMultisigTapscript, ConditionWitness, setArkPsbtField, Transaction, ArkAddress, selectVirtualCoins,
   type WalletBalance, type ExtendedVirtualCoin, type ArkTxInput, type ArkProvider, type Identity,
 } from '@arkade-os/sdk'
 import { initSwaps, destroySwaps } from '@/services/boltz'
@@ -818,35 +818,41 @@ const ark: Module<ArkState, RootState> = {
       const playerSecretHex = Array.from(secretBytes).map((b) => b.toString(16).padStart(2, '0')).join('')
       const playerHash = await createHash(secretBytes)
 
+      // Coin-select the escrow inputs BEFORE starting the game. Doing it after
+      // apiPlay (which creates a pending game + reserves the house stake) would
+      // strand the game on any selection failure, and stranded games count
+      // against the server's per-player cap → "Too many pending games". The SDK's
+      // expiry-aware selectVirtualCoins does multi-input selection and allows
+      // sub-dust change: the escrow output is always exactly `tier` (the
+      // atomic-sweep covenant pins that value), the leftover is a SEPARATE change
+      // output, and a sub-dust change here is fine — it never touches the escrow
+      // or the game, it just leaves the player a tiny unspendable VTXO.
+      const spendable = (await sdkWallet.getVtxos()).filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
+      let escrowSel: { inputs: ExtendedVirtualCoin[]; changeAmount: bigint }
+      try {
+        escrowSel = selectVirtualCoins(spendable, tier)
+      } catch {
+        throw new Error(`Insufficient spendable balance for a ${tier}-sat bet — top up or settle to consolidate, then retry.`)
+      }
+
       const playRes = await apiPlay(
         tier, playerPubkey, playerHash, playerChangeAddress,
         isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number, oddsLo: oddsLo ?? 0 } : undefined,
       )
 
-      // 2. Escrow the player's stake into the shared escrow address (single-party).
+      // 2. Escrow the player's stake into the shared escrow address (single-party,
+      // possibly multi-input). Escrow output = exactly `tier`; any change goes back
+      // to the player.
       const escrowPk = ArkAddress.decode(playRes.escrowAddress).pkScript
-      const dust = state.info?.dust ? parseInt(state.info.dust) : 546
-      const candidates = (await sdkWallet.getVtxos())
-        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent' && v.value >= tier)
-        .sort((a, b) => Number(b.value - a.value))
-      if (candidates.length === 0) throw new Error(`No spendable VTXO covering ${tier} sats`)
-      // Avoid minting a sub-dust change VTXO (unspendable): the escrow tx must
-      // leave either exact change or >= dust. Mirrors the server's
-      // pickEscrowVtxo. If every candidate would leave dust, refuse rather than
-      // burn the change — the player consolidates (settles) and retries.
-      const pv = candidates.find((v) => { const c = v.value - tier; return c === 0 || c >= dust })
-      if (!pv) {
-        throw new Error(
-          `No dust-safe VTXO for ${tier} sats — every candidate would leave sub-dust change (< ${dust}). ` +
-          `Consolidate your balance (settle) and try again.`,
-        )
-      }
-      const change = pv.value - tier
       const outputs: { script: Uint8Array; amount: bigint }[] = [{ script: escrowPk, amount: BigInt(tier) }]
-      if (change > 0) outputs.push({ script: ArkAddress.decode(playerChangeAddress).pkScript, amount: BigInt(change) })
-      const escrowInput: ArkTxInput = { txid: pv.txid, vout: pv.vout, value: pv.value, tapLeafScript: pv.forfeitTapLeafScript, tapTree: pv.tapTree }
-      const escrowTx = buildOffchainTx([escrowInput], outputs, serverUnroll)
-      const playerEscrowTxid = await submitOffchain(arkProvider, identity, escrowTx.arkTx, escrowTx.checkpoints, [0])
+      if (escrowSel.changeAmount > 0n) {
+        outputs.push({ script: ArkAddress.decode(playerChangeAddress).pkScript, amount: escrowSel.changeAmount })
+      }
+      const escrowInputs: ArkTxInput[] = escrowSel.inputs.map((v) => ({
+        txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree,
+      }))
+      const escrowTx = buildOffchainTx(escrowInputs, outputs, serverUnroll)
+      const playerEscrowTxid = await submitOffchain(arkProvider, identity, escrowTx.arkTx, escrowTx.checkpoints, escrowInputs.map((_, i) => i))
       const playerEscrow: Outpoint = { txid: playerEscrowTxid, vout: 0, value: tier }
 
       // 2b. Stash a self-submittable refund BEFORE revealing. If the server now

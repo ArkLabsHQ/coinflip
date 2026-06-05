@@ -163,14 +163,20 @@ describe('pickEscrowVtxo (dust-safe house VTXO selection)', () => {
     expect(pickEscrowVtxo([v(5000), v(1000)], 1000, DUST)).toEqual(v(1000))
   })
 
-  it('skips VTXOs that would leave sub-dust change', () => {
-    // 1300 − 1000 = 300 < dust → skip; 5000 − 1000 = 4000 is fine.
+  it('prefers a clean-change VTXO over one that would leave sub-dust change', () => {
+    // 1300 − 1000 = 300 < dust; 5000 − 1000 = 4000 is clean → prefer 5000.
     expect(pickEscrowVtxo([v(1300), v(5000)], 1000, DUST)).toEqual(v(5000))
   })
 
-  it('returns undefined when nothing covers the amount dust-safely', () => {
-    // 900 too small; 1300 leaves sub-dust change.
-    expect(pickEscrowVtxo([v(900), v(1300)], 1000, DUST)).toBeUndefined()
+  it('falls back to the smallest covering VTXO when none leaves clean change', () => {
+    // 900 too small; 1300 would leave sub-dust change (300). Rather than strand
+    // the game, fall back to 1300 — the sub-dust change is a separate output and
+    // never affects the escrow (which is exactly the amount).
+    expect(pickEscrowVtxo([v(900), v(1300)], 1000, DUST)).toEqual(v(1300))
+  })
+
+  it('returns undefined when no VTXO covers the amount at all', () => {
+    expect(pickEscrowVtxo([v(900), v(500)], 1000, DUST)).toBeUndefined()
   })
 
   it('returns undefined for an empty candidate set', () => {

@@ -85,6 +85,8 @@ export { contractHandlers } from '@arkade-os/sdk'
 export {
   COINFLIP_ESCROW_TYPE,
   CoinflipEscrowContractHandler,
+  COINFLIP_ESCROW_V3_TYPE,
+  CoinflipEscrowV3ContractHandler,
   registerCoinflipContracts,
   type CoinflipContractRegistry,
 } from './contract'
@@ -110,3 +112,9 @@ export {
   digitHash,
   type DigitCommit,
 } from './arkade-win'
+
+// v0.3 escrow taptree — see script-v3.ts module header.
+export {
+  CoinflipEscrowScriptV3,
+  type CoinflipEscrowOptionsV3,
+} from './script-v3'

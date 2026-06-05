@@ -90,7 +90,7 @@ jobs:
         # filtered by test NAME to the stack-free ones. Path anchored to the
         # exact file — the broader `coinflip` substring matches every test file
         # because the working directory itself contains "coinflip".
-        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="src/coinflip\\.test\\.ts$" -t "gameFromEvents|determineWinner|generateSecret|CoinflipSetupScript|CoinflipFinalScript|coinSelect|event type guards|server-as-counterparty|ContractHandler"
+        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="src/coinflip\\.test\\.ts$" -t "gameFromEvents|determineWinner|generateSecret|CoinflipEscrowScript|coinSelect|event type guards"
 
   e2e-tests:
     name: E2E Integration Tests

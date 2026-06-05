@@ -1,20 +1,23 @@
 /**
- * CoinflipScript — extends VtxoScript to define the coinflip game tapscripts.
+ * CoinflipEscrowScript — extends VtxoScript to define the per-party covenant
+ * escrow tapscripts for a coinflip game.
  *
- * Setup output has 2 leaves:
- *   - reveal: SHA256(creatorSecret) + player + creator + server multisig
- *   - abort: CLTV timeout + player + server multisig
+ * Each party (player, house) funds its own escrow VTXO behind an 8-leaf
+ * taptree: four collaborative covenant paths (arkd-cosigned, emulator-tweaked)
+ * mirrored by four CSV-gated unilateral exits so the user is never stranded by
+ * arkd censorship.
  *
- * Final output has 3 leaves:
- *   - creatorWin: condition(secrets same size = false) + creator + server
- *   - playerWin: condition(secrets same size = true) + player + server
- *   - abort: CLTV timeout + creator + server (if player doesn't reveal)
+ * Collab paths (arkd + emulator cosign within the game window):
+ *   - playerWinCovenant  : player-wins predicate + atomic-sweep covenant → player
+ *   - creatorWinCovenant : house-wins predicate + atomic-sweep covenant → house
+ *   - playerForfeit      : CLTV + atomic-sweep covenant → player (R1 forfeit)
+ *   - refund             : per-funder CLTV self-refund (owner-scoped)
  *
- * Escrow output (`CoinflipEscrowScript`) has 4 leaves: creatorWin, playerWin,
- * refund (owner-scoped CLTV self-refund), and playerPenalty (audit R1 forfeit
- * — ConditionCSVMultisigTapscript leaf: hash-check on the player's revealed
- * secret + relative CSV timelock + 2-of-2[player, server]; the player sweeps
- * both escrows after a stall using only their own secret).
+ * Unilateral exit mirrors (user signs alone after `exitDelay`):
+ *   - playerWinExit / creatorWinExit / playerForfeitExit : CSV-gated siblings
+ *     of the three covenant leaves
+ *   - refundExit         : CSV-gated funder self-refund (the lone non-covenant
+ *     exit — final fallback when both arkd and the emulator are unavailable)
  */
 
 import { OP } from '@scure/btc-signer'
@@ -29,23 +32,6 @@ import {
   arkade,
 } from '@arkade-os/sdk'
 import { buildForfeitArkadeScript } from './arkade-forfeit'
-
-export interface CoinflipSetupOptions {
-  creatorPubkey: Uint8Array
-  playerPubkey: Uint8Array
-  serverPubkey: Uint8Array
-  creatorHash: Uint8Array // SHA256 of creator's secret
-  setupExpiration: bigint // absolute locktime for abort
-}
-
-export interface CoinflipFinalOptions {
-  creatorPubkey: Uint8Array
-  playerPubkey: Uint8Array
-  serverPubkey: Uint8Array
-  creatorHash: Uint8Array
-  playerHash: Uint8Array
-  finalExpiration: bigint
-}
 
 /**
  * Build the SHA256 hash-check condition script used in the setup reveal leaf.
@@ -234,103 +220,6 @@ function buildVariableOddsConditionScript(
 }
 
 /**
- * Setup output VtxoScript.
- * Two leaves:
- *   1. Reveal: condition(SHA256 check) + creator + player + server
- *   2. Abort: CLTV timeout + player + server (player can reclaim after timeout)
- */
-export class CoinflipSetupScript extends VtxoScript {
-  readonly revealScriptHex: string
-  readonly abortScriptHex: string
-
-  constructor(readonly options: CoinflipSetupOptions) {
-    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, setupExpiration } = options
-
-    // Reveal leaf: SHA256(secret) check + 3-of-3 multisig (player, creator, server)
-    const revealCondition = buildHashCheckScript(creatorHash)
-    const revealTapscript = ConditionMultisigTapscript.encode({
-      conditionScript: revealCondition,
-      pubkeys: [playerPubkey, creatorPubkey, serverPubkey],
-    })
-
-    // Abort leaf: CLTV + 2-of-2 (player, server)
-    const abortTapscript = CLTVMultisigTapscript.encode({
-      absoluteTimelock: setupExpiration,
-      pubkeys: [playerPubkey, serverPubkey],
-    })
-
-    super([revealTapscript.script, abortTapscript.script])
-
-    this.revealScriptHex = hex.encode(revealTapscript.script)
-    this.abortScriptHex = hex.encode(abortTapscript.script)
-  }
-
-  reveal(): TapLeafScript {
-    return this.findLeaf(this.revealScriptHex)
-  }
-
-  abort(): TapLeafScript {
-    return this.findLeaf(this.abortScriptHex)
-  }
-}
-
-/**
- * Final output VtxoScript.
- * Three leaves:
- *   1. Creator wins: condition(sizes differ) + creator + server
- *   2. Player wins: condition(sizes match) + player + server
- *   3. Abort: CLTV timeout + creator + server (if player never reveals)
- */
-export class CoinflipFinalScript extends VtxoScript {
-  readonly creatorWinScriptHex: string
-  readonly playerWinScriptHex: string
-  readonly abortScriptHex: string
-
-  constructor(readonly options: CoinflipFinalOptions) {
-    const { creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration } = options
-
-    const conditionScript = buildCoinflipConditionScript(creatorHash, playerHash)
-
-    // Creator wins when condition result is 0 (NOT → true)
-    const creatorWinCondition = new Uint8Array([...conditionScript, OP.NOT])
-    const creatorWinTapscript = ConditionMultisigTapscript.encode({
-      conditionScript: creatorWinCondition,
-      pubkeys: [creatorPubkey, serverPubkey],
-    })
-
-    // Player wins when condition result is 1 (truthy)
-    const playerWinTapscript = ConditionMultisigTapscript.encode({
-      conditionScript: conditionScript,
-      pubkeys: [playerPubkey, serverPubkey],
-    })
-
-    // Abort: CLTV + creator + server
-    const abortTapscript = CLTVMultisigTapscript.encode({
-      absoluteTimelock: finalExpiration,
-      pubkeys: [creatorPubkey, serverPubkey],
-    })
-
-    super([creatorWinTapscript.script, playerWinTapscript.script, abortTapscript.script])
-
-    this.creatorWinScriptHex = hex.encode(creatorWinTapscript.script)
-    this.playerWinScriptHex = hex.encode(playerWinTapscript.script)
-    this.abortScriptHex = hex.encode(abortTapscript.script)
-  }
-
-  creatorWin(): TapLeafScript {
-    return this.findLeaf(this.creatorWinScriptHex)
-  }
-
-  playerWin(): TapLeafScript {
-    return this.findLeaf(this.playerWinScriptHex)
-  }
-
-  abort(): TapLeafScript {
-    return this.findLeaf(this.abortScriptHex)
-  }
-}
-
-/**
  * Arkade-script forfeit + covenant-win configuration. Required at all
  * times — the coinflip protocol is single-path: it depends on an
  * emulator-signed covenant for resolution and a CLTV-gated covenant
@@ -452,17 +341,19 @@ export class CoinflipEscrowScript extends VtxoScript {
         : buildCoinflipConditionScript(creatorHash, playerHash)
     const houseWinsCondition = new Uint8Array([...playerWinsCondition, OP.NOT])
 
-    // Covenants — three of them, all atomic-sweep (cross-input value
-    // check + single output of the full pot to the winner's address).
-    const playerWinCovenantArkadeScript = buildForfeitArkadeScript(
+    // Covenants — all atomic-sweep (cross-input value check + single output
+    // of the full pot to the winner's address). The playerWin covenant and
+    // the forfeit covenant are byte-identical (both pay the player payout the
+    // full pot pinning `otherStake`), so build the player-payout covenant once
+    // and reuse it for both leaves.
+    const playerPayoutCovenantArkadeScript = buildForfeitArkadeScript(
       playerPayoutPkScript, pot, otherStake,
     )
+    const playerWinCovenantArkadeScript = playerPayoutCovenantArkadeScript
     const creatorWinCovenantArkadeScript = buildForfeitArkadeScript(
       housePayoutPkScript, pot, otherStake,
     )
-    const forfeitArkadeScript = buildForfeitArkadeScript(
-      playerPayoutPkScript, pot, otherStake,
-    )
+    const forfeitArkadeScript = playerPayoutCovenantArkadeScript
 
     // Each covenant leaf is an ordinary tapscript whose multisig pubkeys
     // include the EMULATOR-TWEAKED key (pubkey + taggedHash("ArkScriptHash",

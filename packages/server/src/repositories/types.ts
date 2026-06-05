@@ -28,14 +28,6 @@ export interface GameRow {
   rake_amount: number
   payout_amount: number | null
   status: string
-  setup_tx_hex: string | null
-  final_tx_hex: string | null
-  setup_script_hex: string | null
-  final_script_hex: string | null
-  /** JSON-encoded `string[]` of checkpoint PSBTs for the setup tx. */
-  setup_checkpoints_json: string | null
-  /** JSON-encoded `string[]` of checkpoint PSBTs for the final tx. */
-  final_checkpoints_json: string | null
   /** JSON-encoded `string[]` of "txid:vout" house VTXO outpoints reserved for this game. */
   house_vtxos_json: string | null
   created_at: string
@@ -50,12 +42,6 @@ export interface NewGame {
   playerHash: string
   playerChangeAddress?: string
   houseSecretHex: string
-  setupTxHex?: string
-  finalTxHex?: string
-  setupScriptHex?: string
-  finalScriptHex?: string
-  setupCheckpointsJson?: string
-  finalCheckpointsJson?: string
   houseVtxosJson?: string
 }
 
@@ -87,7 +73,6 @@ export interface GameRepository {
   update(id: string, updates: GameUpdate): Promise<void>
   get(id: string): Promise<GameRow | undefined>
   list(filter?: GameFilter): Promise<GameRow[]>
-  findByContractScript(scriptHex: string): Promise<GameRow | undefined>
   countPendingForPlayer(playerPubkey: string): Promise<number>
   expirePending(maxAgeMinutes: number): Promise<{ expired: number; rows: GameRow[] }>
   stats(): Promise<GameStats>

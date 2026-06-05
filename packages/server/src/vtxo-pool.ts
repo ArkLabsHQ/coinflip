@@ -3,10 +3,10 @@
  *
  * The house serves many players at once. Two concerns arise:
  *
- *   1. Reservation — `handlePlay` bakes specific house VTXOs into a game's
- *      signed setup/final transactions (the trustless fallback). Two
- *      concurrent games must NOT bake in the same VTXO, or the second
- *      player's fallback tx would reference an already-spent input.
+ *   1. Reservation — `handleTrustlessPlay` picks a specific house VTXO to
+ *      fund a game's house escrow. Two concurrent games must NOT pick the
+ *      same VTXO, or the second game's escrow tx would reference an
+ *      already-spent input.
  *
  *   2. Liability — the per-request balance check doesn't account for
  *      games already in flight. Without it, the house can accept more

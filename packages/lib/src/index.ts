@@ -36,33 +36,21 @@ export {
 
 // Tapscript definitions
 export {
-  CoinflipSetupScript,
-  CoinflipFinalScript,
   CoinflipEscrowScript,
   VARIABLE_ODDS_BASE_LEN,
-  type CoinflipSetupOptions,
-  type CoinflipFinalOptions,
   type CoinflipEscrowOptions,
 } from './script'
 
 // Transaction building
 export {
-  getSetupScript,
-  getFinalScript,
-  getSetupAddress,
-  getFinalAddress,
   getPlayerEscrowScript,
   getHouseEscrowScript,
   getPlayerEscrowAddress,
   getHouseEscrowAddress,
   getPotAmount,
-  buildGameTransactions,
-  buildClaimTransaction,
   buildForfeitClaimTransaction,
   buildCovenantSweepTransaction,
   buildRefundTransaction,
-  getFinalOutpoint,
-  type ClaimArgs,
   type EscrowInput,
   type ForfeitClaimArgs,
   type CovenantSweepArgs,
@@ -83,19 +71,10 @@ export {
 // internal `selectVirtualCoins` and why we keep our own greedy variant.
 export { coinSelect } from './coinselect'
 
-// SDK Contract handlers
-export {
-  CoinflipSetupContractHandler,
-  CoinflipFinalContractHandler,
-  COINFLIP_SETUP_TYPE,
-  COINFLIP_FINAL_TYPE,
-  registerCoinflipContracts,
-} from './contract'
-
 // Re-export the SDK's global contract registry so consumers that resolve
-// the lib via npm workspaces get the same singleton the handlers register
-// against — avoids dueling-instance issues when the SDK ends up installed
-// in multiple package node_modules trees.
+// the lib via npm workspaces get the same singleton — avoids
+// dueling-instance issues when the SDK ends up installed in multiple
+// package node_modules trees.
 export { contractHandlers } from '@arkade-os/sdk'
 
 // Arkade-script forfeit support — see arkade-forfeit.ts module header.

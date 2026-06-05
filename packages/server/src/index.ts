@@ -16,12 +16,9 @@ import express from 'express'
 import cors from 'cors'
 import path from 'path'
 import fs from 'fs'
-import { contractHandlers } from '@arkade-os/sdk'
-import { registerCoinflipContracts } from 'arkade-coinflip'
 import { getSqlExecutor, initDb } from './db.js'
 import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
-import { attachContractEventHandler, initContractManager } from './contract-manager.js'
 import { startExpiryTimer, startRenewalTimer } from './game-engine.js'
 import { startEscrowRecoveryTimer, reconcilePendingSweeps } from './trustless-game.js'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
@@ -36,7 +33,6 @@ import type { AppDeps } from './deps.js'
 export { getSqlExecutor, initDb } from './db.js'
 export { makeRepos } from './repositories/index.js'
 export { initHouseWallet } from './house-wallet.js'
-export { attachContractEventHandler, initContractManager } from './contract-manager.js'
 export { startExpiryTimer, startRenewalTimer, shouldRenew } from './game-engine.js'
 export {
   handleTrustlessPlay,
@@ -75,12 +71,6 @@ export interface BootstrapOptions {
 }
 
 export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<AppDeps> {
-  // Register against the server's own SDK registry. The lib has its own
-  // @arkade-os/sdk copy with a separate `contractHandlers` singleton — if we
-  // omitted this argument the lib would register into its own copy and the
-  // server's ContractManager.createContract would later fail with
-  // "No handler registered for contract type 'coinflip-setup'".
-  registerCoinflipContracts(contractHandlers)
   await initDb()
   const repos = makeRepos(getSqlExecutor())
   // Default the SDK's auto-renewal loop OFF (settlementConfig:false). It fires a
@@ -91,9 +81,7 @@ export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<App
   const { wallet, identity, arkInfo } = await initHouseWallet(repos, {
     settlementConfig: options.walletSettlementConfig ?? false,
   })
-  const contractManager = await initContractManager(wallet, { repos })
-  const deps: AppDeps = { repos, wallet, identity, arkInfo, contractManager }
-  attachContractEventHandler(deps)
+  const deps: AppDeps = { repos, wallet, identity, arkInfo }
   return deps
 }
 

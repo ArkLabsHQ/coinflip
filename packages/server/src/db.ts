@@ -57,12 +57,6 @@ export async function initDb(): Promise<void> {
       rake_amount INTEGER NOT NULL DEFAULT 0,
       payout_amount INTEGER,
       status TEXT NOT NULL DEFAULT 'pending',
-      setup_tx_hex TEXT,
-      final_tx_hex TEXT,
-      setup_script_hex TEXT,
-      final_script_hex TEXT,
-      setup_checkpoints_json TEXT,
-      final_checkpoints_json TEXT,
       house_vtxos_json TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       resolved_at TEXT
@@ -71,10 +65,6 @@ export async function initDb(): Promise<void> {
   // Backfill columns for pre-existing DBs. ALTER TABLE throws if the column
   // already exists; swallow that.
   for (const col of [
-    'setup_script_hex',
-    'final_script_hex',
-    'setup_checkpoints_json',
-    'final_checkpoints_json',
     'house_vtxos_json',
   ]) {
     try { db.exec(`ALTER TABLE games ADD COLUMN ${col} TEXT`) } catch { /* already there */ }

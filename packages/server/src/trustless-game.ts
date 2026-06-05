@@ -409,7 +409,6 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   // the player). Abort-theft fix.
   const houseEscrowScript = getHouseEscrowScript(game)
   const playerEscrowAddress = getPlayerEscrowAddress(game, networkHrp).encode()
-  const houseEscrowScriptHex = hex.encode(houseEscrowScript.pkScript)
 
   const gameId = uuidv4()
   // Atomically (under the selection mutex) check liability and pick + reserve a
@@ -498,7 +497,6 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
       playerHash: req.playerHash,
       playerChangeAddress: req.playerChangeAddress,
       houseSecretHex: Buffer.from(houseSecret).toString('hex'),
-      finalScriptHex: houseEscrowScriptHex,
       houseVtxosJson: JSON.stringify(state),
     })
   } catch (err) {

@@ -35,11 +35,9 @@ import {
   SingleKey,
   InMemoryWalletRepository,
   InMemoryContractRepository,
-  PrevArkTxField,
   RestArkProvider,
   RestIndexerProvider,
   RestEmulatorProvider,
-  setArkPsbtField,
   type ArkProvider,
   type Identity,
   type IndexerProvider,
@@ -215,7 +213,7 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     // ── Fund both escrows. Return the FINAL ark tx bytes too — the sweep
     //    needs them set via PrevArkTxField for the emu's checkpoint
     //    resolution.
-    async function fundEscrow(wallet: Wallet, identity: Identity, escrowAddr: ArkAddress): Promise<{ txid: string; fundingArkTxBytes: Uint8Array }> {
+    async function fundEscrow(wallet: Wallet, identity: Identity, escrowAddr: ArkAddress): Promise<{ txid: string }> {
       const vtxos = await wallet.getVtxos()
       const v = vtxos[0]
       const change = v.value - BET
@@ -231,30 +229,13 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
         serverUnroll,
       )
       const txid = await submitSingleParty(ark, identity, offchainTx.arkTx, offchainTx.checkpoints, 0)
-      // Query arkd for the finalized funding-tx wire-format bytes — needed
-      // by PrevArkTxField so the emu can resolve the prev tx for our sweep.
-      let fundingArkTxBytes: Uint8Array = new Uint8Array(0)
-      for (let i = 0; i < 20; i++) {
-        try {
-          const out = await indexer.getVirtualTxs([txid])
-          const txs = (out as { txs?: string[] }).txs ?? []
-          if (txs.length > 0 && txs[0]) {
-            fundingArkTxBytes = hex.decode(txs[0])
-            break
-          }
-        } catch { /* indexing lag — retry */ }
-        await sleep(500)
-      }
-      if (fundingArkTxBytes.length === 0) throw new Error(`could not fetch funding tx ${txid}`)
-      return { txid, fundingArkTxBytes }
+      return { txid }
     }
 
     const playerFunding = await fundEscrow(playerW, playerId, playerEscrowAddr)
     const houseFunding  = await fundEscrow(houseW, houseId, houseEscrowAddr)
     const playerEscrow = { txid: playerFunding.txid, vout: 0, value: BET }
     const houseEscrow  = { txid: houseFunding.txid, vout: 0, value: BET }
-    // Stash funding bytes for PrevArkTxField below.
-    const prevArkTxs: Uint8Array[] = [playerFunding.fundingArkTxBytes, houseFunding.fundingArkTxBytes]
 
     // Wait for arkd to index both escrow VTXOs — without this the emulator's
     // checkpoint lookup ("checkpoint not found for input 0") races the
@@ -286,12 +267,6 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
       creatorReveal,
     })
 
-    // Set PrevArkTxField on each input — emu uses this to resolve the prev
-    // ark tx for checkpoint validation. The v2 server-side path gets this
-    // implicitly through the wallet's VTXO cache; here we build it by hand.
-    for (let i = 0; i < prevArkTxs.length; i++) {
-      setArkPsbtField(arkTx, i, PrevArkTxField, prevArkTxs[i])
-    }
 
     // ── Send to emulator via SDK provider (proper normalization + retry) ─
     const emu = new RestEmulatorProvider(EMULATOR_URL)

@@ -101,3 +101,12 @@ export {
   encodeOutputIndexWitness,
   addEmulatorPacket,
 } from './arkade-forfeit'
+
+// Arkade-script win-condition (v0.3) — see arkade-win.ts module header.
+export {
+  buildVariableOddsWinPredicate,
+  buildVariableOddsWinArkadeScript,
+  commitDigit,
+  digitHash,
+  type DigitCommit,
+} from './arkade-win'

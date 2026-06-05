@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "serve": "vue-cli-service serve src/main.ts",
-    "prebuild": "npm --prefix packages/contract-workflows-prototype install && npm --prefix packages/contract-workflows-prototype run build && npm --prefix packages/lib install && npm --prefix packages/lib run build",
+    "build:deps": "npm --prefix packages/contract-workflows-prototype install && npm --prefix packages/contract-workflows-prototype run build && npm --prefix packages/lib install && npm --prefix packages/lib run build",
+    "postinstall": "npm run build:deps",
+    "prebuild": "npm run build:deps",
     "build": "vue-cli-service build",
     "lint": "vue-cli-service lint",
     "test:unit": "vitest run",

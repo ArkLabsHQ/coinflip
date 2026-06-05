@@ -909,7 +909,18 @@ export async function handleTrustlessForfeit(
  * safe to run on a timer and at boot. Returns the number of escrows reclaimed.
  */
 export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number> {
-  const now = Math.floor(Date.now() / 1000)
+  // Gate on CHAIN time, not wall-clock. arkd enforces the refund CLTV against
+  // block time (BIP113 MTP), which lags wall-clock — so Date.now() fired the
+  // reclaim early and spammed `FORFEIT_CLOSURE_LOCKED` until the chain caught
+  // up. Use the chain tip like the client does; skip the tick if it's
+  // unreachable (the next pass retries — recovery is idempotent + best-effort).
+  let chainTime: number
+  try {
+    chainTime = (await deps.wallet.onchainProvider.getChainTip()).time
+  } catch (e) {
+    console.warn(`[recovery] skipped — chain tip unavailable: ${e instanceof Error ? e.message : e}`)
+    return 0
+  }
   const expired = await deps.repos.games.list({ status: 'expired', limit: 500 })
   let recovered = 0
   for (const game of expired) {
@@ -921,7 +932,7 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
       continue
     }
     if (!state.houseEscrow || state.houseRefundTxid) continue // not trustless, or already reclaimed
-    if (state.finalExpiration > now) continue // refund CLTV not matured yet
+    if (state.finalExpiration > chainTime) continue // refund CLTV not matured (chain block time)
 
     try {
       const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))

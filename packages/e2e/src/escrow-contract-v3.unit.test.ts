@@ -58,6 +58,8 @@ describe('CoinflipEscrowV3ContractHandler', () => {
     expect(a.creatorWinExit()[1]).toEqual(b.creatorWinExit()[1])
     expect(a.playerForfeitExit()[1]).toEqual(b.playerForfeitExit()[1])
     expect(a.refundExit()[1]).toEqual(b.refundExit()[1])
+    expect(a.cooperativeSpend()[1]).toEqual(b.cooperativeSpend()[1])
+    expect(a.cooperativeSpendExit()[1]).toEqual(b.cooperativeSpendExit()[1])
   })
 
   it('serializeParams produces hex strings for all binary fields', () => {
@@ -69,10 +71,10 @@ describe('CoinflipEscrowV3ContractHandler', () => {
     expect(typeof ser.oddsN).toBe('string')
   })
 
-  it('returns all 8 spending paths', () => {
+  it('returns all 10 spending paths', () => {
     const script = new CoinflipEscrowScriptV3(opts) as InstanceType<typeof CoinflipEscrowScriptV3>
     const paths = CoinflipEscrowV3ContractHandler.getAllSpendingPaths(script)
-    expect(paths.length).toBe(8)
+    expect(paths.length).toBe(10)
   })
 
   it('selectPath returns null (coinflip builds spends directly)', () => {

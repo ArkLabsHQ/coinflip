@@ -1,16 +1,16 @@
 /**
- * Tests for CoinflipEscrowScriptV3 — the 8-leaf v0.3 taptree.
+ * Tests for CoinflipEscrowScriptV3 — the 10-leaf v0.3 taptree.
  *
- *   - taptree has 8 distinct leaves (same shape as v0.2.x)
+ *   - taptree has 10 distinct leaves
  *   - leaves 3, 4, 7, 8 are byte-identical to v0.2.x given identical inputs
  *     (forfeit / refund / playerForfeitExit / refundExit don't depend on
  *     the win predicate, only on `playerHash`)
  *   - leaves 1, 2, 5, 6 differ from v2 (the predicate moved into arkade-script
  *     so the surrounding closure dropped its ConditionMultisig)
- *
- * The original 10-leaf design (with cooperativeSpend + cooperativeSpendExit)
- * is deferred to v0.4 — see script-v3.ts module header for the tap-key-
- * mismatch rationale.
+ *   - leaves 9 (cooperativeSpend) and 10 (cooperativeSpendExit) are NEW
+ *   - the taptree's tap-key matches what arkd's btcd-style algorithm
+ *     derives (achieved via `assembleBtcdTaprootTree` overriding the
+ *     parent VtxoScript's Huffman tree builder)
  */
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -67,7 +67,7 @@ const baseOpts = {
 }
 
 describe('CoinflipEscrowScriptV3 — taptree shape', () => {
-  it('exposes 8 distinct leaves (power-of-2 — required for SDK↔arkd tree-shape agreement)', () => {
+  it('exposes 10 distinct leaves', () => {
     const s = new CoinflipEscrowScriptV3(baseOpts)
     const leafHexes = [
       hex.encode(s.playerWinCovenant()[1]),
@@ -78,8 +78,29 @@ describe('CoinflipEscrowScriptV3 — taptree shape', () => {
       hex.encode(s.creatorWinExit()[1]),
       hex.encode(s.playerForfeitExit()[1]),
       hex.encode(s.refundExit()[1]),
+      hex.encode(s.cooperativeSpend()[1]),
+      hex.encode(s.cooperativeSpendExit()[1]),
     ]
-    expect(new Set(leafHexes).size).toBe(8)
+    expect(new Set(leafHexes).size).toBe(10)
+  })
+
+  it('cooperativeSpend is Multisig[player, creator, server] — passive server co-sig for arkd validation', () => {
+    const s = new CoinflipEscrowScriptV3(baseOpts)
+    const body = hex.encode(s.cooperativeSpend()[1])
+    expect(body.includes(hex.encode(PLAYER))).toBe(true)
+    expect(body.includes(hex.encode(CREATOR))).toBe(true)
+    expect(body.includes(hex.encode(SERVER))).toBe(true)
+    expect(body.includes(hex.encode(EMU))).toBe(false)
+    expect(body.includes('b2')).toBe(false)
+  })
+
+  it('cooperativeSpendExit is the CSV-gated mirror — pure player+creator 2-of-2', () => {
+    const s = new CoinflipEscrowScriptV3(baseOpts)
+    const body = hex.encode(s.cooperativeSpendExit()[1])
+    expect(body.includes(hex.encode(PLAYER))).toBe(true)
+    expect(body.includes(hex.encode(CREATOR))).toBe(true)
+    expect(body.includes(hex.encode(EMU))).toBe(false)
+    expect(body.includes('b2')).toBe(true)
   })
 
   it('forfeit/refund/playerForfeitExit/refundExit are byte-identical to v2 given matching inputs', () => {
@@ -104,6 +125,9 @@ describe('CoinflipEscrowScriptV3 — taptree shape', () => {
     const houseOpts = { ...baseOpts, refundPubkey: CREATOR }
     const houseEscrow = new CoinflipEscrowScriptV3(houseOpts)
     const playerEscrow = new CoinflipEscrowScriptV3(baseOpts)
+    // The cooperative leaves are funder-independent — same on both escrows.
+    expect(hex.encode(houseEscrow.cooperativeSpend()[1]))
+      .toBe(hex.encode(playerEscrow.cooperativeSpend()[1]))
     // The win-leaves differ because each pins the OTHER party's stake in the
     // covenant's INSPECTINPUTVALUE check (atomicSweep semantics).
     expect(hex.encode(houseEscrow.playerWinCovenant()[1]))

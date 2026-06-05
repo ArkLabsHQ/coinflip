@@ -172,6 +172,32 @@ export function buildCovenantSweepTransactionV3(
 
   const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnrollScript)
 
+  // Patch witnessUtxo.script on each CHECKPOINT'S input. Each checkpoint
+  // spends one of our escrow VTXOs; buildOffchainTx sets the checkpoint's
+  // input.witnessUtxo.script via `VtxoScript.decode(input.tapTree).pkScript`,
+  // which goes through scure-btc-signer's Huffman tree builder. For v3's
+  // 10-leaf taptree the SDK's Huffman shape disagrees with arkd's btcd
+  // tree — wrong pkScript. We override the parent VtxoScript's tree
+  // derivation inside CoinflipEscrowScriptV3, so `e.script.pkScript` is
+  // the btcd-correct on-chain prevout. Patch the checkpoint to match.
+  //
+  // The arkTx's inputs reference the CHECKPOINT outputs (2-leaf VtxoScript
+  // = `[serverUnroll, collaborativeClosure]`), which the SDK builds
+  // identically with Huffman vs btcd (2 leaves form the simplest balanced
+  // tree), so the arkTx's witnessUtxo stays correct without patching.
+  for (let i = 0; i < args.escrows.length; i++) {
+    const cp = checkpoints[i]
+    const cpInput = cp.getInput(0)
+    if (cpInput?.witnessUtxo) {
+      cp.updateInput(0, {
+        witnessUtxo: {
+          script: args.escrows[i].script.pkScript,
+          amount: cpInput.witnessUtxo.amount,
+        },
+      })
+    }
+  }
+
   // EmulatorPacket per input: arkade-script + covenant witness args.
   // Witness layout: `[out_idx=0, other_in_idx=(1-i)]` — covenant pops these in
   // order. EmulatorPacket entries carry the script + per-input witness so the

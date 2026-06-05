@@ -254,6 +254,8 @@ export const CoinflipEscrowV3ContractHandler: ContractHandler<
       { leaf: script.creatorWinExit() },
       { leaf: script.playerForfeitExit() },
       { leaf: script.refundExit() },
+      { leaf: script.cooperativeSpend() },
+      { leaf: script.cooperativeSpendExit() },
     ]
   },
 
@@ -269,6 +271,8 @@ export const CoinflipEscrowV3ContractHandler: ContractHandler<
       { leaf: script.creatorWinExit() },
       { leaf: script.playerForfeitExit() },
       { leaf: script.refundExit() },
+      { leaf: script.cooperativeSpend() },
+      { leaf: script.cooperativeSpendExit() },
     ]
   },
 }

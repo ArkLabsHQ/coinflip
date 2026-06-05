@@ -213,21 +213,6 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     const houseEscrowScript  = new CoinflipEscrowScriptV3({ ...baseOpts, refundPubkey: houseXOnly })
     const playerEscrowAddr = playerEscrowScript.address('tark', arkdServerPubkey)
     const houseEscrowAddr  = houseEscrowScript.address('tark', arkdServerPubkey)
-    // Diagnostic: prove that the script's tweakedPubKey (used at FUNDING via
-    // .address().pkScript) survives encode()→decode() roundtrip. If they
-    // disagree, the SDK's TapTreeCoder isn't preserving the tree structure
-    // and we'll get a tap-key mismatch at arkd at sweep time.
-    {
-      const { VtxoScript: V } = require('@arkade-os/sdk')
-      const playerDecoded = V.decode(playerEscrowScript.encode())
-      const directKey = hex.encode(playerEscrowScript.tweakedPublicKey)
-      const decodedKey = hex.encode(playerDecoded.tweakedPublicKey)
-      console.log(`[v3-regtest] playerEscrow.tweakedPK direct=${directKey}`)
-      console.log(`[v3-regtest] playerEscrow.tweakedPK encode→decode=${decodedKey}`)
-      if (directKey !== decodedKey) {
-        throw new Error(`taptree encode→decode does NOT preserve tap key — SDK roundtrip bug`)
-      }
-    }
 
     // ── Fund both escrows. Return the FINAL ark tx bytes too — the sweep
     //    needs them set via PrevArkTxField for the emu's checkpoint

@@ -8,7 +8,7 @@
  *      ConditionMultisig — arkd's script interpreter no longer evaluates
  *      the win condition).
  *
- * 8-leaf taptree (same shape as v0.2.x):
+ * 10-leaf taptree:
  *   1. playerWinCovenant       — Multisig[server, emu_tweaked(predicateP+covenant)]
  *   2. creatorWinCovenant      — Multisig[server, emu_tweaked(predicateC+covenant)]
  *   3. playerForfeit           — UNCHANGED from v2 (CLTV multisig)
@@ -17,19 +17,22 @@
  *   6. creatorWinExit          — CSVMultisig[creator, emu_tweaked(predicateC+covenant)]
  *   7. playerForfeitExit       — UNCHANGED from v2 (ConditionCSVMultisig + hash-check)
  *   8. refundExit              — UNCHANGED from v2 (CSVMultisig[funder])
+ *   9. cooperativeSpend (NEW)  — Multisig[player, creator, server]
+ *  10. cooperativeSpendExit    — CSVMultisig[player, creator]
  *
- * Spec-original leaves 9 (`cooperativeSpend`) and 10 (`cooperativeSpendExit`)
- * are deferred to v0.4 — the SDK's Huffman tree builder produces an
- * unbalanced shape for 10 leaves that disagrees with arkd's parser,
- * causing a tap-key mismatch. The existing CLTV/CSV escape hatches
- * preserve the emu-offline-recovery story; instant cooperative settlement
- * is the only feature deferred.
+ * IMPORTANT: arkd's `txscript.AssembleTaprootScriptTree` builds a different
+ * tree shape than scure-btc-signer's `taprootListToTree` (Huffman) for
+ * non-power-of-2 leaf counts. We override the parent VtxoScript's tap-tree
+ * construction with `assembleBtcdTaprootTree`, which reproduces btcd's
+ * algorithm so SDK and arkd agree on the merkle root + taproot output key
+ * for any leaf count.
  *
  * See: docs/superpowers/specs/2026-06-05-arkade-script-win-condition-design.md
  */
 
-import { OP } from '@scure/btc-signer'
+import { OP, p2tr, TAPROOT_UNSPENDABLE_KEY } from '@scure/btc-signer'
 import { hex } from '@scure/base'
+import { assembleBtcdTaprootTree } from './btcd-taproot-tree'
 import {
   VtxoScript,
   ConditionCSVMultisigTapscript,
@@ -84,6 +87,8 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
   readonly creatorWinExitScriptHex: string
   readonly playerForfeitExitScriptHex: string
   readonly refundExitScriptHex: string
+  readonly cooperativeSpendScriptHex: string
+  readonly cooperativeSpendExitScriptHex: string
 
   readonly playerWinFullArkadeScript: Uint8Array
   readonly creatorWinFullArkadeScript: Uint8Array
@@ -172,26 +177,30 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
       pubkeys: [refundPubkey],
     })
 
-    // ⚠ Taptree leaf count MUST be a power of 2.
+    // ── Leaves 9, 10 — cooperative spend + CSV mirror ──────────────────
     //
-    // The SDK's `taprootListToTree` (Huffman with equal weights) and arkd's
-    // btcd parser produce IDENTICAL balanced binary trees only when the leaf
-    // count is a power of 2 (4, 8, 16…). Non-power counts produce different
-    // unbalanced shapes between the two implementations, leading to a tap
-    // key mismatch at sweep validation (`INVALID_PSBT_INPUT: expected X,
-    // got Y` from arkd's `internal/core/application/service.go:772`).
+    // arkd's `vtxo_script.go:97-133` requires every Multisig/CLTVMultisig/
+    // ConditionMultisig closure in the taptree to contain the arkd signer
+    // pubkey. So `cooperativeSpend` includes serverPubkey as a passive
+    // co-signer — arkd's signature is automatic for valid spends, so
+    // player + creator can still cooperatively settle without the emulator.
     //
-    // Padding with unspendable OP_RETURN leaves doesn't work either — arkd
-    // rejects unknown closure types with "invalid vtxo scripts".
-    //
-    // v2 had 8 leaves and shipped. v0.3 keeps the same 8-leaf shape and
-    // defers `cooperativeSpend` + `cooperativeSpendExit` to v0.4, where they
-    // can be properly accommodated (e.g., by removing one of leaves 7/8 in
-    // exchange, or finding a tree-shape workaround). The v0.3 cooperative
-    // story already has working escape hatches via the existing CLTV
-    // (forfeit, refund) and CSV (exit mirror) leaves — instant cooperative
-    // settlement is the only feature deferred.
-    super([
+    // `cooperativeSpendExit` is a CSVMultisigClosure (ExitClosure, NOT
+    // a ForfeitClosure), so it isn't checked for the signer pubkey and
+    // stays a pure player+creator 2-of-2.
+    const cooperativeSpendScript = MultisigTapscript.encode({
+      pubkeys: [playerPubkey, creatorPubkey, serverPubkey],
+    }).script
+    const cooperativeSpendExitScript = CSVMultisigTapscript.encode({
+      timelock: { value: exitDelay, type: 'seconds' },
+      pubkeys: [playerPubkey, creatorPubkey],
+    }).script
+
+    // The full 10-leaf script set. The PSBT's `VtxoTaprootTree` field will
+    // carry this script set in order, BUT — see post-super() block below —
+    // we OVERRIDE the parent VtxoScript's tap-tree merkle-root derivation
+    // with btcd's algorithm so that arkd agrees on the tap key.
+    const scripts = [
       playerWinCovenantScript,        // 0
       creatorWinCovenantScript,       // 1
       forfeitLeafScript,              // 2
@@ -200,7 +209,31 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
       creatorWinExitScript,           // 5
       playerForfeitExitScript,        // 6
       refundExitTapscript.script,     // 7
-    ])
+      cooperativeSpendScript,         // 8
+      cooperativeSpendExitScript,     // 9
+    ]
+    super(scripts)
+
+    // ── Replace parent's Huffman-built taptree state with btcd's tree ───
+    //
+    // The parent VtxoScript constructor (scure-btc-signer's `VtxoScript`)
+    // builds the taptree via `taprootListToTree` (Huffman with equal
+    // weights). For non-power-of-2 leaf counts the Huffman shape disagrees
+    // with arkd's `txscript.AssembleTaprootScriptTree`, producing a
+    // different tweakedPubkey + pkScript + per-leaf merkle proofs.
+    //
+    // We rebuild here using `assembleBtcdTaprootTree` (mirrors btcd's
+    // algorithm exactly) and overwrite the parent fields. The parent
+    // `this.scripts` (the flat script list used by `encode()`) is left
+    // intact, so the encoded PSBT field matches what we built.
+    const btcdTree = assembleBtcdTaprootTree(scripts)
+    const btcdPayment = p2tr(TAPROOT_UNSPENDABLE_KEY, btcdTree, undefined, true)
+    if (!btcdPayment.tapLeafScript || btcdPayment.tapLeafScript.length !== scripts.length) {
+      throw new Error('CoinflipEscrowScriptV3: btcd taptree produced invalid leaves')
+    }
+    ;(this as { leaves: typeof btcdPayment.tapLeafScript }).leaves = btcdPayment.tapLeafScript
+    ;(this as { tweakedPublicKey: Uint8Array }).tweakedPublicKey = btcdPayment.tweakedPubkey
+    ;(this as { pkScript: Uint8Array }).pkScript = btcdPayment.script
 
     this.playerWinCovenantScriptHex = hex.encode(playerWinCovenantScript)
     this.creatorWinCovenantScriptHex = hex.encode(creatorWinCovenantScript)
@@ -210,6 +243,8 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
     this.creatorWinExitScriptHex = hex.encode(creatorWinExitScript)
     this.playerForfeitExitScriptHex = hex.encode(playerForfeitExitScript)
     this.refundExitScriptHex = hex.encode(refundExitTapscript.script)
+    this.cooperativeSpendScriptHex = hex.encode(cooperativeSpendScript)
+    this.cooperativeSpendExitScriptHex = hex.encode(cooperativeSpendExitScript)
     this.playerWinFullArkadeScript = playerWinFullArkadeScript
     this.creatorWinFullArkadeScript = creatorWinFullArkadeScript
     this.forfeitArkadeScript = forfeitArkadeScript
@@ -223,6 +258,8 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
   creatorWinExit(): TapLeafScript { return this.findLeaf(this.creatorWinExitScriptHex) }
   playerForfeitExit(): TapLeafScript { return this.findLeaf(this.playerForfeitExitScriptHex) }
   refundExit(): TapLeafScript { return this.findLeaf(this.refundExitScriptHex) }
+  cooperativeSpend(): TapLeafScript { return this.findLeaf(this.cooperativeSpendScriptHex) }
+  cooperativeSpendExit(): TapLeafScript { return this.findLeaf(this.cooperativeSpendExitScriptHex) }
 
   /**
    * SDK contract-annotation helper — same role as v0.2.x's forfeit().

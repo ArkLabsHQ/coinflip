@@ -912,14 +912,15 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
   // Gate on CHAIN time, not wall-clock. arkd enforces the refund CLTV against
   // block time (BIP113 MTP), which lags wall-clock — so Date.now() fired the
   // reclaim early and spammed `FORFEIT_CLOSURE_LOCKED` until the chain caught
-  // up. Use the chain tip like the client does; skip the tick if it's
-  // unreachable (the next pass retries — recovery is idempotent + best-effort).
+  // up. Use the chain tip like the client does. Fall back to wall-clock only
+  // when the tip is unavailable (some providers, e.g. the regtest esplora,
+  // return "No chain tip found"); the per-game catch below absorbs an early
+  // CLTV rejection, so recovery still works there — just slightly eagerly.
   let chainTime: number
   try {
     chainTime = (await deps.wallet.onchainProvider.getChainTip()).time
-  } catch (e) {
-    console.warn(`[recovery] skipped — chain tip unavailable: ${e instanceof Error ? e.message : e}`)
-    return 0
+  } catch {
+    chainTime = Math.floor(Date.now() / 1000)
   }
   const expired = await deps.repos.games.list({ status: 'expired', limit: 500 })
   let recovered = 0

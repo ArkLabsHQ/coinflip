@@ -651,19 +651,38 @@ async function submitCovenantSweep(
 ): Promise<string> {
   const cfg = await loadEmulatorConfig()
   if (!cfg) throw new Error('Emulator not configured — required for covenant sweep')
-  const resp = await fetch(`${cfg.url}/v1/tx`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      arkTx: base64.encode(sweepTx.arkTx.toPSBT()),
-      checkpointTxs: sweepTx.checkpoints.map((c) => base64.encode(c.toPSBT())),
-    }),
-    signal: AbortSignal.timeout(20_000),
+  const payload = JSON.stringify({
+    arkTx: base64.encode(sweepTx.arkTx.toPSBT()),
+    checkpointTxs: sweepTx.checkpoints.map((c) => base64.encode(c.toPSBT())),
   })
-  if (!resp.ok) throw new Error(`Emulator rejected sweep: ${resp.status} ${await resp.text()}`)
-  const body = (await resp.json()) as { signedArkTx?: string }
-  if (!body.signedArkTx) throw new Error('Emulator did not return signedArkTx')
-  return Transaction.fromPSBT(base64.decode(body.signedArkTx)).id
+
+  // The sweep spends the player's freshly-submitted escrow VTXO. Under
+  // concurrent load arkd can lag indexing that VTXO, so the emulator's own
+  // arkd submit fails transiently ("failed to process transaction" → its
+  // internal VTXO_NOT_FOUND). Retry with backoff — the escrow lands a beat
+  // later. A genuine validation rejection (4xx, bad script/signature, or an
+  // already-spent input) is NOT retried.
+  const MAX_ATTEMPTS = 8
+  let lastErr = ''
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const resp = await fetch(`${cfg.url}/v1/tx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (resp.ok) {
+      const body = (await resp.json()) as { signedArkTx?: string }
+      if (!body.signedArkTx) throw new Error('Emulator did not return signedArkTx')
+      return Transaction.fromPSBT(base64.decode(body.signedArkTx)).id
+    }
+    const text = await resp.text()
+    lastErr = `Emulator rejected sweep: ${resp.status} ${text}`
+    const transient = resp.status >= 500 && /failed to process transaction|VTXO_NOT_FOUND|not found/i.test(text)
+    if (!transient || attempt === MAX_ATTEMPTS - 1) throw new Error(lastErr)
+    await new Promise((r) => setTimeout(r, 400 + attempt * 400)) // ~0.4s→3.2s, ~11s total
+  }
+  throw new Error(lastErr)
 }
 
 export async function handleTrustlessCommit(

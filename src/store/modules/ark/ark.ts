@@ -9,7 +9,7 @@ import {
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
-  forfeit as apiForfeit,
+  forfeit as apiForfeit, getGame as apiGetGame,
   type Outpoint,
 } from '@/services/api'
 import { createHash } from '@/utils/crypto'
@@ -909,9 +909,11 @@ const ark: Module<ArkState, RootState> = {
         await updateRefundStash(playRes.gameId, { revealed: true })
         result = await apiCommit(playRes.gameId, playerSecretHex, playerEscrow)
       } catch (e) {
+        console.warn('[trustless] commit did not settle inline:', e instanceof Error ? e.message : e)
         const when = new Date(playRes.finalExpiration * 1000).toLocaleString()
         throw new Error(
-          `${e instanceof Error ? e.message : 'Game failed to resolve'} — your ${tier} sat stake is safe and reclaimable after ${when} (see "Reclaim stalled bets").`,
+          `Still settling — the operator finishes this automatically and it usually lands within a minute. ` +
+          `Your ${tier} sat stake is safe; if it doesn't resolve you can reclaim it after ${when} (see "Reclaim stalled bets").`,
         )
       }
       await clearRefund(playRes.gameId)
@@ -1076,6 +1078,17 @@ const ark: Module<ArkState, RootState> = {
       if (chainTime === null) return // can't decide; try next tick
       for (const stash of stashes) {
         if (state.claimingGames[stash.gameId]) continue
+        // The server's reconcile finishes stalled commits on its own (persist-
+        // before-sweep + sweep retry). If it already settled this game, the
+        // escrows are swept — drop the stash so the UI stops showing a phantom
+        // "stalled" bet, instead of waiting for the CLTV only to fail "already
+        // spent". This is the common exit now, well before forfeitClaimableAt.
+        try {
+          if ((await apiGetGame(stash.gameId)).status === 'resolved') {
+            await clearRefund(stash.gameId)
+            continue
+          }
+        } catch { /* server unreachable — fall through to the CLTV-gated claim */ }
         const canForfeit =
           stash.revealed === true &&
           !!stash.forfeitPsbt &&

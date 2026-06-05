@@ -11,7 +11,7 @@
         <div class="bet-info">
           <span class="amount penalty-amount">Claim full pot — {{ b.tier.toLocaleString() }} sats (your stake + house)</span>
           <span class="state" :class="{ ready: isForfeitReady(b), auto: isAutoClaiming(b) }">{{ forfeitStatusLabel(b) }}</span>
-          <span class="penalty-note">The house didn't reveal its secret. Forfeit kicks in — you take everything.</span>
+          <span class="penalty-note">{{ forfeitNote(b) }}</span>
         </div>
         <div class="bet-actions">
           <button
@@ -124,6 +124,20 @@ export default defineComponent({
       return `Claimable in ~${mins} min (arkade, chain time)`
     }
 
+    /**
+     * Context line under the amount. Before the forfeit CLTV the operator is
+     * still expected to settle (and the reconcile loop finishes stalled commits
+     * on its own), so frame it as "settling, this is a backup" rather than
+     * alarming the player. Only once the deadline passes is the house genuinely
+     * stalling and the forfeit the real path.
+     */
+    function forfeitNote(b: StashedRefund): string {
+      if (isForfeitReady(b)) {
+        return "The house never revealed its secret. Forfeit kicks in — you take the whole pot."
+      }
+      return 'Settling — the operator completes this automatically, usually within a minute. This is your trustless backup if it stalls.'
+    }
+
     /** Per-button label. `kind` distinguishes the three button slots so each gets a fitting verb. */
     function claimBtnLabel(b: StashedRefund, kind: 'forfeit' | 'refund' | 'refund-link'): string {
       const info = claimingGames.value[b.gameId]
@@ -185,7 +199,7 @@ export default defineComponent({
       bets, message,
       hasForfeit, isReady, isForfeitReady,
       isClaiming, isAutoClaiming,
-      statusLabel, forfeitStatusLabel, claimBtnLabel,
+      statusLabel, forfeitStatusLabel, forfeitNote, claimBtnLabel,
       reclaim, claimForfeit,
     }
   },

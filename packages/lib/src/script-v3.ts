@@ -7,10 +7,8 @@
  *   2. The surrounding tapscript closure becomes plain Multisig (no
  *      ConditionMultisig — arkd's script interpreter no longer evaluates
  *      the win condition).
- *   3. Two new leaves added: `cooperativeSpend` (2-of-2 player+creator,
- *      no emu, no covenant, no clock) and `cooperativeSpendExit` (CSV mirror).
  *
- * Final taptree (10 leaves):
+ * 8-leaf taptree (same shape as v0.2.x):
  *   1. playerWinCovenant       — Multisig[server, emu_tweaked(predicateP+covenant)]
  *   2. creatorWinCovenant      — Multisig[server, emu_tweaked(predicateC+covenant)]
  *   3. playerForfeit           — UNCHANGED from v2 (CLTV multisig)
@@ -19,8 +17,13 @@
  *   6. creatorWinExit          — CSVMultisig[creator, emu_tweaked(predicateC+covenant)]
  *   7. playerForfeitExit       — UNCHANGED from v2 (ConditionCSVMultisig + hash-check)
  *   8. refundExit              — UNCHANGED from v2 (CSVMultisig[funder])
- *   9. cooperativeSpend (new)  — Multisig[player, creator]
- *  10. cooperativeSpendExit    — CSVMultisig[player, creator]
+ *
+ * Spec-original leaves 9 (`cooperativeSpend`) and 10 (`cooperativeSpendExit`)
+ * are deferred to v0.4 — the SDK's Huffman tree builder produces an
+ * unbalanced shape for 10 leaves that disagrees with arkd's parser,
+ * causing a tap-key mismatch. The existing CLTV/CSV escape hatches
+ * preserve the emu-offline-recovery story; instant cooperative settlement
+ * is the only feature deferred.
  *
  * See: docs/superpowers/specs/2026-06-05-arkade-script-win-condition-design.md
  */
@@ -81,8 +84,6 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
   readonly creatorWinExitScriptHex: string
   readonly playerForfeitExitScriptHex: string
   readonly refundExitScriptHex: string
-  readonly cooperativeSpendScriptHex: string
-  readonly cooperativeSpendExitScriptHex: string
 
   readonly playerWinFullArkadeScript: Uint8Array
   readonly creatorWinFullArkadeScript: Uint8Array
@@ -171,42 +172,34 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
       pubkeys: [refundPubkey],
     })
 
-    // ── Leaves 9, 10 — NEW: cooperative spend + CSV mirror ──────────────
+    // ⚠ Taptree leaf count MUST be a power of 2.
     //
-    // arkd validates that every MultisigClosure / CLTVMultisigClosure /
-    // ConditionMultisigClosure leaf in the taptree contains the arkd signer
-    // pubkey (see arkd's `pkg/ark-lib/script/vtxo_script.go:97-133`,
-    // `Validate` → `ForfeitClosures()`). Without this, arkd rejects the whole
-    // VTXO with "invalid forfeit closure, signer pubkey not found".
+    // The SDK's `taprootListToTree` (Huffman with equal weights) and arkd's
+    // btcd parser produce IDENTICAL balanced binary trees only when the leaf
+    // count is a power of 2 (4, 8, 16…). Non-power counts produce different
+    // unbalanced shapes between the two implementations, leading to a tap
+    // key mismatch at sweep validation (`INVALID_PSBT_INPUT: expected X,
+    // got Y` from arkd's `internal/core/application/service.go:772`).
     //
-    // Adding `serverPubkey` to the cooperative leaf doesn't change the
-    // semantics: arkd's co-sig is automatic for valid spends, so player +
-    // creator can still cooperatively settle whenever they agree — the server
-    // is a passive co-signer, not a veto. This still lets the parties bypass
-    // the emulator entirely (emu-offline recovery).
+    // Padding with unspendable OP_RETURN leaves doesn't work either — arkd
+    // rejects unknown closure types with "invalid vtxo scripts".
     //
-    // CSV-mirror leaves are ExitClosures (`CSVMultisigClosure`) and are NOT
-    // checked for the signer pubkey — so leaf 10 stays a pure player+creator
-    // 2-of-2.
-    const cooperativeSpendScript = MultisigTapscript.encode({
-      pubkeys: [playerPubkey, creatorPubkey, serverPubkey],
-    }).script
-    const cooperativeSpendExitScript = CSVMultisigTapscript.encode({
-      timelock: { value: exitDelay, type: 'seconds' },
-      pubkeys: [playerPubkey, creatorPubkey],
-    }).script
-
+    // v2 had 8 leaves and shipped. v0.3 keeps the same 8-leaf shape and
+    // defers `cooperativeSpend` + `cooperativeSpendExit` to v0.4, where they
+    // can be properly accommodated (e.g., by removing one of leaves 7/8 in
+    // exchange, or finding a tree-shape workaround). The v0.3 cooperative
+    // story already has working escape hatches via the existing CLTV
+    // (forfeit, refund) and CSV (exit mirror) leaves — instant cooperative
+    // settlement is the only feature deferred.
     super([
-      playerWinCovenantScript,
-      creatorWinCovenantScript,
-      forfeitLeafScript,
-      refundTapscript.script,
-      playerWinExitScript,
-      creatorWinExitScript,
-      playerForfeitExitScript,
-      refundExitTapscript.script,
-      cooperativeSpendScript,
-      cooperativeSpendExitScript,
+      playerWinCovenantScript,        // 0
+      creatorWinCovenantScript,       // 1
+      forfeitLeafScript,              // 2
+      refundTapscript.script,         // 3
+      playerWinExitScript,            // 4
+      creatorWinExitScript,           // 5
+      playerForfeitExitScript,        // 6
+      refundExitTapscript.script,     // 7
     ])
 
     this.playerWinCovenantScriptHex = hex.encode(playerWinCovenantScript)
@@ -217,8 +210,6 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
     this.creatorWinExitScriptHex = hex.encode(creatorWinExitScript)
     this.playerForfeitExitScriptHex = hex.encode(playerForfeitExitScript)
     this.refundExitScriptHex = hex.encode(refundExitTapscript.script)
-    this.cooperativeSpendScriptHex = hex.encode(cooperativeSpendScript)
-    this.cooperativeSpendExitScriptHex = hex.encode(cooperativeSpendExitScript)
     this.playerWinFullArkadeScript = playerWinFullArkadeScript
     this.creatorWinFullArkadeScript = creatorWinFullArkadeScript
     this.forfeitArkadeScript = forfeitArkadeScript
@@ -232,8 +223,6 @@ export class CoinflipEscrowScriptV3 extends VtxoScript {
   creatorWinExit(): TapLeafScript { return this.findLeaf(this.creatorWinExitScriptHex) }
   playerForfeitExit(): TapLeafScript { return this.findLeaf(this.playerForfeitExitScriptHex) }
   refundExit(): TapLeafScript { return this.findLeaf(this.refundExitScriptHex) }
-  cooperativeSpend(): TapLeafScript { return this.findLeaf(this.cooperativeSpendScriptHex) }
-  cooperativeSpendExit(): TapLeafScript { return this.findLeaf(this.cooperativeSpendExitScriptHex) }
 
   /**
    * SDK contract-annotation helper — same role as v0.2.x's forfeit().

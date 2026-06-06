@@ -66,7 +66,6 @@ const FINAL_EXPIRATION_BUFFER = 1800  // 30 min — well past any test settlemen
 const EXIT_DELAY = 86_528n            // BIP68 seconds, multiple of 512
 
 const toXOnly = (b: Uint8Array) => (b.length === 33 ? b.slice(1) : b)
-const p2tr = (xonly: Uint8Array) => new Uint8Array([0x51, 0x20, ...xonly])
 
 async function makeWallet(id: SingleKey): Promise<Wallet> {
   return Wallet.create({
@@ -142,7 +141,24 @@ beforeAll(async () => {
 }, 10_000)
 
 describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () => {
-  it('player wins → covenant sweep via playerWinCovenant settles, winner gets pot', async () => {
+  // Game parameters held constant across both scenarios — only the chosen
+  // digits + expected winner vary. n=2 (coin), lo=0, target=1 → roll==0 is
+  // the only player-win, every other roll is house. The two digit pairs
+  // below cover the two branches of the on-chain win predicate.
+  const N = 2, TARGET = 1, LO = 0
+
+  /**
+   * Drive a complete v3 covenant sweep end-to-end through the emulator and
+   * verify on-chain settlement. Parameterized over which side is supposed to
+   * win (so we exercise both `playerWinCovenant` and `creatorWinCovenant`
+   * leaves of the 10-leaf taptree under the consensus-critical regtest).
+   */
+  async function runV3CovenantSweep(scenario: {
+    label: string
+    creatorDigit: number
+    playerDigit: number
+    expectedWinner: 'player' | 'house'
+  }): Promise<void> {
     if (!arkAvailable || !emuAvailable) {
       console.warn(`[skip] regtest unavailable: arkd=${arkAvailable} emu=${emuAvailable}`)
       return
@@ -151,7 +167,6 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     // ── Wallets ───────────────────────────────────────────────────────────
     const playerId = SingleKey.fromRandomBytes() as unknown as Identity
     const houseId  = SingleKey.fromRandomBytes() as unknown as Identity
-    const serverId = SingleKey.fromRandomBytes() as unknown as Identity   // signs the "server" multisig slot
     const playerW = await makeWallet(playerId as unknown as SingleKey)
     const houseW  = await makeWallet(houseId as unknown as SingleKey)
     const ark = new RestArkProvider(ARK_SERVER_URL) as ArkProvider
@@ -170,12 +185,9 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     await waitFor(playerW, 'settled', BET)
     await waitFor(houseW,  'settled', BET)
 
-    // ── Game parameters: deterministic player-wins outcome ────────────────
-    // n=2 (coin), lo=0, target=1 → player wins iff roll == 0.
-    // playerDigit=0, creatorDigit=0 → roll = (0+0) % 2 = 0 → PLAYER WINS.
-    const N = 2, TARGET = 1, LO = 0
-    const playerReveal: DigitCommit = commitDigit(0, N)
-    const creatorReveal: DigitCommit = commitDigit(0, N)
+    // ── Game parameters & commits ─────────────────────────────────────────
+    const playerReveal: DigitCommit = commitDigit(scenario.playerDigit, N)
+    const creatorReveal: DigitCommit = commitDigit(scenario.creatorDigit, N)
     const playerHash = digitHash(playerReveal)
     const creatorHash = digitHash(creatorReveal)
 
@@ -185,7 +197,6 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
 
     const playerXOnly = toXOnly(await playerId.compressedPublicKey() as Uint8Array)
     const houseXOnly  = toXOnly(await houseId.compressedPublicKey()  as Uint8Array)
-    const serverXOnly = toXOnly(await serverId.compressedPublicKey() as Uint8Array)
     const playerPayoutAddress = await playerW.getAddress()
     const housePayoutAddress  = await houseW.getAddress()
     const playerPayoutPkScript = ArkAddress.decode(playerPayoutAddress).pkScript
@@ -214,9 +225,9 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     const playerEscrowAddr = playerEscrowScript.address('tark', arkdServerPubkey)
     const houseEscrowAddr  = houseEscrowScript.address('tark', arkdServerPubkey)
 
-    // ── Fund both escrows. Return the FINAL ark tx bytes too — the sweep
-    //    needs them set via PrevArkTxField for the emu's checkpoint
-    //    resolution.
+    // ── Fund both escrows via single-party offchain tx (each side funds
+    //    its own escrow). Returns the txid of the resulting vout-0 escrow
+    //    VTXO so the sweep can spend it directly. ──────────────────────
     async function fundEscrow(wallet: Wallet, identity: Identity, escrowAddr: ArkAddress): Promise<{ txid: string }> {
       const vtxos = await wallet.getVtxos()
       const v = vtxos[0]
@@ -261,7 +272,6 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     const playerEscrow = { txid: playerFunding.txid, vout: 0, value: BET }
     const houseEscrow  = { txid: houseFunding.txid, vout: 0, value: BET }
 
-
     // Wait for arkd to index both escrow VTXOs — without this the emulator's
     // checkpoint lookup ("checkpoint not found for input 0") races the
     // finalizeTx → indexer chain.
@@ -277,21 +287,22 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
       waitForEscrowIndexed(playerEscrow),
       waitForEscrowIndexed(houseEscrow),
     ])
-    console.log(`[v3-regtest] both escrows indexed; player=${playerEscrow.txid.slice(0,16)}… house=${houseEscrow.txid.slice(0,16)}…`)
+    console.log(`[v3-regtest:${scenario.label}] both escrows indexed; player=${playerEscrow.txid.slice(0,16)}… house=${houseEscrow.txid.slice(0,16)}…`)
 
     // ── Build the v3 covenant sweep ───────────────────────────────────────
+    const winnerPayoutAddress = scenario.expectedWinner === 'player' ? playerPayoutAddress : housePayoutAddress
+    const winnerPayoutPkScript = scenario.expectedWinner === 'player' ? playerPayoutPkScript : housePayoutPkScript
     const { arkTx, checkpoints } = buildCovenantSweepTransactionV3(arkInfo, {
-      winner: 'player',
+      winner: scenario.expectedWinner,
       escrows: [
         { script: playerEscrowScript, ...playerEscrow },
         { script: houseEscrowScript,  ...houseEscrow },
       ],
-      payoutAddress: playerPayoutAddress,
+      payoutAddress: winnerPayoutAddress,
       potAmount: BigInt(2 * BET),
       playerReveal,
       creatorReveal,
     })
-
 
     // Sanity: confirm sweep tx structure links arkTx inputs to checkpoint ids.
     for (let i = 0; i < arkTx.inputsLength; i++) {
@@ -343,17 +354,36 @@ describe('v0.3 covenant sweep (consensus-critical) — emulator round-trip', () 
     }
     expect(bothSpent).toBe(true)
 
-    // (b) Player payout received the full pot.
-    let potToPlayer = false
-    for (let i = 0; i < 20 && !potToPlayer; i++) {
-      const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(playerPayoutPkScript)] })
-      potToPlayer = vtxos.some((v) => v.value === 2 * BET && !v.isSpent)
-      if (!potToPlayer) await sleep(2000)
+    // (b) Winner's payout received the full pot.
+    let potToWinner = false
+    for (let i = 0; i < 20 && !potToWinner; i++) {
+      const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(winnerPayoutPkScript)] })
+      potToWinner = vtxos.some((v) => v.value === 2 * BET && !v.isSpent)
+      if (!potToWinner) await sleep(2000)
     }
-    expect(potToPlayer).toBe(true)
-    console.log(`[v3-regtest] player-wins sweep settled: txid=${settledTxid.slice(0, 16)}…, pot=${2 * BET} to player`)
+    expect(potToWinner).toBe(true)
+    console.log(`[v3-regtest:${scenario.label}] ${scenario.expectedWinner}-wins sweep settled: txid=${settledTxid.slice(0, 16)}…, pot=${2 * BET} to ${scenario.expectedWinner}`)
+  }
 
-    // Silence unused (we keep the binding for debug visibility).
-    void p2tr; void serverXOnly; void emulatorPubkey
+  // playerDigit=0, creatorDigit=0 → roll = (0+0) % 2 = 0 → in [0, 1) → player wins.
+  it('player wins → covenant sweep via playerWinCovenant settles, winner gets pot', async () => {
+    await runV3CovenantSweep({
+      label: 'player-wins',
+      creatorDigit: 0,
+      playerDigit: 0,
+      expectedWinner: 'player',
+    })
+  }, 600_000)
+
+  // playerDigit=1, creatorDigit=0 → roll = (1+0) % 2 = 1 → NOT in [0, 1) → house wins.
+  // Without this case a regression in the creatorWin predicate or the OP_NOT
+  // append on the creator leaf would slip past CI.
+  it('house wins → covenant sweep via creatorWinCovenant settles, winner gets pot', async () => {
+    await runV3CovenantSweep({
+      label: 'house-wins',
+      creatorDigit: 0,
+      playerDigit: 1,
+      expectedWinner: 'house',
+    })
   }, 600_000)
 })

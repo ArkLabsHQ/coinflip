@@ -20,7 +20,6 @@ import {
   buildOffchainTx,
   CSVMultisigTapscript,
   decodeTapscript,
-  Transaction,
   type TapLeafScript,
 } from '@arkade-os/sdk'
 import { emulator, packets } from '@arklabshq/contract-workflows-prototype'
@@ -148,8 +147,29 @@ export function buildCovenantSweepTransactionV3(
 ): BuiltOffchainTx & {
   emulatorEntries: { vin: number; script: Uint8Array; witness: Uint8Array }[]
 } {
+  // Runtime guards. The TS tuple `[EscrowInputV3, EscrowInputV3]` is a
+  // compile-time constraint — a deserialized JSON array or `as any` cast slips
+  // past it. The emulator-witness builder below assumes exactly 2 escrows
+  // (witness index is `1 - i`), so 3+ escrows would produce negative indices
+  // and a witness the emulator rejects opaquely. Fail loudly here instead.
+  if (args.escrows.length !== 2) {
+    throw new Error(
+      `buildCovenantSweepTransactionV3: requires exactly 2 escrows (got ${args.escrows.length})`,
+    )
+  }
   if (args.potAmount <= 0n) {
     throw new Error('buildCovenantSweepTransactionV3: potAmount must be positive')
+  }
+  // Self-consistency: the atomic-sweep covenant pins output[0].amount to the
+  // exact potAmount, AND each leaf's covenant pins the OTHER input's value.
+  // A potAmount that doesn't match the sum of escrow values will be rejected
+  // by the emulator with an opaque "output value mismatch" deep in arkade-
+  // script evaluation; surface the mismatch here as a clear local error.
+  const expectedPot = BigInt(args.escrows[0].value) + BigInt(args.escrows[1].value)
+  if (args.potAmount !== expectedPot) {
+    throw new Error(
+      `buildCovenantSweepTransactionV3: potAmount ${args.potAmount} != sum of escrow values ${expectedPot}`,
+    )
   }
   const serverUnrollScript = decodeTapscript(
     hex.decode(arkInfo.checkpointTapscript),
@@ -296,8 +316,22 @@ export function buildForfeitClaimTransactionV3(
 ): BuiltOffchainTx & {
   emulatorEntries: { vin: number; script: Uint8Array; witness: Uint8Array }[]
 } {
+  // Same runtime + consistency guards as buildCovenantSweepTransactionV3:
+  // the TS tuple type evaporates at runtime, and the emulator-witness builder
+  // below assumes exactly 2 escrows.
+  if (args.escrows.length !== 2) {
+    throw new Error(
+      `buildForfeitClaimTransactionV3: requires exactly 2 escrows (got ${args.escrows.length})`,
+    )
+  }
   if (args.potAmount <= 0n) {
     throw new Error('buildForfeitClaimTransactionV3: potAmount must be positive')
+  }
+  const expectedPot = BigInt(args.escrows[0].value) + BigInt(args.escrows[1].value)
+  if (args.potAmount !== expectedPot) {
+    throw new Error(
+      `buildForfeitClaimTransactionV3: potAmount ${args.potAmount} != sum of escrow values ${expectedPot}`,
+    )
   }
   const serverUnrollScript = decodeTapscript(
     hex.decode(arkInfo.checkpointTapscript),
@@ -383,5 +417,3 @@ export function computeRollV3(
   return (dC + dP) % n
 }
 
-// Ensure the unused parameter import is not flagged.
-void Transaction

@@ -100,8 +100,25 @@
                 </span>
               </div>
             </div>
+            <!-- Info banner: boarding UTXO(s) still waiting for on-chain
+                 confirmation. Settling them now would fail — Ark batches
+                 require ≥ 1 confirmation. -->
+            <div v-if="hasUnconfirmedBoarding" class="info-banner">
+              <span class="info-icon">⏳</span>
+              <span class="info-text">
+                {{ unconfirmedBoardingAmount.toLocaleString() }} sats deposited on-chain — waiting for confirmation before they can be settled into Ark.
+              </span>
+            </div>
+            <!-- Info banner: recoverable VTXOs (sub-dust or expired sweeps)
+                 the user can reclaim by settling. -->
+            <div v-if="hasRecoverable" class="info-banner alt">
+              <span class="info-icon">↺</span>
+              <span class="info-text">
+                {{ recoverableAmount.toLocaleString() }} sats recoverable from prior sub-dust outputs or expired sweeps — settle to reclaim them.
+              </span>
+            </div>
             <button v-if="hasUnsettledFunds && ready" class="btn-primary btn-sm" :disabled="settleLoading" @click="settleFunds">
-              {{ settleLoading ? 'Settling…' : 'Settle Into Ark' }}
+              {{ settleLoading ? 'Settling…' : settleReasonLabel }}
             </button>
           </div>
         </section>
@@ -354,10 +371,25 @@ export default defineComponent({
     const boardingAddress = computed(() => store.getters['ark/boardingAddress'])
     const boardingBalance = computed(() => Number(store.getters['ark/boardingBalance'] || BigInt(0)))
     const boardingUtxos = computed(() => store.getters['ark/boardingUtxos'] || [])
-    const hasUnsettledFunds = computed(() => {
-      const wb = store.state.ark.walletBalance
-      if (!wb) return false
-      return (wb.preconfirmed > 0) || ((wb.boarding?.confirmed ?? 0) > 0)
+    // Things that need a settle round-trip to become usable:
+    //   - CONFIRMED boarding UTXOs (still on-chain — settling lifts them
+    //     into a spendable VTXO via a batch round).
+    //   - RECOVERABLE VTXOs (subdust outputs from a prior settle, or VTXOs
+    //     swept past their batch expiry — settling claims them back).
+    // Pre-confirmed VTXOs are ALREADY spendable (wallet.available counts
+    // them), so showing 'Settle' for those was misleading — the user
+    // doesn't gain anything by settling them mid-session.
+    const hasConfirmedBoarding = computed(() => Number(store.state.ark.walletBalance?.boarding?.confirmed ?? 0) > 0)
+    const hasUnconfirmedBoarding = computed(() => Number(store.state.ark.walletBalance?.boarding?.unconfirmed ?? 0) > 0)
+    const hasRecoverable = computed(() => Number(store.state.ark.walletBalance?.recoverable ?? 0) > 0)
+    const recoverableAmount = computed(() => Number(store.state.ark.walletBalance?.recoverable ?? 0))
+    const unconfirmedBoardingAmount = computed(() => Number(store.state.ark.walletBalance?.boarding?.unconfirmed ?? 0))
+    const hasUnsettledFunds = computed(() => hasConfirmedBoarding.value || hasRecoverable.value)
+    const settleReasonLabel = computed(() => {
+      if (hasConfirmedBoarding.value && hasRecoverable.value) return 'Settle on-chain + recoverable'
+      if (hasConfirmedBoarding.value) return 'Settle Into Ark'
+      if (hasRecoverable.value) return 'Claim recoverable'
+      return 'Settle'
     })
     const isMutinyTestnet = computed(() => arkServer.value === 'https://mutinynet.arkade.sh')
     const txHistory = computed(() => store.getters['ark/txHistory'] || [])
@@ -609,7 +641,10 @@ export default defineComponent({
       store, close, reconnect,
       arkStatus, ready, connText, arkServer, info,
       arkAddress, privateKey, boardingAddress, boardingBalance, boardingUtxos,
-      hasUnsettledFunds, isMutinyTestnet, txHistory, formatRelative,
+      hasUnsettledFunds, settleReasonLabel,
+      hasUnconfirmedBoarding, unconfirmedBoardingAmount,
+      hasRecoverable, recoverableAmount,
+      isMutinyTestnet, txHistory, formatRelative,
       tab,
       depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
       sendInput, sendAmount, sendLoading, sendStatus, sendStatusText,
@@ -756,6 +791,30 @@ export default defineComponent({
   &:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .input-row { display: flex; gap: 8px; .input { flex: 1; } }
+
+/* Info banner for boarding/unconfirmed / recoverable hints next to the
+   Settle button. Two visual variants: default (yellow, "wait") + alt
+   (blue, "action available"). */
+.info-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-top: 10px;
+  margin-bottom: 8px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  color: var(--text-dim);
+}
+.info-banner.alt {
+  background: rgba(56, 189, 248, 0.08);
+  border-color: rgba(56, 189, 248, 0.35);
+}
+.info-icon { font-size: 0.95rem; line-height: 1; }
+.info-text { flex: 1; min-width: 0; }
 
 .btn-primary, .btn-outline, .btn-danger {
   border-radius: 10px; padding: 12px 18px; font-size: 0.9rem; font-weight: 700;

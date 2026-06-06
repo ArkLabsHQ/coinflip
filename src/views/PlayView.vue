@@ -91,6 +91,7 @@
           <span class="odds-stats">
             <span class="win-pct">{{ winPctLabel }} win</span>
             <span class="payout-mult">{{ payoutMult(selectedBet) }}</span>
+            <span class="win-amt" v-if="selectedTier">→ {{ winSatsLabel(selectedBet) }}</span>
           </span>
         </div>
         <input
@@ -128,11 +129,12 @@
 
         <button
           class="flip-btn"
-          :class="{ active: canFlip, stop: isAutoRunning }"
-          :disabled="!canFlip && !isAutoRunning"
+          :class="{ active: canFlip, stop: isAutoRunning, stopping: stopRequested }"
+          :disabled="(!canFlip && !isAutoRunning) || stopRequested"
           @click="doFlip"
         >
-          <template v-if="isAutoRunning">STOP ({{ autoRemainingLabel }} LEFT)</template>
+          <template v-if="stopRequested">STOPPING AFTER THIS FLIP…</template>
+          <template v-else-if="isAutoRunning">STOP · {{ autoProgressLabel }}</template>
           <template v-else-if="isAutoMode">{{ isFlipping ? 'FLIPPING...' : `AUTO ×${autoCountLabel}` }}</template>
           <template v-else>{{ isFlipping ? 'FLIPPING...' : 'FLIP IT' }}</template>
         </button>
@@ -309,6 +311,18 @@ export default defineComponent({
       const m = (pot - rake) / tier
       return m.toFixed(2).replace(/\.?0+$/, '') + '×'
     }
+    /** NET sats the player gets back on a win, formatted with thousands
+     *  separators (e.g. "1,650 sats"). What you actually pocket — not the
+     *  pot, not the gross payout. Mirrors the server's settle math (same
+     *  rake-floor + dust-waiver as `payoutMult`). */
+    function winSatsLabel(bet: OddsBet): string {
+      const tier = selectedTier.value ?? 0
+      if (!tier) return ''
+      const pot = tier + houseStakeAt(tier, bet)
+      let rake = rakeType.value === 'percentage' ? Math.floor((pot * rakeValue.value) / 100) : rakeValue.value
+      if (pot - rake < dust.value) rake = 0
+      return `${(pot - rake).toLocaleString()} sats`
+    }
 
     // ── Flip lifecycle state ──────────────────────────────────────────
     // `climbing` and `settling` are for skins that own their play gesture
@@ -333,6 +347,22 @@ export default defineComponent({
     const isAutoMode = computed(() => autoCount.value !== null)
     const autoCountLabel = computed(() => autoCount.value === Infinity ? '∞' : String(autoCount.value ?? ''))
     const autoRemainingLabel = computed(() => isFinite(autoRemaining.value) ? String(autoRemaining.value) : '∞')
+    /** "DONE OF TOTAL" progress label during autoplay, e.g. "3 / 25". For
+     *  infinite autoplay, shows the done count alone (no total). */
+    const autoProgressLabel = computed(() => {
+      const total = autoCount.value
+      if (total === null) return ''
+      if (!isFinite(total)) return `${autoFlipsDone.value} done`
+      return `${autoFlipsDone.value} / ${total}`
+    })
+    const autoFlipsDone = computed(() => {
+      const total = autoCount.value
+      if (total === null || !isFinite(total)) return autoFlipsCounter.value
+      return total - autoRemaining.value
+    })
+    /** Monotonically increasing counter for infinite (∞) autoplay. Resets
+     *  on each new autoplay batch. */
+    const autoFlipsCounter = ref(0)
 
     // ── Skin selection ────────────────────────────────────────────────
     // (currentSkinId / currentSkin are declared above with the odds slider.)
@@ -591,10 +621,12 @@ export default defineComponent({
       isAutoRunning.value = true
       stopRequested.value = false
       autoRemaining.value = autoCount.value === Infinity ? Infinity : autoCount.value
+      autoFlipsCounter.value = 0
 
       while (autoRemaining.value > 0 && !stopRequested.value) {
         const ok = await flipOnce()
         if (!ok) break
+        autoFlipsCounter.value += 1
         if (isFinite(autoRemaining.value)) autoRemaining.value -= 1
         if (autoRemaining.value > 0 && !stopRequested.value) {
           await new Promise((resolve) => setTimeout(resolve, AUTO_FLIP_PAUSE_MS))
@@ -669,8 +701,9 @@ export default defineComponent({
       // Lifecycle
       isFlipping, error, skinState, phase,
       // Auto
-      autoOptions: AUTO_OPTIONS, autoCount, autoRemaining, isAutoRunning, isAutoMode,
-      autoCountLabel, autoRemainingLabel,
+      autoOptions: AUTO_OPTIONS, autoCount, autoRemaining, isAutoRunning, isAutoMode, stopRequested,
+      autoCountLabel, autoRemainingLabel, autoProgressLabel,
+      winSatsLabel,
       // Skin
       skins: SKINS, currentSkinId, currentSkin, selectSkin,
       skinOwnsGesture, onSkinLaunch, onSkinCashout,
@@ -974,6 +1007,13 @@ export default defineComponent({
   font-family: ui-monospace, monospace;
   color: var(--green, #22c55e);
 }
+.win-amt {
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: ui-monospace, monospace;
+  color: var(--text-dim, #94a3b8);
+  margin-left: 2px;
+}
 .odds-range {
   -webkit-appearance: none;
   appearance: none;
@@ -1052,6 +1092,21 @@ export default defineComponent({
   opacity: 1;
 }
 .flip-btn.stop:hover { background: var(--red); color: #fff; }
+/* While the current flip finishes after STOP is clicked — pulses + disables
+   the button so the user knows we got the click and are waiting for the
+   in-flight game to settle before we exit autoplay. */
+.flip-btn.stopping {
+  border-color: var(--red);
+  color: var(--red);
+  background: rgba(239, 68, 68, 0.06);
+  opacity: 1;
+  cursor: progress;
+  animation: stopping-pulse 1.2s ease-in-out infinite;
+}
+@keyframes stopping-pulse {
+  0%, 100% { background: rgba(239, 68, 68, 0.06); }
+  50%      { background: rgba(239, 68, 68, 0.14); }
+}
 
 .hotkey-hint {
   font-size: 0.62rem;

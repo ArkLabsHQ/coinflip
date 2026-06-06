@@ -62,6 +62,13 @@ html, body {
   font-size: 15px;
   line-height: 1.5;
   min-height: 100vh;
+  // Mobile responsiveness guard: a single overflowing child (a long txid,
+  // a wide code block, a flex row at min-content) used to spawn a horizontal
+  // scrollbar across the entire page. Clamping at the root prevents that
+  // without affecting intentional internal scroll containers (which set
+  // their own overflow-x: auto).
+  max-width: 100%;
+  overflow-x: clip; // `clip` doesn't make the body a containing block (vs. hidden)
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -216,7 +223,23 @@ body {
 }
 
 // ─── Utilities ────────────────────────────────────────────────
-.mono { font-family: var(--font-mono); }
+.mono {
+  font-family: var(--font-mono);
+  // Long unbroken strings (txids, ark addresses, hex hashes) are the #1
+  // cause of horizontal scrollbars on mobile. Break anywhere inside .mono
+  // so they wrap instead of overflowing.
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+// Code blocks (opcode dumps, JSON, etc.) need to scroll *internally*, not
+// stretch the viewport. Wherever a long line appears, give the user
+// horizontal scroll on the block itself.
+pre, code {
+  max-width: 100%;
+  overflow-x: auto;
+}
+pre { -webkit-overflow-scrolling: touch; }
 
 .text-gold  { color: var(--gold); }
 .text-blue  { color: var(--blue); }
@@ -287,4 +310,21 @@ body {
     padding: 13px 28px;
     font-size: 0.95rem;
   }
+
+  // Tighten anything that intentionally sets a wide grid track on desktop —
+  // on mobile the grid should collapse to one column rather than push the
+  // viewport sideways.
+  .layer-grid, .leaf-cols, .evolution-grid, .pp-cols {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+// Catch any flex/grid descendant whose intrinsic content (a long mono
+// string in a chip, an emoji-only span) refuses to shrink. `min-width: 0`
+// on the descendant is the canonical fix, but applying it broadly here as
+// a defensive belt-and-suspenders is cheap and safe — the only side
+// effect is flex children can now shrink below their content size, which
+// is exactly what we want on mobile.
+.casino-card > *, .hiw-section > *, .pp-cols > .pp-col {
+  min-width: 0;
 }

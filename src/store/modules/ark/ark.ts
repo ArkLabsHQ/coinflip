@@ -1102,7 +1102,16 @@ const ark: Module<ArkState, RootState> = {
 
     /** Locally-stashed stalled bets (escrows reclaimable if the server stalled). */
     async listStalledBets(): Promise<StashedRefund[]> {
-      return loadRefunds()
+      // Hide stashes < 90 s old: a fresh stash exists from /play through /commit
+      // (~1-2 s on the happy path) as the trustless backstop. Before this
+      // filter, between updateRefundStash({revealed:true}) and clearRefund()
+      // the StalledBets card flashed up as a "claim full pot" prompt for the
+      // duration of the /commit round-trip. 90 s comfortably covers worst-
+      // case /commit + arkd settlement on mutinynet without delaying the
+      // recovery UI for genuinely stalled games (finalExpiration is 30 min).
+      const RECENT_GRACE_MS = 90_000
+      const cutoff = Date.now() - RECENT_GRACE_MS
+      return (await loadRefunds()).filter((b) => b.createdAt <= cutoff)
     },
 
     /**

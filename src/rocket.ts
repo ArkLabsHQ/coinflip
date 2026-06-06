@@ -18,16 +18,23 @@
  */
 
 /**
- * Range resolution. Higher = finer multiplier granularity. The roll digit is
- * encoded as the secret's BYTE LENGTH (`randomBytes(16 + digit)`, base =
- * VARIABLE_ODDS_BASE_LEN), so a digit up to n−1 needs a `16 + n − 1`-byte
- * secret. Bitcoin's script push limit is 520 bytes, so the lib's
- * CoinflipEscrowScript hard-rejects `16 + n − 1 > 520`, i.e. n > 505. We use
- * 300: comfortably under that ceiling (max secret 315B) and divisible by every
- * ROCKET_LADDER multiplier, so P(win) = 1/M is exact at each ladder stop.
- * Crash points therefore top out at n/(n−(n−1)) = 300×.
+ * Range resolution. Higher = finer multiplier granularity. v0.3 escrow
+ * encodes the digit as a single-byte arkade-script CScriptNum read by
+ * `OP_1 OP_LEFT OP_BIN2NUM`, so the digit must fit in [0, 128) — bytes with
+ * the high bit set decode as negative CScriptNums. The lib caps `n ≤ 128`
+ * (`packages/lib/src/arkade-win.ts`).
+ *
+ * We pick `n = 120` — the largest value ≤ 128 that's also divisible by every
+ * `ROCKET_LADDER` multiplier (1.2, 1.5, 2, 3, 5, 10, 20), so `P(win) = 1/M`
+ * is exact at every ladder stop. Crash points top out at `n / (n - (n-1)) = 120×`,
+ * but the ladder caps user-selectable cash-outs at 20× — beyond that the
+ * coarse n=120 grid drifts noticeably from the intended distribution.
+ *
+ * Was `300` in v0.2.x (the secret-length encoding had no high-bit problem).
+ * Updating the ladder to remove `50×` and `100×` is the only user-visible
+ * delta from the v3 escrow port.
  */
-export const ROCKET_ODDS_N = 300
+export const ROCKET_ODDS_N = 120
 
 export interface RocketOdds {
   oddsN: number
@@ -92,4 +99,7 @@ export function effectivePayoutMultiplier(bet: number, multiplier: number, edgeB
  * affordable window — a low M makes the house stake sub-dust, a high M pushes
  * it past the bankroll — exactly like the odds-slider ladder in PlayView.
  */
-export const ROCKET_LADDER: number[] = [1.2, 1.5, 2, 3, 5, 10, 20, 50, 100]
+// Capped at 20× because n=120 (the v0.3 ladder grid) doesn't divide cleanly
+// into 50× or 100× and the resulting P(win) would drift from the displayed
+// multiplier (e.g. floor(120/50)=2 → actual P=2/120≈1.67% vs. intended 2.0%).
+export const ROCKET_LADDER: number[] = [1.2, 1.5, 2, 3, 5, 10, 20]

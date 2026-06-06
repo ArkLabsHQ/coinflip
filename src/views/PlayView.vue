@@ -163,11 +163,21 @@
             <button class="hist-close" @click="historyOpen = false" aria-label="Close">&times;</button>
           </header>
           <div class="hist-body">
-            <GameHistoryList :games="historyGames" />
+            <GameHistoryList :games="historyGames" @select="openDetail" />
           </div>
         </div>
       </div>
     </transition>
+
+    <!-- Per-game detail modal (txs, params, preimages, explorer links). Opened
+         by clicking a history row. -->
+    <GameDetailsModal
+      :open="detailOpen"
+      :game-id="detailGameId"
+      :player-pubkey="playerPubkey"
+      :network="networkName"
+      @close="detailOpen = false"
+    />
   </div>
 </template>
 
@@ -176,6 +186,7 @@ import { defineComponent, ref, computed, onMounted, onUnmounted, watch } from 'v
 import { useStore } from 'vuex'
 import TierSelector from '@/components/TierSelector.vue'
 import GameHistoryList, { type GameHistoryItem } from '@/components/GameHistoryList.vue'
+import GameDetailsModal from '@/components/GameDetailsModal.vue'
 import StalledBets from '@/components/StalledBets.vue'
 import { getTiers } from '@/services/api'
 import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState, type OddsBet } from '@/skins'
@@ -204,7 +215,7 @@ interface SlabResult { won: boolean; amount: number }
 
 export default defineComponent({
   name: 'PlayView',
-  components: { TierSelector, GameHistoryList, StalledBets },
+  components: { TierSelector, GameHistoryList, GameDetailsModal, StalledBets },
   emits: ['open-wallet'],
   setup(_props, { emit }) {
     const store = useStore()
@@ -361,6 +372,18 @@ export default defineComponent({
       }
       historyOpen.value = true
     }
+
+    // ── Per-game detail modal ─────────────────────────────────────────
+    const detailOpen = ref(false)
+    const detailGameId = ref('')
+    function openDetail(gameId: string) {
+      detailGameId.value = gameId
+      detailOpen.value = true
+    }
+    // Player pubkey + network needed by GameDetailsModal — both are reactive
+    // from the wallet/ark store so they stay current across wallet reconnects.
+    const playerPubkey = computed<string>(() => store.state.wallet?.publicKey || '')
+    const networkName = computed<string | null>(() => store.state.ark?.info?.network ?? null)
 
     // ── P&L (session + all-time) ──────────────────────────────────────
     const sessionPnl = ref(0)
@@ -654,6 +677,7 @@ export default defineComponent({
       oddsEdgeBps,
       // History modal
       historyOpen, historyGames, openHistory,
+      detailOpen, detailGameId, openDetail, playerPubkey, networkName,
       // Stats
       sessionPnl, allTimePnl, pnlScope, togglePnlScope, formattedPnl, pnlClass,
       streak, sparkline, slab, winFlash,

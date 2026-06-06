@@ -180,6 +180,46 @@ export function getGame(gameId: string): Promise<GameResponse> {
   return request(`/api/game/${gameId}`)
 }
 
+/** /api/game/:id/details — full game state (txids, params, preimages).
+ *  The server gates on the playerPubkey query param matching the game's
+ *  recorded pubkey, so this only returns data to the owning player.
+ *  Preimages are only included once the game is in a terminal state
+ *  (resolved or expired). */
+export interface GameDetailsResponse {
+  id: string
+  tier: number
+  status: string
+  winner: string | null
+  payoutAmount: number | null
+  rakeAmount: number
+  createdAt: string
+  resolvedAt: string | null
+  contractVersion: 'v2' | 'v3'
+  playerHash: string
+  playerChoice?: string
+  finalExpiration: number | null
+  setupExpiration: number | null
+  oddsN: number | null
+  oddsTarget: number | null
+  oddsLo: number | null
+  houseStake: number | null
+  playerStake: number | null
+  emulatorPubkey: string | null
+  exitDelay: number | null
+  houseEscrow: Outpoint | null
+  playerEscrow: Outpoint | null
+  resolveTxid: string | null
+  houseRefundTxid: string | null
+  /** Hex preimages — only present when status ∈ {resolved, expired}.
+   *  For v3 these are `[digit] ‖ salt`; for v2 they're raw bytes whose
+   *  LENGTH encodes the digit. Decode accordingly per contractVersion. */
+  houseSecret: string | null
+  playerSecret: string | null
+}
+export function getGameDetails(gameId: string, playerPubkey: string): Promise<GameDetailsResponse> {
+  return request(`/api/game/${gameId}/details?playerPubkey=${encodeURIComponent(playerPubkey)}`)
+}
+
 /** Fetch the unsigned refund tx for a (possibly stalled) game's player escrow. */
 export function refund(gameId: string, playerEscrow: Outpoint): Promise<RefundResponse> {
   return request(`/api/game/${gameId}/refund`, {

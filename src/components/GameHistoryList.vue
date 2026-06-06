@@ -6,10 +6,13 @@
       <div class="empty-sub">Go flip some coins!</div>
     </div>
     <div v-else>
-      <div
+      <button
         v-for="game in games"
         :key="game.id"
         class="history-row"
+        type="button"
+        :aria-label="`View details for game ${game.id}`"
+        @click="$emit('select', game.id)"
       >
         <div class="row-left">
           <span class="badge" :class="badgeClass(game)">
@@ -22,8 +25,9 @@
             {{ payoutText(game) }}
           </span>
           <span class="time">{{ timeAgo(game.createdAt) }}</span>
+          <span class="chev" aria-hidden="true">›</span>
         </div>
-      </div>
+      </button>
     </div>
   </div>
 </template>
@@ -48,6 +52,7 @@ export default defineComponent({
   props: {
     games: { type: Array as PropType<GameHistoryItem[]>, required: true },
   },
+  emits: ['select'],
   methods: {
     formatSats(n: number): string {
       return n.toLocaleString()
@@ -123,6 +128,23 @@ export default defineComponent({
   padding: 14px 18px;
   border-bottom: 1px solid var(--border);
   transition: background 0.15s;
+  /* Button reset (the row IS a button now, for clickable details). */
+  background: transparent;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chev {
+  margin-left: 4px;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  line-height: 1;
 }
 
 .history-row:last-child {

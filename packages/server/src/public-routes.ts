@@ -217,5 +217,69 @@ export function createPublicRoutes(deps: AppDeps): Router {
     })
   })
 
+  // GET /api/game/:id/details — full game details (txids, preimages, params)
+  //   ?playerPubkey=<hex> — must match the game's playerPubkey to authorize.
+  //
+  // Preimages are only returned once the game is in a terminal state
+  // (`resolved` or `expired`), so a live game's player secret never leaks
+  // mid-flight (matters even though the owning player POSTed it — a leaked
+  // /commit response could otherwise be replayed against the in-flight hash).
+  // The on-chain reveal makes both secrets public knowledge at terminal time
+  // anyway (condition witness on v2, reveal packets on v3).
+  router.get('/api/game/:id/details', async (req: Request, res: Response) => {
+    const game = await deps.repos.games.get(String(req.params.id))
+    if (!game) {
+      res.status(404).json({ error: 'Game not found' })
+      return
+    }
+    const wantPubkey = String(req.query.playerPubkey || '').trim().toLowerCase()
+    if (!wantPubkey || wantPubkey !== game.player_pubkey.toLowerCase()) {
+      // Pubkey mismatch is treated as 404 (not 403) to avoid leaking
+      // game-existence information to anyone scanning game IDs.
+      res.status(404).json({ error: 'Game not found' })
+      return
+    }
+    const terminal = game.status === 'resolved' || game.status === 'expired'
+    // Parse the trustless state JSON for txids / contract params / odds.
+    let state: Record<string, unknown> = {}
+    try { state = JSON.parse(game.house_vtxos_json || '{}') } catch { /* malformed → empty */ }
+    const houseEscrow = (state.houseEscrow as { txid?: string; vout?: number; value?: number } | undefined) ?? undefined
+    const playerEscrow = (state.playerEscrow as { txid?: string; vout?: number; value?: number } | undefined) ?? undefined
+    const arkadeForfeit = (state.arkadeForfeit as { houseStake?: number; playerStake?: number; emulatorPubkeyHex?: string; exitDelay?: number } | undefined) ?? undefined
+    res.json({
+      id: game.id,
+      tier: game.tier,
+      status: game.status,
+      winner: game.winner,
+      payoutAmount: game.payout_amount,
+      rakeAmount: game.rake_amount,
+      createdAt: game.created_at,
+      resolvedAt: game.resolved_at,
+      // Contract parameters
+      contractVersion: (state.contractVersion as string | undefined) ?? 'v2',
+      playerHash: game.player_hash,
+      playerChoice: terminal ? game.player_choice : undefined,
+      finalExpiration: state.finalExpiration ?? null,
+      setupExpiration: state.setupExpiration ?? null,
+      // Variable odds (undefined for the 50/50 coin)
+      oddsN: state.oddsN ?? null,
+      oddsTarget: state.oddsTarget ?? null,
+      oddsLo: state.oddsLo ?? null,
+      // Arkade-script forfeit pin (stakes, emu pubkey, exit delay)
+      houseStake: arkadeForfeit?.houseStake ?? null,
+      playerStake: arkadeForfeit?.playerStake ?? null,
+      emulatorPubkey: arkadeForfeit?.emulatorPubkeyHex ?? null,
+      exitDelay: arkadeForfeit?.exitDelay ?? null,
+      // Outpoints (escrows, sweep, refund)
+      houseEscrow: houseEscrow && houseEscrow.txid ? houseEscrow : null,
+      playerEscrow: playerEscrow && playerEscrow.txid ? playerEscrow : null,
+      resolveTxid: (state.resolveTxid as string | undefined) ?? null,
+      houseRefundTxid: (state.houseRefundTxid as string | undefined) ?? null,
+      // Preimages (terminal state only — both are public knowledge on-chain by then).
+      houseSecret: terminal ? game.house_secret_hex : null,
+      playerSecret: terminal ? game.player_secret_hex : null,
+    })
+  })
+
   return router
 }

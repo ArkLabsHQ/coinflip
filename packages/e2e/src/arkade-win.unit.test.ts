@@ -13,6 +13,12 @@
  * end-to-end behavior (against the actual emulator).
  */
 
+// Mark this file as a module so its top-level identifiers are file-scoped
+// (other *.unit.test.ts files also `require()` and declare `digitHash` —
+// without this each script's globals would clash under ts-jest's shared
+// program in single-process mode).
+export {}
+
 /* eslint-disable @typescript-eslint/no-require-imports */
 const {
   buildVariableOddsWinPredicate,

@@ -2,6 +2,12 @@
  * Tests for CoinflipEscrowV3ContractHandler and dual registration.
  */
 
+// Mark this file as a module so its top-level identifiers are file-scoped
+// (other *.unit.test.ts files also `require()` `schnorr` / declare the same
+// names — without this each script's globals would clash under ts-jest's
+// shared program in single-process mode).
+export {}
+
 /* eslint-disable @typescript-eslint/no-require-imports */
 const { schnorr } = require('@noble/curves/secp256k1.js')
 const { contractHandlers } = require('@arkade-os/sdk')

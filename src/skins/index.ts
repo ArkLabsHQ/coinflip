@@ -76,7 +76,19 @@ function diceLadder(): OddsBet[] {
 // band [lo, target) = [n - winSize, n), so the highest indices always win for
 // any band size — gives the wheel a single "winning arc" the player can see.
 function rouletteLadder(): OddsBet[] {
-  return [18, 12, 6, 4, 3, 2, 1].map((winSize) => ({
+  // Equivalent-coverage with the other skins (95%→1%-ish): start at 33/37
+  // (~89%) and walk down through every named roulette bet group to "any 1".
+  //  33 → ~89% (deep field bet)
+  //  30 → ~81%
+  //  24 → ~65% (high/low + extra)
+  //  18 → ~49% (Even / Odd / Red / Black analogue, contiguous band variant)
+  //  12 → ~32% (Dozen)
+  //   6 → ~16% (Line)
+  //   4 → ~11% (Corner)
+  //   3 → ~8%  (Street)
+  //   2 → ~5%  (Split)
+  //   1 → ~2.7% (Straight Up)
+  return [33, 30, 24, 18, 12, 6, 4, 3, 2, 1].map((winSize) => ({
     n: ROULETTE_N, lo: ROULETTE_N - winSize, target: ROULETTE_N,
   }))
 }

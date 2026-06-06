@@ -24,17 +24,19 @@
  * the high bit set decode as negative CScriptNums. The lib caps `n ≤ 128`
  * (`packages/lib/src/arkade-win.ts`).
  *
- * We pick `n = 120` — the largest value ≤ 128 that's also divisible by every
- * `ROCKET_LADDER` multiplier (1.2, 1.5, 2, 3, 5, 10, 20), so `P(win) = 1/M`
- * is exact at every ladder stop. Crash points top out at `n / (n - (n-1)) = 120×`,
- * but the ladder caps user-selectable cash-outs at 20× — beyond that the
- * coarse n=120 grid drifts noticeably from the intended distribution.
+ * We pick `n = 100` — the largest base-10 value ≤ 128. It divides every
+ * integer ladder stop (2, 5, 10, 20, 50, 100) cleanly so `P(win) = 1/M` is
+ * exact at the high multipliers; the fractional stops drift by < 0.7%
+ * absolute (`floor(100/1.2)=83 → P=0.83 vs. 0.833`; `floor(100/1.5)=66 →
+ * P=0.66 vs. 0.667`). The displayed multiplier matches what the player
+ * picks — only the true win probability is rounded to two decimal places.
  *
- * Was `300` in v0.2.x (the secret-length encoding had no high-bit problem).
- * Updating the ladder to remove `50×` and `100×` is the only user-visible
- * delta from the v3 escrow port.
+ * Was `300` in v0.2.x: the secret-length encoding had no high-bit problem,
+ * so n could be picked as the LCM of ladder denominators to make every
+ * P(win) exact. 100 is the v3-compatible analogue — preserves the full
+ * v0.2.x rocket ladder (1.2× through 100×) under the v3 cap.
  */
-export const ROCKET_ODDS_N = 120
+export const ROCKET_ODDS_N = 100
 
 export interface RocketOdds {
   oddsN: number
@@ -99,7 +101,4 @@ export function effectivePayoutMultiplier(bet: number, multiplier: number, edgeB
  * affordable window — a low M makes the house stake sub-dust, a high M pushes
  * it past the bankroll — exactly like the odds-slider ladder in PlayView.
  */
-// Capped at 20× because n=120 (the v0.3 ladder grid) doesn't divide cleanly
-// into 50× or 100× and the resulting P(win) would drift from the displayed
-// multiplier (e.g. floor(120/50)=2 → actual P=2/120≈1.67% vs. intended 2.0%).
-export const ROCKET_LADDER: number[] = [1.2, 1.5, 2, 3, 5, 10, 20]
+export const ROCKET_LADDER: number[] = [1.2, 1.5, 2, 3, 5, 10, 20, 50, 100]

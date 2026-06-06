@@ -47,6 +47,33 @@ import { faucet } from './helpers'
 /* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any */
 const { reservations } = require('arkade-coinflip-server/dist/vtxo-pool.js')
 
+/**
+ * Escrow contract version under test. Read from env BEFORE the server
+ * module loads (the server's newGameEscrowVersion() snapshots the same
+ * env at /play time). Defaults to v2 to preserve the existing CI lane.
+ *
+ * v2 secret: random 16 bytes (the variable-odds VARIABLE_ODDS_BASE_LEN coin).
+ * v3 secret: `[digit] ‖ salt` from `packets.encodeReveal(digit, 16-byte salt)`
+ *   — coin maps to n=2 so digit ∈ {0, 1}; sha256 of those bytes IS the
+ *   on-chain digitHash that the win-predicate verifies, so playerHash
+ *   computation stays the same.
+ */
+const ESCROW_VERSION: 'v2' | 'v3' = (process.env.ESCROW_VERSION ?? '').toLowerCase() === 'v3' ? 'v3' : 'v2'
+// Generate a player secret in the right wire format for this version.
+function makePlayerSecret(): Uint8Array {
+  if (ESCROW_VERSION === 'v3') {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { commitDigit, randomUniformInt } = require('arkade-coinflip')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { packets } = require('@arklabshq/contract-workflows-prototype')
+    const c = commitDigit(randomUniformInt(2), 2)
+    return packets.encodeReveal(c.digit, c.salt)
+  }
+  const secret = new Uint8Array(16)
+  crypto.getRandomValues(secret)
+  return secret
+}
+
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
 const BET = 1000
@@ -137,6 +164,12 @@ maybe('load: 100 games across 5 concurrent wallets', () => {
     if (!arkAvailable) return
     process.env.ARK_SERVER_URL = ARK_SERVER_URL
     process.env.ESPLORA_URL = ESPLORA_URL
+    // Propagate the version under test to the server's /play handler. The
+    // server reads ESCROW_VERSION at /play time via newGameEscrowVersion();
+    // setting it here BEFORE require() guarantees the very first /play uses
+    // the right version, before any game state is persisted.
+    if (ESCROW_VERSION === 'v3') process.env.ESCROW_VERSION = 'v3'
+    log(`load test running in ${ESCROW_VERSION.toUpperCase()} escrow mode`)
     server = require('arkade-coinflip-server')
     deps = await server.bootstrapDeps({ walletSettlementConfig: false })
     arkProvider = deps.wallet.arkProvider
@@ -203,8 +236,8 @@ maybe('load: 100 games across 5 concurrent wallets', () => {
 
   // One full game attempt: /play (retry transient pool-busy) → escrow → commit.
   async function attemptGame(w: Wallet, id: Identity, pubHex: string, changeAddr: string, spent: Set<string>): Promise<'house' | 'player'> {
-    const secret = Buffer.from(new Uint8Array(16)); crypto.getRandomValues(secret)
-    const playerHash = createHash('sha256').update(secret).digest('hex')
+    const secret = makePlayerSecret()
+    const playerHash = createHash('sha256').update(Buffer.from(secret)).digest('hex')
 
     let play: any
     for (let attempt = 0; ; attempt++) {

@@ -1209,10 +1209,13 @@ export default defineComponent({
 }
 
 @media (max-width: 380px) {
-  /* Very narrow phones — even tighter. Cut chip padding further and drop the
-     help button entirely. */
+  /* Very narrow phones — even tighter. Cut chip padding + button size further.
+     Keep the help button visible — the v0.3.8 fix hid it entirely, but with
+     the rest of the HUD tightened the help button still fits and is the only
+     entry point to /how-it-works for users who haven't bookmarked it. */
   .skin-chip { padding: 5px 6px; font-size: 0.95rem; }
-  .help-btn { display: none; }
+  .history-btn { width: 28px; height: 28px; font-size: 0.85rem; }
+  .pnl-pill { padding: 4px 8px; font-size: 0.75rem; }
 }
 
 /* Auto-chip row should always fit and wrap if it can't. The base CSS already

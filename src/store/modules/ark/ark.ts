@@ -3,9 +3,9 @@ import { hex, base64 } from '@scure/base'
 import type { State as RootState } from '@/store'
 import {
   Wallet, SingleKey, VtxoScript,
-  buildOffchainTx, decodeTapscript, CSVMultisigTapscript, ConditionWitness, setArkPsbtField, Transaction, ArkAddress, selectVirtualCoins,
-  contractHandlers,
-  type WalletBalance, type ExtendedVirtualCoin, type ArkTxInput, type ArkProvider, type Identity,
+  ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
+  contractHandlers, RestIndexerProvider,
+  type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity,
 } from '@arkade-os/sdk'
 import {
   COINFLIP_ESCROW_TYPE,
@@ -935,9 +935,10 @@ const ark: Module<ArkState, RootState> = {
       if (!playerChangeAddress) throw new Error('No Ark address available — wallet still connecting?')
 
       const identity = SingleKey.fromHex(privateKey)
+      void identity // kept for downstream signing helpers (refund stash)
       const arkProvider = sdkWallet.arkProvider
       const arkInfo = await arkProvider.getInfo()
-      const serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+      void arkInfo // ensures arkProvider is warm before /play call
 
       // 1. Commit a secret + start the game. The escrow version is set by the
       // server (env: ESCROW_VERSION) and published via /api/network. Generate
@@ -973,20 +974,15 @@ const ark: Module<ArkState, RootState> = {
       const playerSecretHex = Array.from(secretBytes).map((b) => b.toString(16).padStart(2, '0')).join('')
       const playerHash = await createHash(secretBytes)
 
-      // Coin-select the escrow inputs BEFORE starting the game. Doing it after
+      // Sanity check spendable balance BEFORE starting the game. Doing it after
       // apiPlay (which creates a pending game + reserves the house stake) would
       // strand the game on any selection failure, and stranded games count
-      // against the server's per-player cap → "Too many pending games". The SDK's
-      // expiry-aware selectVirtualCoins does multi-input selection and allows
-      // sub-dust change: the escrow output is always exactly `tier` (the
-      // atomic-sweep covenant pins that value), the leftover is a SEPARATE change
-      // output, and a sub-dust change here is fine — it never touches the escrow
-      // or the game, it just leaves the player a tiny unspendable VTXO.
-      const spendable = (await sdkWallet.getVtxos()).filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
-      let escrowSel: { inputs: ExtendedVirtualCoin[]; changeAmount: bigint }
-      try {
-        escrowSel = selectVirtualCoins(spendable, tier)
-      } catch {
+      // against the server's per-player cap → "Too many pending games". The
+      // actual VTXO selection happens inside wallet.send below.
+      const spendableTotal = (await sdkWallet.getVtxos())
+        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
+        .reduce((sum: number, v: ExtendedVirtualCoin) => sum + v.value, 0)
+      if (spendableTotal < tier) {
         throw new Error(`Insufficient spendable balance for a ${tier}-sat bet — top up or settle to consolidate, then retry.`)
       }
 
@@ -995,20 +991,30 @@ const ark: Module<ArkState, RootState> = {
         isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number, oddsLo: oddsLo ?? 0 } : undefined,
       )
 
-      // 2. Escrow the player's stake into the shared escrow address (single-party,
-      // possibly multi-input). Escrow output = exactly `tier`; any change goes back
-      // to the player.
-      const escrowPk = ArkAddress.decode(playRes.escrowAddress).pkScript
-      const outputs: { script: Uint8Array; amount: bigint }[] = [{ script: escrowPk, amount: BigInt(tier) }]
-      if (escrowSel.changeAmount > 0n) {
-        outputs.push({ script: ArkAddress.decode(playerChangeAddress).pkScript, amount: escrowSel.changeAmount })
-      }
-      const escrowInputs: ArkTxInput[] = escrowSel.inputs.map((v) => ({
-        txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree,
-      }))
-      const escrowTx = buildOffchainTx(escrowInputs, outputs, serverUnroll)
-      const playerEscrowTxid = await submitOffchain(arkProvider, identity, escrowTx.arkTx, escrowTx.checkpoints, escrowInputs.map((_, i) => i))
-      const playerEscrow: Outpoint = { txid: playerEscrowTxid, vout: 0, value: tier }
+      // 2. Escrow the player's stake into the shared escrow address via the
+      // SDK's wallet.send. The SDK handles VTXO selection, multi-input
+      // funding, AND — critically — routes sub-dust change to an OP_RETURN
+      // output, which arkd accepts (a non-OP_RETURN sub-dust output is
+      // rejected with `AMOUNT_TOO_LOW`). Replaces the prior hand-rolled
+      // buildOffchainTx + submitOffchain.
+      const playerEscrowTxid = await sdkWallet.send({ address: playRes.escrowAddress, amount: tier })
+      // Find OUR output within the send tx — the SDK adds anchor + metadata
+      // outputs in arbitrary positions, so vout isn't guaranteed to be 0.
+      // Poll the indexer briefly for the matching VTXO.
+      const escrowPkHex = hex.encode(ArkAddress.decode(playRes.escrowAddress).pkScript)
+      const indexer = new RestIndexerProvider(state.server)
+      const playerEscrow: Outpoint = await (async () => {
+        const deadline = Date.now() + 10_000
+        while (Date.now() < deadline) {
+          try {
+            const { vtxos } = await indexer.getVtxos({ scripts: [escrowPkHex] })
+            const hit = vtxos.find((v) => v.txid === playerEscrowTxid && v.value === tier)
+            if (hit) return { txid: hit.txid, vout: hit.vout, value: hit.value }
+          } catch { /* transient — retry */ }
+          await new Promise((r) => setTimeout(r, 250))
+        }
+        throw new Error(`Could not locate player escrow VTXO in tx ${playerEscrowTxid} after 10s`)
+      })()
 
       // 2b. Stash a self-submittable refund BEFORE revealing. If the server now
       // stalls, the player can still reclaim the escrow after finalExpiration

@@ -194,22 +194,12 @@ interface TrustlessState {
    */
   houseEscrow?: Outpoint
   /**
-   * The pre-selected house VTXO outpoints to consume when funding the
-   * house escrow at /commit. Reserved under `selectionMutex` at /play, so
-   * concurrent plays can't pick them; persisted so `rebuildReservations`
-   * can restore the reservation after a restart. Multi-input (since
-   * v0.3.6) lets large bets compose from several smaller VTXOs without
-   * needing a single covering input. Holds liability = houseStake exactly;
-   * the sum of the VTXOs may be larger (change goes back to the house
-   * wallet at funding time).
-   *
-   * Backwards-compat with v0.3.5 (single-outpoint shape `houseVtxoOutpoint`):
-   * code that reads this MUST also fall back to the legacy field via the
-   * `readReservedHouseVtxos()` helper.
+   * Legacy lazy-fund fields (v0.3.5 single-outpoint shape, v0.3.6 array
+   * shape). At v0.3.7+ neither is written: the SDK's wallet.send picks
+   * its own VTXOs and we track liability only. Kept on the type for
+   * read-compat with in-flight games that span the upgrade.
    */
   houseVtxoOutpoints?: { txid: string; vout: number; value: number }[]
-  /** Legacy v0.3.5 single-outpoint field. Read-only at v0.3.6+; new rows
-   *  write `houseVtxoOutpoints` (array) instead. */
   houseVtxoOutpoint?: { txid: string; vout: number; value: number }
   /**
    * The player's escrow outpoint, persisted at resolve. Lets a retried
@@ -421,56 +411,67 @@ function houseVtxoToInput(v: ExtendedVirtualCoin): ArkTxInput {
 }
 
 /**
- * Read the reserved house VTXO outpoints from persisted state, honouring
- * the v0.3.5 → v0.3.6 schema transition: returns the new array shape if
- * present, else wraps the legacy single-outpoint field as a 1-element
- * array, else an empty array (eagerly-funded games at upgrade time skip
- * this path entirely via the `state.houseEscrow` check).
+ * After a `wallet.send` returns its txid, locate the specific output
+ * within that tx that pays our target pkScript. The SDK's send tx layout
+ * includes anchor + OP_RETURN metadata + change outputs in arbitrary
+ * order, so vout=0 is NOT guaranteed to be the recipient. We poll the
+ * indexer briefly (up to 10 s) for VTXOs at the target script with the
+ * matching txid.
  */
-function readReservedHouseVtxos(state: TrustlessState): { txid: string; vout: number; value: number }[] {
-  if (state.houseVtxoOutpoints && state.houseVtxoOutpoints.length > 0) return state.houseVtxoOutpoints
-  if (state.houseVtxoOutpoint) return [state.houseVtxoOutpoint]
-  return []
+async function findRecipientOutpoint(
+  deps: AppDeps,
+  txid: string,
+  escrowPkScriptHex: string,
+  expectedAmount: number,
+): Promise<Outpoint> {
+  // Use a dedicated indexer rather than something attached to deps.wallet —
+  // the SDK's wallet doesn't expose its indexerProvider on the public type
+  // surface, so we build our own. Cheap (HTTP client only).
+  const indexer = new RestIndexerProvider(ARK_SERVER_URL)
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    try {
+      const { vtxos } = await indexer.getVtxos({ scripts: [escrowPkScriptHex] })
+      const hit = vtxos.find((v) => v.txid === txid && v.value === expectedAmount)
+      if (hit) return { txid: hit.txid, vout: hit.vout, value: hit.value }
+    } catch {
+      // transient indexer hiccup; retry
+    }
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  throw new Error(
+    `findRecipientOutpoint: no VTXO with txid ${txid} + value ${expectedAmount} appeared at ` +
+    `script ${escrowPkScriptHex.slice(0, 16)}… within 10s`,
+  )
 }
 
 /**
- * Escrow `amount` from one or more PRE-SELECTED house VTXOs into the
- * escrow address (single-party, multi-input). The caller picks + reserves
- * `candidates` under the selection mutex so concurrent plays never escrow
- * from the same VTXOs; the actual send runs outside the mutex so escrows
- * for distinct VTXO sets proceed in parallel. A single change output goes
- * back to the house when `sum > amount`.
+ * Escrow `amount` from the house wallet into `escrowAddress` via the SDK's
+ * `wallet.send`. The SDK handles:
+ *   - VTXO selection (multi-input automatically when no single covering input)
+ *   - OP_RETURN routing for sub-dust change (arkd rejects sub-dust
+ *     non-OP_RETURN outputs — `AMOUNT_TOO_LOW (15)`)
+ *   - PSBT construction, signing, and checkpoint submission
+ *   - Internal `_withTxLock` mutex so concurrent calls are safe
  *
- * Multi-input support (v0.3.6+) lets large bets compose from several
- * smaller VTXOs without needing a single covering input — the bottleneck
- * was previously the largest free VTXO, which capped concurrent high-tier
- * bets at the count of large-enough single inputs in the pool.
+ * Previously we hand-rolled buildOffchainTx + submitOffchain, which left
+ * sub-dust change as a regular output and tripped arkd's dust check on
+ * tiny bets (e.g. a 330-sat tier with a 630-sat input → 300-sat change
+ * < 330 dust → reject). Routing through wallet.send fixes the dust case
+ * outright AND lets us drop ~30 lines of fiddly tx-building.
+ *
+ * The send returns just a txid; we then locate the recipient outpoint
+ * via the indexer since the SDK's tx layout includes anchor + metadata
+ * outputs in arbitrary order (vout is not necessarily 0).
  */
 async function escrowHouseStakeFrom(
   deps: AppDeps,
-  candidates: ExtendedVirtualCoin[],
+  escrowAddress: string,
   escrowPkScript: Uint8Array,
   amount: number,
 ): Promise<Outpoint> {
-  if (candidates.length === 0) {
-    throw new Error('escrowHouseStakeFrom: at least one candidate VTXO required')
-  }
-  const totalIn = candidates.reduce((sum, v) => sum + v.value, 0)
-  if (totalIn < amount) {
-    throw new Error(`escrowHouseStakeFrom: sum of inputs ${totalIn} < required amount ${amount}`)
-  }
-  const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
-  const change = totalIn - amount
-  const houseChange = ArkAddress.decode(await deps.wallet.getAddress())
-  const outputs: { script: Uint8Array; amount: bigint }[] = [{ script: escrowPkScript, amount: BigInt(amount) }]
-  if (change > 0) outputs.push({ script: houseChange.pkScript, amount: BigInt(change) })
-
-  const inputs = candidates.map(houseVtxoToInput)
-  const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnroll)
-  // Sign every input — submitOffchain handles a list of indices.
-  const signIndices = candidates.map((_, i) => i)
-  const txid = await submitOffchain(deps, arkTx, checkpoints, signIndices)
-  return { txid, vout: 0, value: amount }
+  const txid = await deps.wallet.send({ address: escrowAddress, amount })
+  return findRecipientOutpoint(deps, txid, hex.encode(escrowPkScript), amount)
 }
 
 /**
@@ -495,39 +496,18 @@ async function fundHouseEscrowOnce(
   deps: AppDeps,
   gameId: string,
   state: TrustlessState,
+  escrowAddress: string,
   escrowPkScript: Uint8Array,
 ): Promise<{ outpoint: Outpoint; mutated: boolean }> {
   // Already funded — re-entrant /commit after a transient failure path.
   if (state.houseEscrow) return { outpoint: state.houseEscrow, mutated: false }
-  const want = readReservedHouseVtxos(state)
-  if (want.length === 0) {
-    throw new Error(
-      `Game ${gameId} has neither houseEscrow nor reserved house VTXOs — corrupt state`,
-    )
-  }
-  const live = await deps.wallet.getVtxos()
-  const reservedVtxos: ExtendedVirtualCoin[] = []
-  for (const w of want) {
-    const match = live.find((v) => v.txid === w.txid && v.vout === w.vout)
-    if (!match) {
-      throw new Error(
-        `Reserved house VTXO ${w.txid}:${w.vout} no longer present in the house wallet ` +
-        `(possible double-spend, wallet resync, or pool maintenance — retry the bet)`,
-      )
-    }
-    if (match.value !== w.value) {
-      throw new Error(
-        `Reserved house VTXO ${w.txid}:${w.vout} value mismatch: ` +
-        `state recorded ${w.value} sats, wallet sees ${match.value} sats`,
-      )
-    }
-    reservedVtxos.push(match)
-  }
   const houseStake = state.arkadeForfeit.houseStake
-  const outpoint = await escrowHouseStakeFrom(deps, reservedVtxos, escrowPkScript, houseStake)
-  for (const v of reservedVtxos) houseVtxoCache.removeOutpoint(v.txid, v.vout)
+  const outpoint = await escrowHouseStakeFrom(deps, escrowAddress, escrowPkScript, houseStake)
+  // Invalidate the snapshot — the send mutated the wallet's VTXO set in ways
+  // our cache can't track precisely (SDK picked its own inputs).
+  houseVtxoCache.invalidate()
   console.log(
-    `[lazy-fund] game ${gameId} → house escrow funded at /commit from ${reservedVtxos.length} VTXO(s): ` +
+    `[lazy-fund] game ${gameId} → house escrow funded at /commit: ` +
     `${outpoint.txid}:${outpoint.vout} (${outpoint.value} sats)`,
   )
   return { outpoint, mutated: true }
@@ -626,70 +606,37 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     : getPlayerEscrowAddress(game, networkHrp)).encode()
 
   const gameId = uuidv4()
-  // Pick + RESERVE one or more free house VTXOs that sum to ≥ houseStake.
-  // The actual on-chain spend (`escrowHouseStakeFrom`) is DEFERRED until
-  // /commit — see `fundHouseEscrowOnce()`. This means a player who never
-  // funds their own escrow leaves NO on-chain house footprint, so no orphan
-  // recovery needed and no bankroll fragmentation. Multi-input support
-  // (v0.3.6+) lets large bets compose from several smaller VTXOs without
-  // needing a single covering input.
-  let candidates!: ExtendedVirtualCoin[]
-  // `available` = settled + preconfirmed, exactly what wallet.getBalance()
-  // returns, derived from the VTXO list so one snapshot serves both the
-  // liability check and the escrow selection.
+  // Reserve LIABILITY only — no specific outpoints (since v0.3.7). The SDK's
+  // wallet.send (called from fundHouseEscrowOnce at /commit time) picks its
+  // own VTXOs under its internal `_withTxLock`, so concurrent /commit calls
+  // can't double-spend the same input. We track liability purely to prevent
+  // OVER-COMMITTING the bankroll: total in-flight liability must stay below
+  // the available balance, else surface a retryable "house busy" here before
+  // even acknowledging the /play. v0.3.6 and earlier pre-pinned specific
+  // outpoints + had a multi-input picker — the SDK's mutex made that
+  // machinery unnecessary, and routing through wallet.send also fixed the
+  // sub-dust AMOUNT_TOO_LOW reject (the SDK routes sub-dust change to an
+  // OP_RETURN output which arkd accepts; our hand-rolled flow didn't).
   const availableOf = (vs: ExtendedVirtualCoin[]): number =>
     vs
       .filter((v) => v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed')
       .reduce((sum, v) => sum + v.value, 0)
-  // Read the house VTXOs from the cache (kept warm by pool maintenance) so the
-  // hot path skips a full-history wallet sync — each getVtxos() re-syncs and
-  // re-annotates thousands of long-spent outputs, costing seconds. Fetched
-  // before the mutex so a cache-miss refresh can't serialize concurrent plays.
   let vtxos = await houseVtxoCache.get(deps)
   await selectionMutex.runExclusive(async () => {
-    // Pick a SET of free, dust-safe VTXOs that sum to ≥ houseStake and
-    // reserve ALL their outpoints. The reservation excludes them from every
-    // other play's selection so concurrent plays never escrow from the
-    // same VTXO. Multi-input fallback (pickEscrowVtxos) lets a high-stake
-    // bet compose from several smaller VTXOs when no single covering input
-    // exists. No fallback to a reserved VTXO — pool exhaustion surfaces a
-    // retryable "busy" rather than risking a double-spend.
     let available = availableOf(vtxos)
-    let picked = pickEscrowVtxos(freeHouseVtxos(vtxos), houseStake, dust)
-    // A stale snapshot can understate the balance or hide free VTXOs (e.g. right
-    // after a settlement). On a liability or selection miss, refresh once and
-    // retry before declaring the house busy.
-    if (!picked || reservations.totalLiability() + houseStake > available) {
+    if (reservations.totalLiability() + houseStake > available) {
+      // Stale cache — refresh once and re-check before declaring busy.
       vtxos = await houseVtxoCache.refresh(deps)
       available = availableOf(vtxos)
-      picked = pickEscrowVtxos(freeHouseVtxos(vtxos), houseStake, dust)
     }
-    // Distinguish a permanently-unaffordable bet (house stake exceeds the
-    // house's TOTAL spendable balance — retrying can't help; the client should
-    // have capped it) from transient contention (in-flight liability) and pool
-    // fragmentation, which are retryable.
     if (houseStake > available) {
       throw new BetExceedsCapacityError(`Bet exceeds house capacity: needs ${houseStake} sats but the house bankroll is ${available}.`)
     }
     if (reservations.totalLiability() + houseStake > available) {
       throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${houseStake} > ${available}). Try again shortly.`)
     }
-    if (!picked || picked.length === 0) {
-      throw new HouseBusyError(`House has no free dust-safe VTXO set covering ${houseStake} sats (pool may need refragmenting). Try again shortly.`)
-    }
-    candidates = picked
-    reservations.reserve(gameId, picked.map((v) => outpointKey(v.txid, v.vout)), houseStake)
+    reservations.reserve(gameId, [], houseStake)
   })
-  // Committed to ALLOCATING `candidates` to this game: drop each from the
-  // cached snapshot so a later play can't re-select them before the actual
-  // on-chain spend at /commit. The reservation guards them cross-process;
-  // this drop just keeps the cache consistent.
-  for (const c of candidates) houseVtxoCache.removeOutpoint(c.txid, c.vout)
-
-  // Persist the reserved VTXO outpoints so /commit (and rebuildReservations
-  // after a restart) can find them later without re-running the selection
-  // mutex. Multi-input (v0.3.6+) shape.
-  const reservedHouseVtxos = candidates.map((c) => ({ txid: c.txid, vout: c.vout, value: c.value }))
 
   // Persist the arkade-forfeit pin so /commit, /refund, /forfeit, and
   // recovery rebuilds derive the EXACT same escrow taproot address. NOTE:
@@ -700,7 +647,6 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     contractVersion: version,
     finalExpiration,
     setupExpiration,
-    houseVtxoOutpoints: reservedHouseVtxos,
     ...odds,
     arkadeForfeit: {
       emulatorPubkeyHex: hex.encode(arkadeForfeit.emulatorPubkey),
@@ -1059,11 +1005,10 @@ export async function handleTrustlessCommit(
     // about to claim the pot if they win). Idempotent — a re-entrant /commit
     // after a transient sweep failure sees `state.houseEscrow` already set
     // and returns the existing outpoint without re-funding.
-    if (!state.houseEscrow && state.houseVtxoOutpoint) {
-      // Reconstruct the house escrow's pkScript from the persisted game data so
-      // it matches what the player escrow is funding into (same Game,
-      // refundPubkey = house). buildCommitContext below also rebuilds the same
-      // escrow script for the sweep; doing it once here is the same derivation.
+    if (!state.houseEscrow) {
+      // Reconstruct the house escrow's pkScript + address from persisted game
+      // data. buildCommitContext below rebuilds the same escrow script for
+      // the sweep; doing it once here is the same derivation.
       const houseHashForFund = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
       const arkadeForfeitForFund = rehydrateArkadeForfeit(state)
       const gameForFund = await buildGame(
@@ -1072,10 +1017,18 @@ export async function handleTrustlessCommit(
         arkadeForfeitForFund,
       )
       const versionForFund: 'v2' | 'v3' = state.contractVersion === 'v3' ? 'v3' : 'v2'
+      const networkHrpForFund = networkHrpFromArkInfo(deps.arkInfo)
       const houseEscrowScriptForFund = versionForFund === 'v3'
         ? getHouseEscrowScriptV3(gameForFund)
         : getHouseEscrowScript(gameForFund)
-      const { outpoint, mutated } = await fundHouseEscrowOnce(deps, gameId, state, houseEscrowScriptForFund.pkScript)
+      const houseEscrowAddressForFund = (versionForFund === 'v3'
+        ? getHouseEscrowAddressV3(gameForFund, networkHrpForFund)
+        : getHouseEscrowAddress(gameForFund, networkHrpForFund)).encode()
+      const { outpoint, mutated } = await fundHouseEscrowOnce(
+        deps, gameId, state,
+        houseEscrowAddressForFund,
+        houseEscrowScriptForFund.pkScript,
+      )
       if (mutated) {
         state = { ...state, houseEscrow: outpoint }
         await deps.repos.games.update(gameId, {

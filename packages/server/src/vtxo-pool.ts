@@ -507,47 +507,30 @@ export async function rebuildReservations(deps: AppDeps): Promise<number> {
         restored++
       }
     } else if (parsed && typeof parsed === 'object' && (
-      'houseEscrow' in parsed || 'houseVtxoOutpoint' in parsed || 'houseVtxoOutpoints' in parsed
+      'houseEscrow' in parsed || 'houseVtxoOutpoint' in parsed || 'houseVtxoOutpoints' in parsed || 'arkadeForfeit' in parsed
     )) {
-      // Trustless per-party flow. Two sub-cases depending on whether the
-      // house has lazy-funded yet:
-      //
-      //   1. `houseVtxoOutpoints` (v0.3.6+) or `houseVtxoOutpoint` (v0.3.5)
-      //      set, `houseEscrow` unset — pre-/commit lazy-fund state. The
-      //      reserved VTXO(s) are STILL LIVE in the wallet; re-reserve
-      //      their specific outpoints so no concurrent /play picks them.
-      //      Liability = houseStake (NOT the VTXO sum, since change goes
-      //      back to the house at funding time).
-      //
-      //   2. `houseEscrow` set (post-/commit fund, or legacy ≤0.3.4 /play
-      //      flow): the reserved VTXOs are already spent into the escrow.
-      //      No live house VTXO to protect, but the in-flight liability
-      //      must still be restored or concurrent post-restart plays
-      //      could over-commit. Liability = houseEscrow.value.
+      // Trustless per-party flow — liability-only reservation (since v0.3.7).
+      // We no longer pin specific outpoints: the SDK's wallet.send mutex
+      // serializes its own VTXO selection at /commit, so cross-game double-
+      // spend protection is the SDK's job. Our reservation just enforces the
+      // bankroll over-commit ceiling. Liability is:
+      //   - houseEscrow.value if the house has already funded (post-/commit
+      //     or legacy ≤0.3.4 eager flow)
+      //   - arkadeForfeit.houseStake otherwise (lazy-fund pending /commit)
+      //   - tier as a final fallback for very old rows
       const o = parsed as {
         houseEscrow?: { value?: number }
-        houseVtxoOutpoint?: { txid?: string; vout?: number }
-        houseVtxoOutpoints?: { txid?: string; vout?: number }[]
         arkadeForfeit?: { houseStake?: number }
       }
-      let reservedOutpoints: string[] = []
       let liability = 0
       if (o.houseEscrow && typeof o.houseEscrow.value === 'number' && o.houseEscrow.value > 0) {
         liability = o.houseEscrow.value
+      } else if (o.arkadeForfeit && typeof o.arkadeForfeit.houseStake === 'number' && o.arkadeForfeit.houseStake > 0) {
+        liability = o.arkadeForfeit.houseStake
       } else {
-        // Lazy-fund: collect reserved outpoints from either the v0.3.6 array
-        // shape or the v0.3.5 single-field shape (whichever is present).
-        const outpoints = o.houseVtxoOutpoints && o.houseVtxoOutpoints.length > 0
-          ? o.houseVtxoOutpoints
-          : (o.houseVtxoOutpoint ? [o.houseVtxoOutpoint] : [])
-        for (const op of outpoints) {
-          if (typeof op.txid === 'string' && typeof op.vout === 'number') {
-            reservedOutpoints.push(outpointKey(op.txid, op.vout))
-          }
-        }
-        liability = o.arkadeForfeit?.houseStake ?? g.tier
+        liability = g.tier
       }
-      reservations.reserve(g.id, reservedOutpoints, liability)
+      reservations.reserve(g.id, [], liability)
       restored++
     }
   }

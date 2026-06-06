@@ -422,24 +422,37 @@ export async function rebuildReservations(deps: AppDeps): Promise<number> {
         reservations.reserve(g.id, parsed as string[], maxLiabilityForTier(g.tier))
         restored++
       }
-    } else if (parsed && typeof parsed === 'object' && 'houseEscrow' in parsed) {
-      // Trustless per-party flow: the house already spent its stake into the
-      // escrow address, so there's no live house VTXO to protect — but the
-      // in-flight liability MUST be restored, or concurrent post-restart plays
-      // would over-commit the house (the bug: this branch used to be skipped
-      // because TrustlessState is an object, not an array). Mirror
-      // handleTrustlessPlay's reservation, which reserves the HOUSE STAKE — for
-      // variable-odds games that's a multiple of `tier`, so reserving `tier`
-      // here would under-restore liability and let the house over-commit. The
-      // escrowed house stake is exactly `houseEscrow.value` (the amount the
-      // house sent into the escrow), so read it back; fall back to `tier` only
-      // if an older row predates the value field.
-      const houseEscrow = (parsed as { houseEscrow?: { value?: number } }).houseEscrow
-      const liability =
-        houseEscrow && typeof houseEscrow.value === 'number' && houseEscrow.value > 0
-          ? houseEscrow.value
-          : g.tier
-      reservations.reserve(g.id, [], liability)
+    } else if (parsed && typeof parsed === 'object' && ('houseEscrow' in parsed || 'houseVtxoOutpoint' in parsed)) {
+      // Trustless per-party flow. Two sub-cases depending on whether the
+      // house has lazy-funded yet:
+      //
+      //   1. `houseVtxoOutpoint` set, `houseEscrow` unset (v0.3.5+ pre-/commit):
+      //      The reserved VTXO is STILL LIVE in the wallet — re-reserve its
+      //      specific outpoint so no concurrent /play picks it. Liability =
+      //      the house stake (NOT the VTXO's full value, since change goes
+      //      back to the house at funding time).
+      //
+      //   2. `houseEscrow` set (post-/commit fund, or legacy ≤0.3.4 /play
+      //      flow): the reserved VTXO is already spent into the escrow. No
+      //      live house VTXO to protect, but the in-flight liability must
+      //      still be restored or concurrent post-restart plays could
+      //      over-commit. Liability = houseEscrow.value.
+      const o = parsed as {
+        houseEscrow?: { value?: number }
+        houseVtxoOutpoint?: { txid?: string; vout?: number }
+        arkadeForfeit?: { houseStake?: number }
+      }
+      let reservedOutpoints: string[] = []
+      let liability = 0
+      if (o.houseEscrow && typeof o.houseEscrow.value === 'number' && o.houseEscrow.value > 0) {
+        liability = o.houseEscrow.value
+      } else if (o.houseVtxoOutpoint && typeof o.houseVtxoOutpoint.txid === 'string' && typeof o.houseVtxoOutpoint.vout === 'number') {
+        reservedOutpoints = [outpointKey(o.houseVtxoOutpoint.txid, o.houseVtxoOutpoint.vout)]
+        liability = o.arkadeForfeit?.houseStake ?? g.tier
+      } else {
+        liability = g.tier
+      }
+      reservations.reserve(g.id, reservedOutpoints, liability)
       restored++
     }
   }

@@ -98,8 +98,13 @@ export interface TrustlessPlayResult {
   serverPubkey: string
   betAmount: number
   finalExpiration: number
-  /** The house's escrow VTXO, so the client can build the winner sweep. */
-  houseEscrow: Outpoint
+  /**
+   * The house's escrow VTXO, if the house has funded yet. Since lazy-funding
+   * (v0.3.5+): the house funds at /commit, so this is absent on /play. The
+   * client doesn't use it for tx building (the server handles the sweep);
+   * kept for legacy clients that still read it.
+   */
+  houseEscrow?: Outpoint
   /**
    * Serialized params of the PLAYER escrow's `coinflip-escrow` contract — the
    * exact options that produce the on-chain player-escrow pkScript. The client
@@ -179,7 +184,25 @@ interface TrustlessState {
   contractVersion?: 'v2' | 'v3'
   finalExpiration: number
   setupExpiration: number
-  houseEscrow: Outpoint
+  /**
+   * The house's escrow outpoint, written ONCE the house actually funds
+   * (`fundHouseEscrowOnce()` runs the first time `/commit` arrives with a
+   * valid player escrow). Absent at /play time — see `houseVtxoOutpoint`
+   * for the RESERVED-but-unspent input that will be used to fund. Recovery /
+   * forfeit / refund all skip games whose house escrow is still absent
+   * (no on-chain footprint to clean up — the reservation handles it).
+   */
+  houseEscrow?: Outpoint
+  /**
+   * The pre-selected house VTXO outpoint to consume when funding the
+   * house escrow at /commit. Reserved under `selectionMutex` at /play, so
+   * concurrent plays can't pick it; persisted so `rebuildReservations` can
+   * restore the reservation after a restart. Holds liability=houseStake
+   * exactly — the VTXO's full value may be larger (change goes back to the
+   * house wallet at funding time). Absent for legacy games (≤ 0.3.4) where
+   * /play funded eagerly and wrote `houseEscrow` directly.
+   */
+  houseVtxoOutpoint?: { txid: string; vout: number; value: number }
   /**
    * The player's escrow outpoint, persisted at resolve. Lets a retried
    * `/commit` rebuild the player-win sweep deterministically — independent of
@@ -412,6 +435,61 @@ async function escrowHouseStakeFrom(
   return { txid, vout: 0, value: amount }
 }
 
+/**
+ * Fund the house escrow on demand from the VTXO reserved at /play time —
+ * idempotent: a second call after the first succeeds is a no-op that returns
+ * the same outpoint. Called from /commit AFTER the player escrow has been
+ * verified on-chain, so the house only locks funds when the bet is real.
+ *
+ * Pre-condition: `state.houseVtxoOutpoint` is set (every game minted on
+ * v0.3.5+ has it; legacy games that pre-funded at /play go through the
+ * `state.houseEscrow` branch instead and skip this entirely).
+ *
+ * The reserved VTXO is fetched from the wallet's current view, not from the
+ * stale cache snapshot, so we always get the live tapLeafScript/tapTree. If
+ * the VTXO no longer exists (spent by another path, or a wallet resync moved
+ * it), this throws — the calling /commit returns an error to the client and
+ * the bet stays pending until a retry. Reservation persistence + the
+ * selection mutex make 'no longer exists' a near-impossible state in
+ * practice.
+ */
+async function fundHouseEscrowOnce(
+  deps: AppDeps,
+  gameId: string,
+  state: TrustlessState,
+  escrowPkScript: Uint8Array,
+): Promise<{ outpoint: Outpoint; mutated: boolean }> {
+  // Already funded — re-entrant /commit after a transient failure path.
+  if (state.houseEscrow) return { outpoint: state.houseEscrow, mutated: false }
+  if (!state.houseVtxoOutpoint) {
+    throw new Error(
+      `Game ${gameId} has neither houseEscrow nor houseVtxoOutpoint — corrupt state`,
+    )
+  }
+  const want = state.houseVtxoOutpoint
+  const live = await deps.wallet.getVtxos()
+  const reserved = live.find((v) => v.txid === want.txid && v.vout === want.vout)
+  if (!reserved) {
+    throw new Error(
+      `Reserved house VTXO ${want.txid}:${want.vout} no longer present in the house wallet ` +
+      `(possible double-spend, wallet resync, or pool maintenance — retry the bet)`,
+    )
+  }
+  if (reserved.value !== want.value) {
+    // VTXO IS the same outpoint but with a different value — extremely unusual,
+    // would indicate state corruption. Fail loudly rather than spend the wrong thing.
+    throw new Error(
+      `Reserved house VTXO ${want.txid}:${want.vout} value mismatch: ` +
+      `state recorded ${want.value} sats, wallet sees ${reserved.value} sats`,
+    )
+  }
+  const houseStake = state.arkadeForfeit.houseStake
+  const outpoint = await escrowHouseStakeFrom(deps, reserved, escrowPkScript, houseStake)
+  houseVtxoCache.removeOutpoint(reserved.txid, reserved.vout)
+  console.log(`[lazy-fund] game ${gameId} → house escrow funded at /commit: ${outpoint.txid}:${outpoint.vout} (${outpoint.value} sats)`)
+  return { outpoint, mutated: true }
+}
+
 export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDeps): Promise<TrustlessPlayResult> {
   const tiers = await getTiers(deps)
   if (!tiers.includes(req.tier)) throw new Error(`Invalid tier: ${req.tier}`)
@@ -505,10 +583,12 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     : getPlayerEscrowAddress(game, networkHrp)).encode()
 
   const gameId = uuidv4()
-  // Atomically (under the selection mutex) check liability and pick + reserve a
-  // free house VTXO covering the HOUSE STAKE; then escrow OUTSIDE the mutex so
-  // concurrent plays run in parallel, each on its own reserved VTXO.
-  let houseEscrow!: Outpoint
+  // Pick + RESERVE a free house VTXO covering the house stake. The actual
+  // on-chain spend (`escrowHouseStakeFrom`) is DEFERRED until /commit — see
+  // `fundHouseEscrowOnce()`. This means a player who never funds their own
+  // escrow leaves NO on-chain house footprint, so no orphan recovery needed
+  // and no bankroll fragmentation. The reservation alone guarantees the
+  // VTXO will still be available when /commit asks for it.
   let candidate!: ExtendedVirtualCoin
   // `available` = settled + preconfirmed, exactly what wallet.getBalance()
   // returns, derived from the VTXO list so one snapshot serves both the
@@ -554,25 +634,26 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     candidate = picked
     reservations.reserve(gameId, [outpointKey(picked.txid, picked.vout)], houseStake)
   })
-  // Committed to spending `candidate`: drop it from the cached snapshot now so a
-  // later play can't re-select it once this game's reservation is released (the
-  // reservation only guards it while the game is in flight). Without this the
-  // cached snapshot would keep handing out an escrowed VTXO → VTXO_ALREADY_SPENT.
+  // Committed to ALLOCATING `candidate` to this game: drop it from the cached
+  // snapshot so a later play can't re-select it before the actual on-chain
+  // spend at /commit. The reservation guards it cross-process; this drop just
+  // keeps the cache consistent.
   houseVtxoCache.removeOutpoint(candidate.txid, candidate.vout)
-  try {
-    houseEscrow = await escrowHouseStakeFrom(deps, candidate, houseEscrowScript.pkScript, houseStake)
-  } catch (err) {
-    reservations.release(gameId)
-    throw err
-  }
+
+  // Persist the reserved VTXO outpoint so /commit (and rebuildReservations
+  // after a restart) can find it later without re-running the selection mutex.
+  const reservedHouseVtxo = { txid: candidate.txid, vout: candidate.vout, value: candidate.value }
 
   // Persist the arkade-forfeit pin so /commit, /refund, /forfeit, and
-  // recovery rebuilds derive the EXACT same escrow taproot address.
+  // recovery rebuilds derive the EXACT same escrow taproot address. NOTE:
+  // `houseEscrow` is INTENTIONALLY absent — the house funds at /commit, not
+  // here. recoverOrphanedHouseEscrows checks `state.houseEscrow` before doing
+  // anything, so a no-show player leaves no on-chain footprint to recover.
   const state: TrustlessState = {
     contractVersion: version,
     finalExpiration,
     setupExpiration,
-    houseEscrow,
+    houseVtxoOutpoint: reservedHouseVtxo,
     ...odds,
     arkadeForfeit: {
       emulatorPubkeyHex: hex.encode(arkadeForfeit.emulatorPubkey),
@@ -632,7 +713,6 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     serverPubkey: deps.arkInfo.signerPubkey,
     betAmount: req.tier,
     finalExpiration,
-    houseEscrow,
     // The PLAYER escrow's serialized contract params (mirrors the house side
     // registered above) — the client registers its own escrow with these so its
     // ContractWatcher reproduces the same script and observes the sweep.
@@ -699,6 +779,17 @@ async function buildCommitContext(
   playerEscrow: Outpoint,
   deps: AppDeps,
 ): Promise<CommitContext> {
+  // Pre-condition: the house escrow MUST be funded by the time we get here.
+  // `handleTrustlessCommit` calls `fundHouseEscrowOnce` before this; the
+  // background reconcile path checks `state.houseEscrow` itself before
+  // calling buildCommitContext. The cast below relies on this invariant.
+  if (!state.houseEscrow) {
+    throw new Error(
+      `buildCommitContext: state.houseEscrow not set for game ${game.id} — ` +
+      `lazy-funding should have run first`,
+    )
+  }
+  const houseEscrow = state.houseEscrow
   const houseSecret = new Uint8Array(Buffer.from(game.house_secret_hex, 'hex'))
   const playerSecret = new Uint8Array(Buffer.from(playerSecretHex, 'hex'))
   const odds = oddsFromState(state)
@@ -738,7 +829,7 @@ async function buildCommitContext(
   if (version === 'v3') {
     const s = v3Escrows(game2)
     escrowsV3 = [
-      { script: s.house, ...state.houseEscrow },
+      { script: s.house, ...houseEscrow },
       { script: s.player, ...playerEscrow },
     ]
     pot = escrowsV3[0].value + escrowsV3[1].value
@@ -746,7 +837,7 @@ async function buildCommitContext(
   } else {
     const s = v2Escrows(game2)
     escrowsV2 = [
-      { script: s.house, ...state.houseEscrow },
+      { script: s.house, ...houseEscrow },
       { script: s.player, ...playerEscrow },
     ]
     pot = escrowsV2.reduce((a, e) => a + e.value, 0)
@@ -915,7 +1006,37 @@ export async function handleTrustlessCommit(
     if (createHash('sha256').update(playerSecret).digest('hex') !== game.player_hash) {
       throw new Error('Player secret does not match committed hash')
     }
-    const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+    let state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+
+    // Lazy-fund the house escrow now that the player has revealed (and is
+    // about to claim the pot if they win). Idempotent — a re-entrant /commit
+    // after a transient sweep failure sees `state.houseEscrow` already set
+    // and returns the existing outpoint without re-funding.
+    if (!state.houseEscrow && state.houseVtxoOutpoint) {
+      // Reconstruct the house escrow's pkScript from the persisted game data so
+      // it matches what the player escrow is funding into (same Game,
+      // refundPubkey = house). buildCommitContext below also rebuilds the same
+      // escrow script for the sweep; doing it once here is the same derivation.
+      const houseHashForFund = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
+      const arkadeForfeitForFund = rehydrateArkadeForfeit(state)
+      const gameForFund = await buildGame(
+        deps, game.tier, houseHashForFund, game.player_pubkey, game.player_hash,
+        state.finalExpiration, state.setupExpiration, oddsFromState(state),
+        arkadeForfeitForFund,
+      )
+      const versionForFund: 'v2' | 'v3' = state.contractVersion === 'v3' ? 'v3' : 'v2'
+      const houseEscrowScriptForFund = versionForFund === 'v3'
+        ? getHouseEscrowScriptV3(gameForFund)
+        : getHouseEscrowScript(gameForFund)
+      const { outpoint, mutated } = await fundHouseEscrowOnce(deps, gameId, state, houseEscrowScriptForFund.pkScript)
+      if (mutated) {
+        state = { ...state, houseEscrow: outpoint }
+        await deps.repos.games.update(gameId, {
+          houseVtxosJson: JSON.stringify(state),
+        })
+      }
+    }
+
     const ctx = await buildCommitContext(game, state, req.playerSecretHex, req.playerEscrow, deps)
     const { result, sweepTx } = buildCommitResult(ctx, deps)
 
@@ -1096,7 +1217,16 @@ export async function handleTrustlessForfeit(
   if (!game.player_change_address) throw new Error(`Game ${gameId} has no player change address`)
 
   const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
-  if (!state.houseEscrow) throw new Error(`Game ${gameId} has no recorded house escrow`)
+  if (!state.houseEscrow) {
+    // Lazy-funding (v0.3.5+) means the house escrow only exists if /commit
+    // already ran. A game in pending state without a house escrow means the
+    // player never revealed — there's no joint pot to forfeit-sweep, so the
+    // correct recovery is `/refund` (which only needs the player escrow).
+    throw new Error(
+      `Game ${gameId} has no joint pot to forfeit — the house only funds at /commit. ` +
+      `Use /refund to reclaim your own stake after finalExpiration.`,
+    )
+  }
   const version: 'v2' | 'v3' = state.contractVersion === 'v3' ? 'v3' : 'v2'
   const arkadeForfeitPin = rehydrateArkadeForfeit(state)
   const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
@@ -1324,9 +1454,10 @@ async function reconcileGame(game: GameRow, deps: AppDeps, indexer: IndexerProvi
       return 0
     }
     if (!state.houseEscrow) return 0
+    const houseEscrow = state.houseEscrow
     try {
-      const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid: state.houseEscrow.txid, vout: state.houseEscrow.vout }] })
-      const v = vtxos.find((x) => x.txid === state.houseEscrow.txid && x.vout === state.houseEscrow.vout) ?? vtxos[0]
+      const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid: houseEscrow.txid, vout: houseEscrow.vout }] })
+      const v = vtxos.find((x) => x.txid === houseEscrow.txid && x.vout === houseEscrow.vout) ?? vtxos[0]
       if (!v || !v.isSpent) {
         // Escrow not yet spent → the sweep never landed. If the player already
         // committed (their reveal is persisted), the server has everything it
@@ -1339,7 +1470,7 @@ async function reconcileGame(game: GameRow, deps: AppDeps, indexer: IndexerProvi
         return 0
       }
 
-      const pot = state.houseEscrow.value + fresh.tier // house stake + player stake
+      const pot = houseEscrow.value + fresh.tier // house stake + player stake
       const winner: 'house' | 'player' = (await sweepPaidPlayer(indexer, v, state)) ? 'player' : 'house'
       await deps.repos.games.update(fresh.id, {
         winner,

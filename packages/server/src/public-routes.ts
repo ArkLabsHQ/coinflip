@@ -235,7 +235,13 @@ export function createPublicRoutes(deps: AppDeps): Router {
     const wantPubkey = String(req.query.playerPubkey || '').trim().toLowerCase()
     if (!wantPubkey || wantPubkey !== game.player_pubkey.toLowerCase()) {
       // Pubkey mismatch is treated as 404 (not 403) to avoid leaking
-      // game-existence information to anyone scanning game IDs.
+      // game-existence information to anyone scanning game IDs. Log the
+      // mismatch server-side so an operator debugging a legitimate user's
+      // "Game not found" can see whether the row actually exists.
+      console.warn(
+        `[details] gameId=${game.id} pubkey mismatch — request='${wantPubkey || '(empty)'}', ` +
+        `expected='${game.player_pubkey.toLowerCase()}'`,
+      )
       res.status(404).json({ error: 'Game not found' })
       return
     }

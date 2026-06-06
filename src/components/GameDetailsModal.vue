@@ -139,13 +139,30 @@ export default defineComponent({
     const error = ref<string | null>(null)
 
     async function reload() {
-      if (!props.gameId || !props.playerPubkey) return
+      if (!props.gameId) return
+      if (!props.playerPubkey) {
+        error.value = 'Wallet not connected — connect to view game details.'
+        return
+      }
       loading.value = true
       error.value = null
       try {
         details.value = await getGameDetails(props.gameId, props.playerPubkey)
       } catch (e) {
-        error.value = e instanceof Error ? e.message : String(e)
+        const raw = e instanceof Error ? e.message : String(e)
+        // Server returns 404 + body `{"error":"Game not found"}` for BOTH
+        // truly-missing IDs and pubkey-mismatch (auth shield). Surface a
+        // friendlier message that hints at the most common cause for a
+        // legitimate user clicking a row that fails: the game was created
+        // on a different server deployment (DATA_DIR isn't the same as the
+        // one that holds this game's row).
+        if (/Game not found/i.test(raw)) {
+          error.value =
+            "This game's record isn't on the current server. It may have been " +
+            'played against a different deployment, or the server data was reset.'
+        } else {
+          error.value = raw
+        }
       } finally {
         loading.value = false
       }
@@ -190,7 +207,8 @@ export default defineComponent({
   align-items: center;
   justify-content: center;
   padding: 16px;
-  z-index: 100;
+  /* Above the history drawer (z-index 300). Layered children: history → details. */
+  z-index: 400;
 }
 .modal-card {
   width: 100%;

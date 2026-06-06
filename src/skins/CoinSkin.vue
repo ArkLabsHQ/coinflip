@@ -149,7 +149,14 @@ export default defineComponent({
   .coins-1 .coin-unit { width: 140px; height: 140px; }
   .coins-2 .coin-unit { width: 104px; height: 104px; }
   .coins-3 .coin-unit { width: 84px; height: 84px; }
+  .coins-4 .coin-unit { width: 70px; height: 70px; }
+  .coins-5 .coin-unit,
+  .coins-6 .coin-unit { width: 60px; height: 60px; }
   .coins-1 .coin-symbol { font-size: 3.2rem; }
-  .coin-wrapper { gap: 14px; }
+  .coins-3 .coin-symbol { font-size: 1.85rem; }
+  .coins-4 .coin-symbol { font-size: 1.55rem; }
+  .coins-5 .coin-symbol,
+  .coins-6 .coin-symbol { font-size: 1.35rem; }
+  .coin-wrapper { gap: 14px; min-height: 160px; }
 }
 </style>

@@ -393,7 +393,13 @@ export default defineComponent({
     const winFlash = ref(false)
 
     // ── Other computed ────────────────────────────────────────────────
-    const playerBalance = computed(() => store.state.walletBalance || Infinity)
+    // Spendable offchain balance (settled + preconfirmed). Was previously
+    // returning the whole WalletBalance object (truthy), so `tier > balance`
+    // was always false and tier options above the wallet balance were
+    // staying enabled. Fall back to Infinity only when the wallet isn't
+    // connected yet (state.walletBalance === null) so we don't gate the UI
+    // on a stale-empty balance during boot.
+    const playerBalance = computed(() => store.state.walletBalance?.available ?? Infinity)
     // Only a tier is required now — the side defaults to 'random', so a fresh
     // player can flip immediately after load.
     const canFlip = computed(() => !isFlipping.value && selectedTier.value !== null)

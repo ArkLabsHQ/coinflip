@@ -1,32 +1,72 @@
 <template>
-  <div class="page-centered">
-    <div class="setup-card casino-card-glow">
+  <div class="splash-page">
+    <!-- Hero — value-prop and big tagline. Replaces the previous bare
+         "Arkade Coinflip" + Create/Restore wall. -->
+    <div v-if="!mode" class="splash-hero">
+      <div class="splash-badge">
+        <span class="badge-dot"></span>
+        <span class="badge-text">POWERED&nbsp;BY&nbsp;ARKADE</span>
+      </div>
+      <h1 class="splash-title">
+        The trustless<br />
+        <span class="title-accent">Bitcoin casino.</span>
+      </h1>
+      <p class="splash-tagline">
+        Non-custodial. No accounts. No KYC. Every flip is settled by Bitcoin
+        script + an Arkade-script covenant — the operator can&rsquo;t cheat you,
+        can&rsquo;t hold your funds, and can&rsquo;t stall you out.
+      </p>
+
+      <ul class="splash-points">
+        <li>
+          <span class="point-icon">&#x26A1;</span>
+          <span>
+            <strong>Lightning-fast offchain play.</strong>
+            Funds live on Ark — flips settle in seconds without touching the chain.
+          </span>
+        </li>
+        <li>
+          <span class="point-icon">&#x1F512;</span>
+          <span>
+            <strong>You hold the keys.</strong>
+            Your wallet stays in your browser. The house never sees your secret.
+          </span>
+        </li>
+        <li>
+          <span class="point-icon">&#x1F3B2;</span>
+          <span>
+            <strong>Provably fair on-chain.</strong>
+            The win is decided by a covenant arkd & the emulator both verify — no trust required.
+          </span>
+        </li>
+      </ul>
+
+      <div class="splash-cta">
+        <button class="btn-gold btn-lg" @click="mode = 'create'">
+          Create wallet to play
+        </button>
+        <button class="btn-text" @click="mode = 'restore'">
+          I already have a key
+        </button>
+      </div>
+
+      <div class="splash-footer">
+        <router-link to="/how-it-works" class="link-muted">How it works</router-link>
+        <span class="dot">&middot;</span>
+        <a href="https://github.com/ArkLabsHQ/coinflip" target="_blank" rel="noopener" class="link-muted">Open source</a>
+      </div>
+    </div>
+
+    <!-- The two existing flows (create / restore) live in their own card
+         when picked, so the splash hero gets the full canvas. -->
+    <div v-else class="setup-card casino-card-glow">
       <div class="setup-brand">
         <span class="brand-icon">&#x20BF;</span>
       </div>
-      <h1 class="setup-title">Arkade Coinflip</h1>
-      <p class="setup-subtitle text-muted">Trustless Bitcoin coin flips on Ark</p>
-
-      <div class="setup-options" v-if="!mode">
-        <button class="option-btn" @click="mode = 'create'">
-          <div class="option-icon-wrap">
-            <span class="option-icon">+</span>
-          </div>
-          <div class="option-text">
-            <span class="option-label">Create New Wallet</span>
-            <span class="option-desc">Generate a fresh keypair</span>
-          </div>
-        </button>
-        <button class="option-btn" @click="mode = 'restore'">
-          <div class="option-icon-wrap">
-            <span class="option-icon">&#8634;</span>
-          </div>
-          <div class="option-text">
-            <span class="option-label">Restore Wallet</span>
-            <span class="option-desc">Import from nsec key</span>
-          </div>
-        </button>
-      </div>
+      <h1 class="setup-title">{{ mode === 'create' ? 'Create wallet' : 'Restore wallet' }}</h1>
+      <p class="setup-subtitle text-muted">
+        {{ mode === 'create' ? 'A fresh keypair, stored in your browser only.' : 'Paste your nsec to recover an existing wallet.' }}
+      </p>
 
       <!-- Create flow -->
       <div v-if="mode === 'create'" class="setup-form">
@@ -220,6 +260,145 @@ export default defineComponent({
 .option-desc {
   font-size: 0.8rem;
   color: var(--text-muted);
+}
+
+/* ─── Splash hero ─────────────────────────────────────────────── */
+.splash-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px 56px;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 0%, rgba(247, 201, 72, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 50% at 80% 100%, rgba(56, 189, 248, 0.04) 0%, transparent 60%);
+}
+.splash-hero {
+  max-width: 560px;
+  width: 100%;
+  text-align: center;
+}
+.splash-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.06);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  color: var(--blue);
+  margin-bottom: 28px;
+}
+.badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.7);
+  animation: badge-pulse 1.8s ease-in-out infinite;
+}
+@keyframes badge-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.splash-title {
+  font-size: 2.6rem;
+  line-height: 1.05;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  margin: 0 0 18px;
+}
+.title-accent {
+  background: linear-gradient(135deg, var(--gold) 0%, #ffd66d 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.splash-tagline {
+  font-size: 1rem;
+  line-height: 1.55;
+  color: var(--text-dim);
+  margin: 0 auto 32px;
+  max-width: 460px;
+}
+.splash-points {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  text-align: left;
+}
+.splash-points li {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.splash-points strong { color: var(--text); font-weight: 700; }
+.point-icon {
+  font-size: 1.15rem;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(247, 201, 72, 0.08);
+  border: 1px solid rgba(247, 201, 72, 0.18);
+  flex-shrink: 0;
+}
+.splash-cta {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 22px;
+}
+.splash-cta .btn-gold {
+  width: 100%;
+  max-width: 340px;
+  font-size: 1rem;
+  padding: 15px 24px;
+}
+.btn-text {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 6px 10px;
+  font-family: inherit;
+}
+.btn-text:hover { color: var(--gold); }
+.splash-footer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.splash-footer .dot { color: var(--text-muted); opacity: 0.5; }
+.link-muted {
+  color: var(--text-muted);
+  text-decoration: none;
+}
+.link-muted:hover { color: var(--gold); }
+
+@media (max-width: 560px) {
+  .splash-title { font-size: 2.1rem; }
+  .splash-tagline { font-size: 0.92rem; }
+  .splash-points li { font-size: 0.82rem; padding: 12px 14px; gap: 12px; }
 }
 
 .setup-form {

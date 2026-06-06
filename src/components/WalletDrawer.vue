@@ -127,7 +127,7 @@
         <section v-if="tab === 'send'" class="section-body">
           <div v-if="sendStatus !== 'success'">
             <textarea class="input send-input" v-model="sendInput" rows="2" :disabled="!ready"
-                      placeholder="Paste a Lightning invoice, Ark address, or Bitcoin address"></textarea>
+                      placeholder="Paste a Lightning invoice / address, LNURL, Ark address, or Bitcoin address"></textarea>
 
             <!-- Detected rail -->
             <div v-if="sendInput.trim()" class="detect-row">
@@ -152,7 +152,7 @@
             </button>
 
             <div v-if="sendInput.trim() && sendDetected.kind === 'unknown'" class="hint error-hint">
-              Unrecognized destination — paste a Lightning invoice, Ark, or Bitcoin address.
+              Unrecognized destination — paste a Lightning invoice/address, LNURL, Ark, or Bitcoin address.
             </div>
             <div v-else-if="sendDetected.kind === 'lightning' && sendDetected.amountSats === 0" class="hint error-hint">
               Amountless invoices aren't supported — use one with a fixed amount.
@@ -271,13 +271,19 @@ import {
   type LimitsResponse,
 } from '@/services/boltz'
 import { copyToClipboard } from '@/utils/clipboard'
+import { detectLnurlInput, resolveLnurlToInvoice } from '@/utils/lnurl'
 
-type SendKind = 'empty' | 'lightning' | 'ark' | 'onchain' | 'unknown'
+type SendKind = 'empty' | 'lightning' | 'lnurl' | 'ark' | 'onchain' | 'unknown'
 interface SendTarget { kind: SendKind; amountSats: number; address: string }
 
 /**
  * Classify a pasted send destination into a rail, mirroring the Arkade
- * wallet's single-input flow. BIP21 first, then BOLT11, Ark, on-chain.
+ * wallet's single-input flow. Order of detection:
+ *   1. BIP21 (extracts ark, lightning, amount params)
+ *   2. BOLT11 invoice (lnbc / lntb / lnbcrt / lnbs prefix)
+ *   3. Lightning Address (`user@host`) / LNURL (bech32) / HTTPS LNURL
+ *   4. Ark address
+ *   5. On-chain Bitcoin address
  */
 function detectSend(raw: string): SendTarget {
   const s = (raw || '').trim()
@@ -297,9 +303,16 @@ function detectSend(raw: string): SendTarget {
     if (addr) return { kind: 'onchain', amountSats, address: addr }
     return { kind: 'unknown', amountSats: 0, address: '' }
   }
-  if (/^ln(bc|tb|bcrt|bs)/i.test(s)) {
-    return { kind: 'lightning', amountSats: invoiceSats(s), address: s }
+  // BOLT11 — preserve as-is; if the input has a `lightning:` prefix, strip it
+  // so the parser sees the raw invoice.
+  const lnStripped = s.replace(/^lightning:/i, '').trim()
+  if (/^ln(bc|tb|bcrt|bs)/i.test(lnStripped)) {
+    return { kind: 'lightning', amountSats: invoiceSats(lnStripped), address: lnStripped }
   }
+  // Lightning Address / LNURL-pay — `user@host`, `LNURL1...`, or `https://...`.
+  // We don't resolve here (network call); the send flow does it on click.
+  const lnurl = detectLnurlInput(s)
+  if (lnurl) return { kind: 'lnurl', amountSats: 0, address: lnurl.raw }
   if (isValidArkAddress(s)) {
     return { kind: 'ark', amountSats: 0, address: s }
   }
@@ -497,25 +510,31 @@ export default defineComponent({
 
     const sendDetected = computed<SendTarget>(() => detectSend(sendInput.value))
     const sendNeedsAmount = computed(() =>
-      sendDetected.value.kind === 'ark' || sendDetected.value.kind === 'onchain',
+      sendDetected.value.kind === 'ark' ||
+      sendDetected.value.kind === 'onchain' ||
+      sendDetected.value.kind === 'lnurl',
     )
     const sendKindLabel = computed(() => {
       switch (sendDetected.value.kind) {
-        case 'lightning': return '⚡ Lightning'
+        case 'lightning': return '⚡ Lightning invoice'
+        case 'lnurl': return '⚡ Lightning address'
         case 'ark': return 'Ark'
         case 'onchain': return 'On-chain'
         case 'unknown': return 'Unrecognized'
         default: return ''
       }
     })
-    const sendButtonLabel = computed(() =>
-      sendDetected.value.kind === 'lightning' ? 'Pay Invoice' : 'Send',
-    )
+    const sendButtonLabel = computed(() => {
+      const k = sendDetected.value.kind
+      if (k === 'lightning') return 'Pay Invoice'
+      if (k === 'lnurl') return 'Pay Lightning Address'
+      return 'Send'
+    })
     const canSend = computed(() => {
       if (!ready.value || sendLoading.value) return false
       const d = sendDetected.value
       if (d.kind === 'lightning') return d.amountSats > 0
-      if (d.kind === 'ark' || d.kind === 'onchain') return !!sendAmount.value && sendAmount.value > 0
+      if (d.kind === 'ark' || d.kind === 'onchain' || d.kind === 'lnurl') return !!sendAmount.value && sendAmount.value > 0
       return false
     })
 
@@ -529,9 +548,23 @@ export default defineComponent({
       if (!canSend.value) return
       sendLoading.value = true
       sendStatus.value = 'pending'
-      sendStatusText.value = d.kind === 'lightning' ? 'Paying via Lightning…' : 'Sending…'
+      sendStatusText.value =
+        d.kind === 'lightning' ? 'Paying via Lightning…' :
+        d.kind === 'lnurl' ? 'Resolving Lightning address…' :
+        'Sending…'
       try {
-        if (d.kind === 'lightning') {
+        if (d.kind === 'lnurl') {
+          // LNURL-pay: hit the recipient's endpoint, get a BOLT11 for the
+          // amount we want, then send via the same Boltz Ark→LN swap as a
+          // pasted invoice. The "Resolving…" → "Paying…" transition gives
+          // the user feedback during the extra HTTP roundtrip.
+          const input = detectLnurlInput(d.address)
+          if (!input) throw new Error('Could not parse Lightning address')
+          const { invoice } = await resolveLnurlToInvoice(input, sendAmount.value as number)
+          sendStatusText.value = 'Paying via Lightning…'
+          const result = await doLnWithdraw(invoice)
+          sendStatusText.value = `Paid! Preimage ${result.preimage.slice(0, 16)}…`
+        } else if (d.kind === 'lightning') {
           const result = await doLnWithdraw(d.address)
           sendStatusText.value = `Paid! Preimage ${result.preimage.slice(0, 16)}…`
         } else {

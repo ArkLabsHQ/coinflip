@@ -68,7 +68,7 @@ import {
   type IndexerProvider,
 } from '@arkade-os/sdk'
 import { hashSecret, networkHrpFromArkInfo, ARK_SERVER_URL } from './house-wallet.js'
-import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, BetExceedsCapacityError, KeyedMutex, outpointKey, pickEscrowVtxo, houseVtxoCache } from './vtxo-pool.js'
+import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, BetExceedsCapacityError, KeyedMutex, outpointKey, pickEscrowVtxos, houseVtxoCache } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import { loadEmulatorConfig } from './emulator.js'
 import type { GameRow } from './repositories/types.js'
@@ -194,14 +194,22 @@ interface TrustlessState {
    */
   houseEscrow?: Outpoint
   /**
-   * The pre-selected house VTXO outpoint to consume when funding the
+   * The pre-selected house VTXO outpoints to consume when funding the
    * house escrow at /commit. Reserved under `selectionMutex` at /play, so
-   * concurrent plays can't pick it; persisted so `rebuildReservations` can
-   * restore the reservation after a restart. Holds liability=houseStake
-   * exactly — the VTXO's full value may be larger (change goes back to the
-   * house wallet at funding time). Absent for legacy games (≤ 0.3.4) where
-   * /play funded eagerly and wrote `houseEscrow` directly.
+   * concurrent plays can't pick them; persisted so `rebuildReservations`
+   * can restore the reservation after a restart. Multi-input (since
+   * v0.3.6) lets large bets compose from several smaller VTXOs without
+   * needing a single covering input. Holds liability = houseStake exactly;
+   * the sum of the VTXOs may be larger (change goes back to the house
+   * wallet at funding time).
+   *
+   * Backwards-compat with v0.3.5 (single-outpoint shape `houseVtxoOutpoint`):
+   * code that reads this MUST also fall back to the legacy field via the
+   * `readReservedHouseVtxos()` helper.
    */
+  houseVtxoOutpoints?: { txid: string; vout: number; value: number }[]
+  /** Legacy v0.3.5 single-outpoint field. Read-only at v0.3.6+; new rows
+   *  write `houseVtxoOutpoints` (array) instead. */
   houseVtxoOutpoint?: { txid: string; vout: number; value: number }
   /**
    * The player's escrow outpoint, persisted at resolve. Lets a retried
@@ -413,25 +421,55 @@ function houseVtxoToInput(v: ExtendedVirtualCoin): ArkTxInput {
 }
 
 /**
- * Escrow `amount` from a PRE-SELECTED house VTXO into the escrow address
- * (single-party). The caller picks + reserves `candidate` under the selection
- * mutex so concurrent plays never escrow from the same VTXO; the actual send
- * runs outside the mutex so escrows for distinct VTXOs proceed in parallel.
+ * Read the reserved house VTXO outpoints from persisted state, honouring
+ * the v0.3.5 → v0.3.6 schema transition: returns the new array shape if
+ * present, else wraps the legacy single-outpoint field as a 1-element
+ * array, else an empty array (eagerly-funded games at upgrade time skip
+ * this path entirely via the `state.houseEscrow` check).
+ */
+function readReservedHouseVtxos(state: TrustlessState): { txid: string; vout: number; value: number }[] {
+  if (state.houseVtxoOutpoints && state.houseVtxoOutpoints.length > 0) return state.houseVtxoOutpoints
+  if (state.houseVtxoOutpoint) return [state.houseVtxoOutpoint]
+  return []
+}
+
+/**
+ * Escrow `amount` from one or more PRE-SELECTED house VTXOs into the
+ * escrow address (single-party, multi-input). The caller picks + reserves
+ * `candidates` under the selection mutex so concurrent plays never escrow
+ * from the same VTXOs; the actual send runs outside the mutex so escrows
+ * for distinct VTXO sets proceed in parallel. A single change output goes
+ * back to the house when `sum > amount`.
+ *
+ * Multi-input support (v0.3.6+) lets large bets compose from several
+ * smaller VTXOs without needing a single covering input — the bottleneck
+ * was previously the largest free VTXO, which capped concurrent high-tier
+ * bets at the count of large-enough single inputs in the pool.
  */
 async function escrowHouseStakeFrom(
   deps: AppDeps,
-  candidate: ExtendedVirtualCoin,
+  candidates: ExtendedVirtualCoin[],
   escrowPkScript: Uint8Array,
   amount: number,
 ): Promise<Outpoint> {
+  if (candidates.length === 0) {
+    throw new Error('escrowHouseStakeFrom: at least one candidate VTXO required')
+  }
+  const totalIn = candidates.reduce((sum, v) => sum + v.value, 0)
+  if (totalIn < amount) {
+    throw new Error(`escrowHouseStakeFrom: sum of inputs ${totalIn} < required amount ${amount}`)
+  }
   const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
-  const change = candidate.value - amount
+  const change = totalIn - amount
   const houseChange = ArkAddress.decode(await deps.wallet.getAddress())
   const outputs: { script: Uint8Array; amount: bigint }[] = [{ script: escrowPkScript, amount: BigInt(amount) }]
   if (change > 0) outputs.push({ script: houseChange.pkScript, amount: BigInt(change) })
 
-  const { arkTx, checkpoints } = buildOffchainTx([houseVtxoToInput(candidate)], outputs, serverUnroll)
-  const txid = await submitOffchain(deps, arkTx, checkpoints, [0])
+  const inputs = candidates.map(houseVtxoToInput)
+  const { arkTx, checkpoints } = buildOffchainTx(inputs, outputs, serverUnroll)
+  // Sign every input — submitOffchain handles a list of indices.
+  const signIndices = candidates.map((_, i) => i)
+  const txid = await submitOffchain(deps, arkTx, checkpoints, signIndices)
   return { txid, vout: 0, value: amount }
 }
 
@@ -461,32 +499,37 @@ async function fundHouseEscrowOnce(
 ): Promise<{ outpoint: Outpoint; mutated: boolean }> {
   // Already funded — re-entrant /commit after a transient failure path.
   if (state.houseEscrow) return { outpoint: state.houseEscrow, mutated: false }
-  if (!state.houseVtxoOutpoint) {
+  const want = readReservedHouseVtxos(state)
+  if (want.length === 0) {
     throw new Error(
-      `Game ${gameId} has neither houseEscrow nor houseVtxoOutpoint — corrupt state`,
+      `Game ${gameId} has neither houseEscrow nor reserved house VTXOs — corrupt state`,
     )
   }
-  const want = state.houseVtxoOutpoint
   const live = await deps.wallet.getVtxos()
-  const reserved = live.find((v) => v.txid === want.txid && v.vout === want.vout)
-  if (!reserved) {
-    throw new Error(
-      `Reserved house VTXO ${want.txid}:${want.vout} no longer present in the house wallet ` +
-      `(possible double-spend, wallet resync, or pool maintenance — retry the bet)`,
-    )
-  }
-  if (reserved.value !== want.value) {
-    // VTXO IS the same outpoint but with a different value — extremely unusual,
-    // would indicate state corruption. Fail loudly rather than spend the wrong thing.
-    throw new Error(
-      `Reserved house VTXO ${want.txid}:${want.vout} value mismatch: ` +
-      `state recorded ${want.value} sats, wallet sees ${reserved.value} sats`,
-    )
+  const reservedVtxos: ExtendedVirtualCoin[] = []
+  for (const w of want) {
+    const match = live.find((v) => v.txid === w.txid && v.vout === w.vout)
+    if (!match) {
+      throw new Error(
+        `Reserved house VTXO ${w.txid}:${w.vout} no longer present in the house wallet ` +
+        `(possible double-spend, wallet resync, or pool maintenance — retry the bet)`,
+      )
+    }
+    if (match.value !== w.value) {
+      throw new Error(
+        `Reserved house VTXO ${w.txid}:${w.vout} value mismatch: ` +
+        `state recorded ${w.value} sats, wallet sees ${match.value} sats`,
+      )
+    }
+    reservedVtxos.push(match)
   }
   const houseStake = state.arkadeForfeit.houseStake
-  const outpoint = await escrowHouseStakeFrom(deps, reserved, escrowPkScript, houseStake)
-  houseVtxoCache.removeOutpoint(reserved.txid, reserved.vout)
-  console.log(`[lazy-fund] game ${gameId} → house escrow funded at /commit: ${outpoint.txid}:${outpoint.vout} (${outpoint.value} sats)`)
+  const outpoint = await escrowHouseStakeFrom(deps, reservedVtxos, escrowPkScript, houseStake)
+  for (const v of reservedVtxos) houseVtxoCache.removeOutpoint(v.txid, v.vout)
+  console.log(
+    `[lazy-fund] game ${gameId} → house escrow funded at /commit from ${reservedVtxos.length} VTXO(s): ` +
+    `${outpoint.txid}:${outpoint.vout} (${outpoint.value} sats)`,
+  )
   return { outpoint, mutated: true }
 }
 
@@ -583,13 +626,14 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     : getPlayerEscrowAddress(game, networkHrp)).encode()
 
   const gameId = uuidv4()
-  // Pick + RESERVE a free house VTXO covering the house stake. The actual
-  // on-chain spend (`escrowHouseStakeFrom`) is DEFERRED until /commit — see
-  // `fundHouseEscrowOnce()`. This means a player who never funds their own
-  // escrow leaves NO on-chain house footprint, so no orphan recovery needed
-  // and no bankroll fragmentation. The reservation alone guarantees the
-  // VTXO will still be available when /commit asks for it.
-  let candidate!: ExtendedVirtualCoin
+  // Pick + RESERVE one or more free house VTXOs that sum to ≥ houseStake.
+  // The actual on-chain spend (`escrowHouseStakeFrom`) is DEFERRED until
+  // /commit — see `fundHouseEscrowOnce()`. This means a player who never
+  // funds their own escrow leaves NO on-chain house footprint, so no orphan
+  // recovery needed and no bankroll fragmentation. Multi-input support
+  // (v0.3.6+) lets large bets compose from several smaller VTXOs without
+  // needing a single covering input.
+  let candidates!: ExtendedVirtualCoin[]
   // `available` = settled + preconfirmed, exactly what wallet.getBalance()
   // returns, derived from the VTXO list so one snapshot serves both the
   // liability check and the escrow selection.
@@ -603,20 +647,22 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   // before the mutex so a cache-miss refresh can't serialize concurrent plays.
   let vtxos = await houseVtxoCache.get(deps)
   await selectionMutex.runExclusive(async () => {
-    // Pick a FREE, dust-safe VTXO and reserve ITS OUTPOINT (not just liability):
-    // the reservation excludes it from every other play's selection even before
-    // this spend propagates to getVtxos(), so two plays can never escrow from
-    // the same VTXO. No fallback to a reserved VTXO — pool exhaustion surfaces a
+    // Pick a SET of free, dust-safe VTXOs that sum to ≥ houseStake and
+    // reserve ALL their outpoints. The reservation excludes them from every
+    // other play's selection so concurrent plays never escrow from the
+    // same VTXO. Multi-input fallback (pickEscrowVtxos) lets a high-stake
+    // bet compose from several smaller VTXOs when no single covering input
+    // exists. No fallback to a reserved VTXO — pool exhaustion surfaces a
     // retryable "busy" rather than risking a double-spend.
     let available = availableOf(vtxos)
-    let picked = pickEscrowVtxo(freeHouseVtxos(vtxos), houseStake, dust)
+    let picked = pickEscrowVtxos(freeHouseVtxos(vtxos), houseStake, dust)
     // A stale snapshot can understate the balance or hide free VTXOs (e.g. right
     // after a settlement). On a liability or selection miss, refresh once and
     // retry before declaring the house busy.
     if (!picked || reservations.totalLiability() + houseStake > available) {
       vtxos = await houseVtxoCache.refresh(deps)
       available = availableOf(vtxos)
-      picked = pickEscrowVtxo(freeHouseVtxos(vtxos), houseStake, dust)
+      picked = pickEscrowVtxos(freeHouseVtxos(vtxos), houseStake, dust)
     }
     // Distinguish a permanently-unaffordable bet (house stake exceeds the
     // house's TOTAL spendable balance — retrying can't help; the client should
@@ -628,21 +674,22 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     if (reservations.totalLiability() + houseStake > available) {
       throw new HouseBusyError(`House is busy (liability ${reservations.totalLiability()} + ${houseStake} > ${available}). Try again shortly.`)
     }
-    if (!picked) {
-      throw new HouseBusyError(`House has no free dust-safe VTXO covering ${houseStake} sats (pool may need refragmenting). Try again shortly.`)
+    if (!picked || picked.length === 0) {
+      throw new HouseBusyError(`House has no free dust-safe VTXO set covering ${houseStake} sats (pool may need refragmenting). Try again shortly.`)
     }
-    candidate = picked
-    reservations.reserve(gameId, [outpointKey(picked.txid, picked.vout)], houseStake)
+    candidates = picked
+    reservations.reserve(gameId, picked.map((v) => outpointKey(v.txid, v.vout)), houseStake)
   })
-  // Committed to ALLOCATING `candidate` to this game: drop it from the cached
-  // snapshot so a later play can't re-select it before the actual on-chain
-  // spend at /commit. The reservation guards it cross-process; this drop just
-  // keeps the cache consistent.
-  houseVtxoCache.removeOutpoint(candidate.txid, candidate.vout)
+  // Committed to ALLOCATING `candidates` to this game: drop each from the
+  // cached snapshot so a later play can't re-select them before the actual
+  // on-chain spend at /commit. The reservation guards them cross-process;
+  // this drop just keeps the cache consistent.
+  for (const c of candidates) houseVtxoCache.removeOutpoint(c.txid, c.vout)
 
-  // Persist the reserved VTXO outpoint so /commit (and rebuildReservations
-  // after a restart) can find it later without re-running the selection mutex.
-  const reservedHouseVtxo = { txid: candidate.txid, vout: candidate.vout, value: candidate.value }
+  // Persist the reserved VTXO outpoints so /commit (and rebuildReservations
+  // after a restart) can find them later without re-running the selection
+  // mutex. Multi-input (v0.3.6+) shape.
+  const reservedHouseVtxos = candidates.map((c) => ({ txid: c.txid, vout: c.vout, value: c.value }))
 
   // Persist the arkade-forfeit pin so /commit, /refund, /forfeit, and
   // recovery rebuilds derive the EXACT same escrow taproot address. NOTE:
@@ -653,7 +700,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     contractVersion: version,
     finalExpiration,
     setupExpiration,
-    houseVtxoOutpoint: reservedHouseVtxo,
+    houseVtxoOutpoints: reservedHouseVtxos,
     ...odds,
     arkadeForfeit: {
       emulatorPubkeyHex: hex.encode(arkadeForfeit.emulatorPubkey),

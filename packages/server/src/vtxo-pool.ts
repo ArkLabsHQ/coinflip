@@ -315,37 +315,120 @@ export function pickEscrowVtxo<T extends { value: number }>(
 }
 
 /**
- * Pool target: how many distinct spendable VTXOs we try to keep so
- * concurrent games can each grab their own. Configurable via env.
+ * Pick a SET of house VTXOs whose combined value covers `amount`, for use
+ * when no single VTXO is large enough. Prefers the single-input path first
+ * (via `pickEscrowVtxo`) since multi-input txs use more witness bytes and
+ * more emulator-validation work. Falls back to greedy largest-first
+ * accumulation when no single VTXO is sufficient — picks the LARGEST VTXOs
+ * first to keep input count low, then trims trailing duplicates that
+ * over-cover. Returns undefined if even the SUM of every free VTXO doesn't
+ * cover `amount` (caller surfaces a clear "exceeds bankroll" error).
+ *
+ * Caller-supplied `maxInputs` bounds the input count — Ark txs have a
+ * weight cap and many emulator paths walk inputs per validation. The
+ * default of 8 is plenty for any realistic bet/bankroll combination.
+ */
+export function pickEscrowVtxos<T extends { value: number }>(
+  candidates: T[],
+  amount: number,
+  dust: number,
+  maxInputs: number = 8,
+): T[] | undefined {
+  // Fast path: a single VTXO covers it.
+  const single = pickEscrowVtxo(candidates, amount, dust)
+  if (single) return [single]
+
+  // Greedy largest-first accumulation, then trim from the back if we've
+  // over-collected (skipping smaller VTXOs that we wouldn't have needed).
+  const sorted = [...candidates].sort((a, b) => b.value - a.value)
+  const picked: T[] = []
+  let total = 0
+  for (const v of sorted) {
+    if (picked.length >= maxInputs) break
+    picked.push(v)
+    total += v.value
+    if (total >= amount) break
+  }
+  if (total < amount) return undefined
+
+  // Try to drop trailing items that aren't needed (the last one in particular
+  // might be way oversize for what we needed). This is just a tidy-up; the
+  // change output absorbs any over-collection regardless.
+  while (picked.length > 1 && total - picked[picked.length - 1].value >= amount) {
+    total -= picked[picked.length - 1].value
+    picked.pop()
+  }
+
+  // Sub-dust-change avoidance: if we're between `amount` and `amount + dust`,
+  // it produces an unspendable change VTXO. Same fallback semantics as the
+  // single-input case — we accept the sub-dust change rather than strand the
+  // game (the change is a separate output and doesn't affect the escrow).
+  return picked
+}
+
+/**
+ * Pool floor: minimum number of free VTXOs we always try to keep around.
+ * Below this, splitting fires aggressively. Configurable via env.
  */
 export const POOL_TARGET_COUNT = Number(process.env.HOUSE_VTXO_POOL_TARGET || 8)
 
 /**
- * Ensure the house holds at least `POOL_TARGET_COUNT` distinct spendable
- * VTXOs by fanning the largest free VTXO(s) out into `pieceSize`-sized
- * pieces via a self-send. No-op when the pool is already healthy or the
- * free balance is too small to split meaningfully.
+ * Pool ceiling: hard cap on how many free VTXOs we'll create. The split
+ * step refuses to mint more than this so a giant bankroll doesn't fragment
+ * into thousands of tiny pieces. Default 64; configurable via env.
+ */
+export const POOL_MAX_COUNT = Number(process.env.HOUSE_VTXO_POOL_MAX || 64)
+
+/**
+ * Maximum number of `send` recipients per split — Ark/arkd has a tx-size
+ * limit (maxTxWeight). One self-send tx with hundreds of outputs would
+ * exceed it. Split aggressively but across multiple txs if needed.
+ */
+const MAX_SPLIT_OUTPUTS_PER_TX = 16
+
+/**
+ * Pre-emptively shard the house bankroll into as many usable `pieceSize`
+ * VTXOs as the balance affords (capped at `POOL_MAX_COUNT`). When the
+ * existing free count is below `POOL_MAX_COUNT` and the wallet has at
+ * least one extra `pieceSize` of headroom, this fires a self-send that
+ * mints up to `MAX_SPLIT_OUTPUTS_PER_TX` new pieces. The background
+ * timer reruns until the pool reaches `POOL_MAX_COUNT` or the bankroll
+ * is exhausted.
+ *
+ * Splitting is no longer gated by `POOL_TARGET_COUNT` — the target is a
+ * FLOOR, not a ceiling. Concurrent games each need their own outpoint;
+ * fragmenting eagerly is the cheapest way to support more parallelism
+ * AND larger bets composed of multiple inputs (see fundHouseEscrowOnce
+ * for multi-input funding).
  *
  * Returns the number of pieces created (0 if it didn't split).
  */
 export async function ensureHouseVtxoPool(
   deps: AppDeps,
-  opts: { targetCount?: number; pieceSize: number } = { pieceSize: 50_000 },
+  opts: { targetCount?: number; maxCount?: number; pieceSize: number } = { pieceSize: 50_000 },
 ): Promise<number> {
   const targetCount = opts.targetCount ?? POOL_TARGET_COUNT
+  const maxCount = opts.maxCount ?? POOL_MAX_COUNT
   const pieceSize = opts.pieceSize
 
   // Refresh through the cache so the background tick doubles as the hot path's
   // snapshot warmer (a fresh, full getVtxos() either way).
   const all = await houseVtxoCache.refresh(deps)
   const free = freeHouseVtxos(all)
-  if (free.length >= targetCount) return 0
+
+  // Hard ceiling: never exceed POOL_MAX_COUNT free pieces. Beyond that, the
+  // splitting cost outweighs the marginal concurrency benefit.
+  if (free.length >= maxCount) return 0
 
   const freeTotal = free.reduce((sum, v) => sum + v.value, 0)
-  // Leave a piece worth of headroom for change + fees.
+  // Leave one piece worth of headroom for change + fees.
   const piecesAffordable = Math.floor(freeTotal / pieceSize) - 1
-  const piecesNeeded = targetCount - free.length
-  const piecesToCreate = Math.min(piecesNeeded, piecesAffordable)
+  // Always try to push toward the MAX, not just the floor. If the pool is
+  // BELOW the floor, the split is "must" (game throughput depends on it);
+  // ABOVE the floor it's "nice to have" (better future-game throughput) and
+  // still fires as long as we can afford it.
+  const headroom = maxCount - free.length
+  const piecesToCreate = Math.min(headroom, piecesAffordable, MAX_SPLIT_OUTPUTS_PER_TX)
   if (piecesToCreate < 1) return 0
 
   const ownAddress = await deps.wallet.getAddress()
@@ -359,7 +442,8 @@ export async function ensureHouseVtxoPool(
     // The split spent + created house VTXOs; drop the stale snapshot so the
     // next access re-syncs and sees the new pieces.
     houseVtxoCache.invalidate()
-    console.log(`[house pool] split into ${piecesToCreate} new ${pieceSize}-sat VTXO(s)`)
+    const below = free.length < targetCount ? ' (below floor)' : ''
+    console.log(`[house pool] split into ${piecesToCreate} new ${pieceSize}-sat VTXO(s) — ${free.length}/${maxCount} → ${free.length + piecesToCreate}/${maxCount}${below}`)
     return piecesToCreate
   } catch (err) {
     console.warn('[house pool] split failed:', err instanceof Error ? err.message : err)
@@ -422,35 +506,46 @@ export async function rebuildReservations(deps: AppDeps): Promise<number> {
         reservations.reserve(g.id, parsed as string[], maxLiabilityForTier(g.tier))
         restored++
       }
-    } else if (parsed && typeof parsed === 'object' && ('houseEscrow' in parsed || 'houseVtxoOutpoint' in parsed)) {
+    } else if (parsed && typeof parsed === 'object' && (
+      'houseEscrow' in parsed || 'houseVtxoOutpoint' in parsed || 'houseVtxoOutpoints' in parsed
+    )) {
       // Trustless per-party flow. Two sub-cases depending on whether the
       // house has lazy-funded yet:
       //
-      //   1. `houseVtxoOutpoint` set, `houseEscrow` unset (v0.3.5+ pre-/commit):
-      //      The reserved VTXO is STILL LIVE in the wallet — re-reserve its
-      //      specific outpoint so no concurrent /play picks it. Liability =
-      //      the house stake (NOT the VTXO's full value, since change goes
+      //   1. `houseVtxoOutpoints` (v0.3.6+) or `houseVtxoOutpoint` (v0.3.5)
+      //      set, `houseEscrow` unset — pre-/commit lazy-fund state. The
+      //      reserved VTXO(s) are STILL LIVE in the wallet; re-reserve
+      //      their specific outpoints so no concurrent /play picks them.
+      //      Liability = houseStake (NOT the VTXO sum, since change goes
       //      back to the house at funding time).
       //
       //   2. `houseEscrow` set (post-/commit fund, or legacy ≤0.3.4 /play
-      //      flow): the reserved VTXO is already spent into the escrow. No
-      //      live house VTXO to protect, but the in-flight liability must
-      //      still be restored or concurrent post-restart plays could
-      //      over-commit. Liability = houseEscrow.value.
+      //      flow): the reserved VTXOs are already spent into the escrow.
+      //      No live house VTXO to protect, but the in-flight liability
+      //      must still be restored or concurrent post-restart plays
+      //      could over-commit. Liability = houseEscrow.value.
       const o = parsed as {
         houseEscrow?: { value?: number }
         houseVtxoOutpoint?: { txid?: string; vout?: number }
+        houseVtxoOutpoints?: { txid?: string; vout?: number }[]
         arkadeForfeit?: { houseStake?: number }
       }
       let reservedOutpoints: string[] = []
       let liability = 0
       if (o.houseEscrow && typeof o.houseEscrow.value === 'number' && o.houseEscrow.value > 0) {
         liability = o.houseEscrow.value
-      } else if (o.houseVtxoOutpoint && typeof o.houseVtxoOutpoint.txid === 'string' && typeof o.houseVtxoOutpoint.vout === 'number') {
-        reservedOutpoints = [outpointKey(o.houseVtxoOutpoint.txid, o.houseVtxoOutpoint.vout)]
-        liability = o.arkadeForfeit?.houseStake ?? g.tier
       } else {
-        liability = g.tier
+        // Lazy-fund: collect reserved outpoints from either the v0.3.6 array
+        // shape or the v0.3.5 single-field shape (whichever is present).
+        const outpoints = o.houseVtxoOutpoints && o.houseVtxoOutpoints.length > 0
+          ? o.houseVtxoOutpoints
+          : (o.houseVtxoOutpoint ? [o.houseVtxoOutpoint] : [])
+        for (const op of outpoints) {
+          if (typeof op.txid === 'string' && typeof op.vout === 'number') {
+            reservedOutpoints.push(outpointKey(op.txid, op.vout))
+          }
+        }
+        liability = o.arkadeForfeit?.houseStake ?? g.tier
       }
       reservations.reserve(g.id, reservedOutpoints, liability)
       restored++

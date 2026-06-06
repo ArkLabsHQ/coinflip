@@ -688,6 +688,10 @@ export default defineComponent({
   border: 1px solid var(--border-light);
   border-radius: 999px;
   padding: 3px;
+  /* Let the chips shrink when the HUD has to compete with the pill on
+     narrow phones — otherwise the natural width pushes hud-right off-screen. */
+  min-width: 0;
+  flex-shrink: 1;
 }
 .skin-chip {
   border: none;
@@ -1162,5 +1166,36 @@ export default defineComponent({
   .flip-btn { padding: 14px 28px; font-size: 0.95rem; }
   .streak-badge { top: 100px; right: 10px; }
   .result-slab.win .slab-amount { font-size: 1.8rem; }
+
+  /* Tight HUD: at <520px the skin chips + pnl pill + 2 round buttons
+     together exceeded the viewport, pushing the right side off-screen.
+     Shrink chip padding, drop the pnl 'SESSION' label, hide help button
+     (still reachable via /how-it-works directly). */
+  .play-page { padding: 48px 12px 80px; }
+  .skin-chip { padding: 5px 8px; font-size: 1rem; }
+  .pnl-pill { padding: 5px 10px; font-size: 0.8rem; gap: 6px; }
+  .pnl-scope { display: none; }
+  .history-btn { width: 30px; height: 30px; font-size: 0.95rem; }
+}
+
+@media (max-width: 380px) {
+  /* Very narrow phones — even tighter. Cut chip padding further and drop the
+     help button entirely. */
+  .skin-chip { padding: 5px 6px; font-size: 0.95rem; }
+  .help-btn { display: none; }
+}
+
+/* Auto-chip row should always fit and wrap if it can't. The base CSS already
+   sets flex-wrap; this just lets each chip shrink past its 42px min-width on
+   narrow viewports rather than overflowing the parent. */
+@media (max-width: 520px) {
+  .auto-chip { min-width: 0; padding: 8px 2px; font-size: 0.72rem; }
+}
+
+/* Slider end labels: 'RISKIER · BIGGER PAYOUT' is borderline at 380px. Allow
+   the right end to wrap to two lines instead of clipping. */
+@media (max-width: 420px) {
+  .odds-ends { font-size: 0.54rem; }
+  .odds-ends span:last-child { text-align: right; }
 }
 </style>

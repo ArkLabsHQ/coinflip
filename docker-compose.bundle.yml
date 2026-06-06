@@ -8,10 +8,14 @@
 # (gitignored). Defaults point at public mutinynet.
 services:
   coinflip:
+    # Pull the published image by default (works without a local checkout).
+    # Override with `COINFLIP_IMAGE_TAG=v0.3.0` to pin a specific release, or
+    # build locally with `docker compose -f docker-compose.bundle.yml build`
+    # (the build: section below is the source of truth for the published image).
+    image: ghcr.io/arklabshq/coinflip-bundle:${COINFLIP_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile.bundle
-    image: coinflip-bundle
     ports:
       - "3000:3000" # USER side: game UI + /api
       - "3002:3002" # ADMIN side: dashboard + admin API — keep this firewalled / behind an auth proxy

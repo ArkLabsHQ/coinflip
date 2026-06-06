@@ -36,6 +36,7 @@
 export * as covenants from './covenants'
 export * as predicates from './predicates'
 export * as emulator from './emulator'
+export * as packets from './packets'
 
 // Re-export the most-used arkade-script primitives directly so consumers
 // don't need to hunt across @arkade-os/sdk for them.

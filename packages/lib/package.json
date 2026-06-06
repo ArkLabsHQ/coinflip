@@ -1,6 +1,6 @@
 {
   "name": "arkade-coinflip",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Trustless coinflip betting protocol for Ark",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -15,6 +15,11 @@
       "types": "./dist/contract.d.ts",
       "import": "./dist/contract.js",
       "require": "./dist/contract.js"
+    },
+    "./arkade-win": {
+      "types": "./dist/arkade-win.d.ts",
+      "import": "./dist/arkade-win.js",
+      "require": "./dist/arkade-win.js"
     },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"

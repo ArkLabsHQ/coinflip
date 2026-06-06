@@ -85,6 +85,8 @@ export { contractHandlers } from '@arkade-os/sdk'
 export {
   COINFLIP_ESCROW_TYPE,
   CoinflipEscrowContractHandler,
+  COINFLIP_ESCROW_V3_TYPE,
+  CoinflipEscrowV3ContractHandler,
   registerCoinflipContracts,
   type CoinflipContractRegistry,
 } from './contract'
@@ -101,3 +103,37 @@ export {
   encodeOutputIndexWitness,
   addEmulatorPacket,
 } from './arkade-forfeit'
+
+// Arkade-script win-condition (v0.3) — see arkade-win.ts module header.
+export {
+  buildVariableOddsWinPredicate,
+  buildVariableOddsWinArkadeScript,
+  commitDigit,
+  digitHash,
+  type DigitCommit,
+} from './arkade-win'
+
+// v0.3 escrow taptree — see script-v3.ts module header.
+export {
+  CoinflipEscrowScriptV3,
+  type CoinflipEscrowOptionsV3,
+} from './script-v3'
+
+// v0.3 transaction-building helpers — see transactions-v3.ts module header.
+export {
+  getPlayerEscrowScriptV3,
+  getHouseEscrowScriptV3,
+  getPlayerEscrowAddressV3,
+  getHouseEscrowAddressV3,
+  getPlayerEscrowOptionsV3,
+  getHouseEscrowOptionsV3,
+  buildCovenantSweepTransactionV3,
+  buildRefundTransactionV3,
+  buildForfeitClaimTransactionV3,
+  determineWinnerV3,
+  computeRollV3,
+  type EscrowInputV3,
+  type CovenantSweepArgsV3,
+  type RefundArgsV3,
+  type ForfeitClaimArgsV3,
+} from './transactions-v3'

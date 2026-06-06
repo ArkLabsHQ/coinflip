@@ -26,6 +26,11 @@ import {
   type CoinflipEscrowOptions,
 } from './script'
 
+import {
+  CoinflipEscrowScriptV3,
+  type CoinflipEscrowOptionsV3,
+} from './script-v3'
+
 export const COINFLIP_ESCROW_TYPE = 'coinflip-escrow'
 
 /** All eight leaves of the escrow taptree, in tree order. */
@@ -163,4 +168,111 @@ export function registerCoinflipContracts(
   if (!registry.has(COINFLIP_ESCROW_TYPE)) {
     registry.register(CoinflipEscrowContractHandler)
   }
+  if (!registry.has(COINFLIP_ESCROW_V3_TYPE)) {
+    registry.register(CoinflipEscrowV3ContractHandler)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.3 escrow contract handler — packet-borne reveals, 10-leaf taptree.
+// ─────────────────────────────────────────────────────────────────────────
+
+export const COINFLIP_ESCROW_V3_TYPE = 'coinflip-escrow-v3'
+
+export const CoinflipEscrowV3ContractHandler: ContractHandler<
+  CoinflipEscrowOptionsV3,
+  CoinflipEscrowScriptV3
+> = {
+  type: COINFLIP_ESCROW_V3_TYPE,
+
+  createScript(params) {
+    return new CoinflipEscrowScriptV3(this.deserializeParams(params))
+  },
+
+  serializeParams(p) {
+    // v3 has mandatory variable-odds (n=2 is the coin special case),
+    // so oddsN/oddsTarget/oddsLo are always present (not flagged optional
+    // like v0.2.x's CoinflipEscrowOptions).
+    return {
+      creator: hex.encode(p.creatorPubkey),
+      player: hex.encode(p.playerPubkey),
+      server: hex.encode(p.serverPubkey),
+      creatorHash: hex.encode(p.creatorHash),
+      playerHash: hex.encode(p.playerHash),
+      finalExpiration: p.finalExpiration.toString(),
+      refund: hex.encode(p.refundPubkey),
+      exitDelay: p.exitDelay.toString(),
+      oddsN: p.oddsN.toString(),
+      oddsTarget: p.oddsTarget.toString(),
+      oddsLo: p.oddsLo.toString(),
+      af_emulator: hex.encode(p.arkadeForfeit.emulatorPubkey),
+      af_playerPayout: hex.encode(p.arkadeForfeit.playerPayoutPkScript),
+      af_housePayout: hex.encode(p.arkadeForfeit.housePayoutPkScript),
+      af_playerStake: p.arkadeForfeit.playerStake.toString(),
+      af_houseStake: p.arkadeForfeit.houseStake.toString(),
+    }
+  },
+
+  deserializeParams(p) {
+    return {
+      creatorPubkey: hex.decode(p.creator),
+      playerPubkey: hex.decode(p.player),
+      serverPubkey: hex.decode(p.server),
+      creatorHash: hex.decode(p.creatorHash),
+      playerHash: hex.decode(p.playerHash),
+      finalExpiration: BigInt(p.finalExpiration),
+      refundPubkey: hex.decode(p.refund),
+      exitDelay: BigInt(p.exitDelay),
+      oddsN: Number(p.oddsN),
+      oddsTarget: Number(p.oddsTarget),
+      oddsLo: Number(p.oddsLo),
+      arkadeForfeit: {
+        emulatorPubkey: hex.decode(p.af_emulator),
+        playerPayoutPkScript: hex.decode(p.af_playerPayout),
+        housePayoutPkScript: hex.decode(p.af_housePayout),
+        playerStake: BigInt(p.af_playerStake),
+        houseStake: BigInt(p.af_houseStake),
+      },
+    }
+  },
+
+  selectPath() {
+    // Same rationale as v0.2.x: every spend (covenant win, refund, R1 forfeit,
+    // cooperative spend) is built directly in transactions.ts. We register the
+    // escrow only so the ContractManager/ContractWatcher can TRACK it and emit
+    // vtxo_received / vtxo_spent.
+    return null
+  },
+
+  getAllSpendingPaths(script) {
+    return [
+      { leaf: script.playerWinCovenant() },
+      { leaf: script.creatorWinCovenant() },
+      { leaf: script.playerForfeit() },
+      { leaf: script.refund() },
+      { leaf: script.playerWinExit() },
+      { leaf: script.creatorWinExit() },
+      { leaf: script.playerForfeitExit() },
+      { leaf: script.refundExit() },
+      { leaf: script.cooperativeSpend() },
+      { leaf: script.cooperativeSpendExit() },
+    ]
+  },
+
+  getSpendablePaths(script) {
+    // Same as getAllSpendingPaths — coinflip's flow builds spends directly,
+    // so we never use this to gate on timelocks; just return every leaf.
+    return [
+      { leaf: script.playerWinCovenant() },
+      { leaf: script.creatorWinCovenant() },
+      { leaf: script.playerForfeit() },
+      { leaf: script.refund() },
+      { leaf: script.playerWinExit() },
+      { leaf: script.creatorWinExit() },
+      { leaf: script.playerForfeitExit() },
+      { leaf: script.refundExit() },
+      { leaf: script.cooperativeSpend() },
+      { leaf: script.cooperativeSpendExit() },
+    ]
+  },
 }

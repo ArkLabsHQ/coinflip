@@ -145,18 +145,19 @@ describe('registerCoinflipContracts: idempotent registration', () => {
     }
   }
 
-  it('registers the coinflip-escrow handler', () => {
+  it('registers the coinflip-escrow handler (v2) and the v3 handler', () => {
     const reg = fakeRegistry()
     registerCoinflipContracts(reg)
     expect(reg.registered.has(COINFLIP_ESCROW_TYPE)).toBe(true)
-    expect(reg.registered.size).toBe(1)
+    expect(reg.registered.has('coinflip-escrow-v3')).toBe(true)
+    expect(reg.registered.size).toBe(2)
   })
 
   it('is idempotent — calling twice does not throw or double-register', () => {
     const reg = fakeRegistry()
     registerCoinflipContracts(reg)
     expect(() => registerCoinflipContracts(reg)).not.toThrow()
-    expect(reg.registered.size).toBe(1)
+    expect(reg.registered.size).toBe(2)
   })
 })
 

@@ -29,6 +29,7 @@
         </div>
 
         <div class="diagram-card">
+          <div class="diagram-version mono">showing <span :class="['evol-pill', `evol-${evolution}`]">{{ EVOLUTION_BY[evolution].version }}</span> model</div>
           <div class="scenario-tabs" role="tablist" aria-label="Scenario">
             <button v-for="s in scenarios" :key="s.id" type="button" role="tab"
                     :aria-selected="scenario === s.id"
@@ -36,17 +37,44 @@
                     @click="scenario = s.id">{{ s.label }}</button>
           </div>
 
-          <div class="pp">
+          <!-- v0.1 — SHARED escrow: both fund one bucket -->
+          <div v-if="evolution === 'v1'" class="pp">
             <div class="pp-cols">
               <div class="pp-col">
                 <div class="pp-box you"><span class="pp-name">YOU</span><span class="pp-meta">commit + stake</span></div>
+              </div>
+              <div class="pp-col">
+                <div class="pp-box house" :class="{ ghost: scenario === 'nofund' }">
+                  <span class="pp-name">HOUSE</span>
+                  <span class="pp-meta">{{ scenario === 'nofund' ? 'no-show' : 'commit + stake' }}</span>
+                </div>
+              </div>
+            </div>
+            <span class="pp-merge">↓ setup tx ↓</span>
+            <div class="pp-box escrow shared" :class="scenario === 'nofund' ? 'empty' : 'filled'">
+              <span class="pp-name">shared escrow</span>
+              <span class="pp-meta">{{ scenario === 'nofund' ? 'half-funded · stranded risk' : 'both stakes pooled' }}</span>
+            </div>
+            <div class="pp-trigger">{{ outcome.trigger }}</div>
+            <span class="pp-merge">↓ final tx ↓</span>
+            <div class="pp-outcome" :class="outcome.kind">
+              <span class="pp-out-title">{{ outcome.title }}</span>
+              <span class="pp-out-detail">{{ outcome.detail }}</span>
+            </div>
+          </div>
+
+          <!-- v0.2 / v0.3 — PER-PARTY escrow -->
+          <div v-else class="pp">
+            <div class="pp-cols">
+              <div class="pp-col">
+                <div class="pp-box you"><span class="pp-name">YOU</span><span class="pp-meta">{{ evolution === 'v3' ? 'digit + salt commit' : 'commit + stake' }}</span></div>
                 <span class="pp-arr">↓</span>
                 <div class="pp-box escrow filled"><span class="pp-name">your escrow</span><span class="pp-meta">staked</span></div>
               </div>
               <div class="pp-col">
                 <div class="pp-box house" :class="{ ghost: scenario === 'nofund' }">
                   <span class="pp-name">HOUSE</span>
-                  <span class="pp-meta">{{ scenario === 'nofund' ? 'no-show' : 'commit + stake' }}</span>
+                  <span class="pp-meta">{{ scenario === 'nofund' ? 'no-show' : (evolution === 'v3' ? 'digit + salt commit' : 'commit + stake') }}</span>
                 </div>
                 <span class="pp-arr" :class="{ ghost: scenario === 'nofund' }">↓</span>
                 <div class="pp-box escrow" :class="scenario === 'nofund' ? 'empty' : 'filled'">
@@ -56,7 +84,10 @@
               </div>
             </div>
 
-            <div class="pp-trigger">{{ outcome.trigger }}</div>
+            <div class="pp-trigger">
+              {{ outcome.trigger }}
+              <span v-if="evolution === 'v3' && scenario === 'happy'" class="pp-trigger-sub mono">via OP_INSPECTPACKET arkade-script</span>
+            </div>
             <span class="pp-merge">↓</span>
 
             <div class="pp-outcome" :class="outcome.kind">
@@ -66,6 +97,50 @@
           </div>
 
           <p class="scenario-note">{{ outcome.note }}</p>
+          <p v-if="evolution === 'v1' && scenario === 'nofund'" class="scenario-warn">
+            ⚠ v0.1 limitation: a no-show on the shared escrow could strand your stake until either side cooperated.
+            Per-party escrows in v0.2/v0.3 fix this — each side reclaims its OWN stake unilaterally after the timeout.
+          </p>
+        </div>
+      </section>
+
+      <!-- Design evolution — three published variants of the contract -->
+      <section class="hiw-section">
+        <h2>Design evolution</h2>
+        <p class="section-intro">
+          The contract has gone through three published designs. <strong>v0.3</strong> is what's shipping now —
+          all detailed sections below describe it. The earlier variants are kept here for reference: each one
+          fixes a real flaw in the previous one.
+        </p>
+        <div class="variant-tabs evolution-tabs" role="tablist" aria-label="Design evolution">
+          <button v-for="e in EVOLUTION" :key="e.id" type="button" role="tab"
+                  :aria-selected="evolution === e.id"
+                  :class="['variant-tab', { active: evolution === e.id }]"
+                  @click="evolution = e.id">{{ e.tab }}</button>
+        </div>
+        <div class="evolution-card casino-card">
+          <div class="evolution-headline">
+            <span class="evolution-version mono">{{ EVOLUTION_BY[evolution].version }}</span>
+            <span class="evolution-title">{{ EVOLUTION_BY[evolution].title }}</span>
+            <span class="evolution-badge" :class="EVOLUTION_BY[evolution].badge.cls">
+              {{ EVOLUTION_BY[evolution].badge.label }}
+            </span>
+          </div>
+          <p class="evolution-summary">{{ EVOLUTION_BY[evolution].summary }}</p>
+          <div class="evolution-grid">
+            <div class="evolution-pane">
+              <h4 class="evolution-h">How it worked</h4>
+              <ul>
+                <li v-for="(b, i) in EVOLUTION_BY[evolution].how" :key="`how-${i}`">{{ b }}</li>
+              </ul>
+            </div>
+            <div class="evolution-pane">
+              <h4 class="evolution-h">Why we moved on</h4>
+              <ul>
+                <li v-for="(b, i) in EVOLUTION_BY[evolution].why" :key="`why-${i}`">{{ b }}</li>
+              </ul>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -223,27 +298,14 @@
 
       <!-- Flow -->
       <section class="hiw-section">
-        <h2>A game, end to end</h2>
+        <h2>A game, end to end <span class="flow-version mono"><span :class="['evol-pill', `evol-${evolution}`]">{{ EVOLUTION_BY[evolution].version }}</span></span></h2>
         <div class="flow">
-          <div class="flow-step">
-            <div class="flow-num">1</div>
-            <div class="flow-body"><h4>Play &amp; commit</h4><p>You commit your secret's hash; the house commits its own. The server returns a shared escrow address derived from both commitments.</p></div>
-          </div>
-          <div class="flow-step">
-            <div class="flow-num">2</div>
-            <div class="flow-body"><h4>Escrow the stakes</h4><p>You fund the player escrow, the house funds the house escrow — two single-party transactions into the same contract.</p></div>
-          </div>
-          <div class="flow-step">
-            <div class="flow-num">3</div>
-            <div class="flow-body"><h4>Reveal</h4><p>You send your secret to the server. Combined with the house secret, it deterministically decides the winner.</p></div>
-          </div>
-          <div class="flow-step">
-            <div class="flow-num">4</div>
-            <div class="flow-body"><h4>Covenant settlement</h4><p>The server builds one atomic sweep of <em>both</em> escrows to the winner's address and hands it to the emulator. The emulator runs the arkade script, confirms the payout matches, co-signs the <span class="mono">&lt;emu✦&gt;</span> slot, and forwards it on. <strong>The winner signs nothing.</strong></p></div>
-          </div>
-          <div class="flow-step recovery">
-            <div class="flow-num">!</div>
-            <div class="flow-body"><h4>If the operator goes dark</h4><p>Revealed but unpaid? Sweep the whole pot via <span class="mono">playerForfeit</span> after the deadline. Never revealed? <span class="mono">refund</span>. Operator censoring? Take a unilateral <span class="mono">*Exit</span> after the CSV delay.</p></div>
+          <div v-for="step in FLOW_STEPS[evolution]" :key="step.num" class="flow-step" :class="step.cls">
+            <div class="flow-num">{{ step.num }}</div>
+            <div class="flow-body">
+              <h4>{{ step.title }}</h4>
+              <p v-html="step.body"></p>
+            </div>
           </div>
         </div>
       </section>
@@ -275,6 +337,110 @@ import StepList from '@/components/StepList.vue'
 const open = ref<Record<string, boolean>>({})
 const toggle = (k: string) => { open.value = { ...open.value, [k]: !open.value[k] } }
 const condVariant = ref<'coin' | 'odds'>('coin')
+
+// ── Design evolution tabs ─────────────────────────────────────────
+//
+// Each design is a real shipped variant of the coinflip contract. The
+// tabs let a reader see WHY the protocol changed shape between versions
+// — the failure modes that motivated v2, and the script-cleanups that
+// motivated v3. v0.3 is the design every other section on this page
+// describes in detail.
+type Evolution = 'v1' | 'v2' | 'v3'
+const EVOLUTION: { id: Evolution; tab: string }[] = [
+  { id: 'v1', tab: 'v0.1 — setup/final (original)' },
+  { id: 'v2', tab: 'v0.2 — per-party covenant' },
+  { id: 'v3', tab: 'v0.3 — Arkade-Script + packets ★' },
+]
+interface EvolutionCard {
+  version: string
+  title: string
+  badge: { label: string; cls: string }
+  summary: string
+  how: string[]
+  why: string[]
+}
+const EVOLUTION_BY: Record<Evolution, EvolutionCard> = {
+  v1: {
+    version: 'v0.1',
+    title: 'Setup + final, shared escrow',
+    badge: { label: 'retired', cls: 'badge-old' },
+    summary:
+      "Two transactions per game (setup + final), with a single shared escrow funded by both sides. The earliest design — it shipped, but it had abort-theft windows that the per-party design closes.",
+    how: [
+      "A 'setup' tx put both stakes into one shared escrow address.",
+      "A 'final' tx redistributed the pot on reveal — pay-out covenant referenced the committed hashes.",
+      "Settlement and refund both touched the SHARED escrow; either side could grief the other on stall.",
+    ],
+    why: [
+      "Abort theft: if one side never funded, the other side's funds could be stranded with no clean self-refund path.",
+      "Multi-tx setup added latency and broke gracefully only on the happy path — recovery flows were complex.",
+      "Single escrow meant a server stall could leave BOTH stakes in limbo; the reveal-then-stall window paid the staller.",
+    ],
+  },
+  v2: {
+    version: 'v0.2',
+    title: 'Per-party escrow, length-encoded predicate',
+    badge: { label: 'previous default', cls: 'badge-prev' },
+    summary:
+      "Each side funds its OWN escrow into a 4-leaf Taproot tree (covenant + forfeit + refund + exit), so a no-show can NEVER touch the other side's stake. Win condition lives in Bitcoin Script and hides the random digit in the secret's BYTE LENGTH.",
+    how: [
+      'Per-funder escrow: 4 collaborative leaves (`*winCovenant`, `playerForfeit`, `refund`) + 4 CSV-gated unilateral-exit mirrors.',
+      'Win condition: `OP_SIZE` on each revealed secret → secret length encodes a digit; (digitC + digitP) mod n decides the winner.',
+      'Atomic-sweep covenant pays the full pot on-chain — winner signs nothing, loser has no spend path.',
+    ],
+    why: [
+      'The length-encoded digit is fragile to extend (every new odds variant adds opcodes) and burns extra bytes per secret.',
+      "Secrets are arbitrary bytes — there's no canonical wire shape for higher-level tooling to share between server and client.",
+      'The on-chain script is harder to audit than `OP_INSPECTPACKET`-based reveals where the emulator runs the decision in arkade-script.',
+    ],
+  },
+  v3: {
+    version: 'v0.3',
+    title: 'Arkade-Script win condition + packet-borne reveals',
+    badge: { label: 'shipping now', cls: 'badge-new' },
+    summary:
+      "Per-party escrow keeps its safety guarantees, but the win-condition predicate MOVES INTO arkade-script. Reveals are typed extension packets attached to the spending tx (`OP_INSPECTPACKET`) — not raw bytes whose length encodes meaning. Cleaner consensus check, simpler client, 10-leaf taptree.",
+    how: [
+      'Each side commits a `digit + salt` ; the on-chain `digitHash = SHA256([digit] ‖ salt)` is verified by the emulator at sweep time.',
+      'Reveals ride two extension packets (0x10 = player, 0x11 = creator); the win-predicate reads them via `OP_INSPECTPACKET`, runs `(dC+dP) mod n` in arkade-script.',
+      'The escrow taptree gains a cooperative `playerSpend` leaf and a CSV mirror — 10 leaves total. The taptree is assembled with btcd\'s algorithm so arkd and the SDK agree on the tap-key.',
+    ],
+    why: [
+      'Why this is the keeper: emulator-evaluated predicate makes the win condition trivial to extend (new game shapes are arkade-script edits, no tapscript rework).',
+      'Typed packets give the client a fixed-length wire shape and remove the secret-length-as-data trick.',
+      'The btcd-compatible taptree fix has been upstreamed into the official @arkade-os/ts-sdk so every consumer of the SDK gets correct tap-keys for any leaf count.',
+    ],
+  },
+}
+const evolution = ref<Evolution>('v3')
+
+// Per-version game flow. v0.1 (shared escrow) had setup + final txs; v0.2 and
+// v0.3 share the per-party shape, but v0.3 specifically routes reveals through
+// extension packets read on-chain via OP_INSPECTPACKET.
+interface FlowStep { num: string; title: string; body: string; cls?: string }
+const FLOW_STEPS: Record<Evolution, FlowStep[]> = {
+  v1: [
+    { num: '1', title: 'Play & commit', body: 'You commit your secret\'s hash; the house commits its own. The contract address is derived from both commitments.' },
+    { num: '2', title: 'Setup tx', body: 'Both sides co-sign a <em>single</em> setup transaction that funds <strong>one shared escrow</strong> with the combined pot.' },
+    { num: '3', title: 'Reveal', body: 'You send your secret to the server. Combined with the house secret, it decides the winner via the length-encoded coin scheme.' },
+    { num: '4', title: 'Final tx', body: 'A pre-agreed final transaction redistributes the shared pot to the winner. Both sides must co-sign — anyone who stalls grids the funds.' },
+    { num: '!', title: 'If the operator goes dark', body: 'The big v0.1 weakness: a no-show on the setup tx leaves your half-stake stranded, and a stall after the reveal needs both sides\' signatures on the final tx to recover.', cls: 'recovery' },
+  ],
+  v2: [
+    { num: '1', title: 'Play & commit', body: 'You commit your secret\'s hash; the house commits its own. The server returns a <strong>per-party</strong> escrow address derived from both commitments.' },
+    { num: '2', title: 'Escrow the stakes', body: 'You fund the <em>player escrow</em>, the house funds the <em>house escrow</em> — two single-party transactions into separate contracts that neither side can touch alone.' },
+    { num: '3', title: 'Reveal', body: 'You send your secret bytes to the server. Combined with the house secret, the length-encoded mod-n rule deterministically decides the winner.' },
+    { num: '4', title: 'Covenant settlement', body: 'The server builds one atomic sweep of <em>both</em> escrows to the winner\'s address. The emulator runs the arkade-script atomic-sweep covenant, confirms the payout matches, co-signs the <span class="mono">&lt;emu✦&gt;</span> slot, and forwards it on. <strong>The winner signs nothing.</strong>' },
+    { num: '!', title: 'If the operator goes dark', body: 'Revealed but unpaid? Sweep the whole pot via <span class="mono">playerForfeit</span> after the deadline. Never revealed? <span class="mono">refund</span>. Operator censoring? Take a unilateral <span class="mono">*Exit</span> after the CSV delay.', cls: 'recovery' },
+  ],
+  v3: [
+    { num: '1', title: 'Play & commit', body: 'You commit a <strong>digit + 16-byte salt</strong> (the digit picks your coin face for n=2; the salt blinds it). Only <span class="mono">SHA256(digit‖salt)</span> goes on-chain — your digit is hidden until reveal.' },
+    { num: '2', title: 'Escrow the stakes', body: 'You fund the <em>player escrow</em>, the house funds the <em>house escrow</em> — two single-party transactions into the v3 10-leaf taptree. Neither side can touch the other\'s stake.' },
+    { num: '3', title: 'Reveal (via extension packet)', body: 'You send <span class="mono">[digit] ‖ salt</span> to the server. The server attaches BOTH reveals as <strong>typed extension packets</strong> (0x10 player, 0x11 creator) to the sweep tx — the emulator reads them on-chain via <span class="mono">OP_INSPECTPACKET</span>.' },
+    { num: '4', title: 'Arkade-script settlement', body: 'The emulator runs the <em>win predicate</em>: pulls both reveal packets, verifies their hashes, extracts the digits, and decides via <span class="mono">(dC + dP) mod n ∈ [lo, target)</span>. If the predicate passes, the atomic-sweep covenant pays the full pot to the winner. <strong>The winner signs nothing.</strong>' },
+    { num: '!', title: 'If the operator goes dark', body: 'Same three recovery leaves as v0.2 — <span class="mono">playerForfeit</span> (post-reveal stall), <span class="mono">refund</span> (pre-reveal stall), and <span class="mono">*Exit</span> mirrors (operator censoring). v0.3 also adds a <span class="mono">cooperativeSpend</span> leaf so player + creator can settle without the emulator if it disappears.', cls: 'recovery' },
+  ],
+}
 
 // ── At-a-glance scenario toggle ───────────────────────────────────
 // The per-party escrow means each failure mode has a self-serve mitigation.
@@ -684,8 +850,54 @@ h2 { font-size: 1.25rem; font-weight: 700; margin-bottom: 6px; }
 .hiw-footer { margin: 40px 0 8px; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
 .footer-cite { font-size: 0.78rem; a { color: var(--blue); } }
 
+/* Per-version pill shown in the diagram header + flow header */
+.diagram-version, .flow-version {
+  font-size: 0.72rem; font-weight: 600; color: var(--text-muted); margin-bottom: 10px;
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.flow-version { margin-left: 10px; }
+.evol-pill {
+  display: inline-block; font-weight: 800; letter-spacing: 0.5px;
+  padding: 2px 8px; border-radius: 999px; font-size: 0.72rem;
+  &.evol-v1 { background: rgba(148,163,184,0.15); color: var(--text-muted); border: 1px solid var(--border-light); }
+  &.evol-v2 { background: rgba(56,189,248,0.12); color: var(--blue); border: 1px solid rgba(56,189,248,0.35); }
+  &.evol-v3 { background: var(--green-glow); color: var(--green); border: 1px solid rgba(34,197,94,0.45); }
+}
+.pp-trigger-sub {
+  display: block; margin-top: 4px; font-size: 0.7rem; color: var(--text-muted);
+  letter-spacing: 0.3px;
+}
+.pp-box.escrow.shared {
+  border-color: rgba(56,189,248,0.45); background: rgba(56,189,248,0.06);
+}
+.scenario-warn {
+  margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
+  background: rgba(234,179,8,0.08); border: 1px solid rgba(234,179,8,0.35);
+  color: var(--text-dim); font-size: 0.82rem; line-height: 1.5;
+}
+
+/* Design evolution */
+.evolution-tabs { flex-wrap: wrap; margin-bottom: 16px; }
+.evolution-card { padding: 18px 20px; }
+.evolution-headline { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
+.evolution-version { font-weight: 700; font-size: 0.86rem; color: var(--text-dim); }
+.evolution-title { font-weight: 700; color: var(--text); font-size: 1.05rem; }
+.evolution-badge {
+  font-size: 0.66rem; font-weight: 800; letter-spacing: 1px; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px;
+  &.badge-old { background: rgba(148,163,184,0.12); color: var(--text-muted); border: 1px solid var(--border-light); }
+  &.badge-prev { background: rgba(56,189,248,0.12); color: var(--blue); border: 1px solid rgba(56,189,248,0.35); }
+  &.badge-new { background: var(--green-glow); color: var(--green); border: 1px solid rgba(34,197,94,0.45); }
+}
+.evolution-summary { color: var(--text-dim); margin: 6px 0 14px; font-size: 0.9rem; line-height: 1.5; }
+.evolution-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.evolution-pane { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; }
+.evolution-h { margin: 0 0 8px; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.5px; color: var(--text); text-transform: uppercase; }
+.evolution-pane ul { margin: 0; padding-left: 18px; color: var(--text-dim); font-size: 0.85rem; line-height: 1.5; }
+.evolution-pane li + li { margin-top: 6px; }
 @media (max-width: 640px) {
   .leaf-cols { grid-template-columns: 1fr; }
   .hiw-header h1 { font-size: 1.7rem; }
+  .evolution-grid { grid-template-columns: 1fr; }
 }
 </style>

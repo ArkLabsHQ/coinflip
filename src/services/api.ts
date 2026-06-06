@@ -44,6 +44,14 @@ export interface PlayResponse {
   oddsTarget?: number
   oddsLo?: number
   pot?: number
+  /**
+   * Contract version this game was minted with. 'v2' is the legacy length-
+   * encoded predicate; 'v3' uses arkade-script + packet-borne reveals.
+   * Drives which SDK contract handler type the ContractWatcher registers AND
+   * which on-the-wire shape the client must send at /commit
+   * (v2: raw bytes; v3: `[digitByte] ‖ salt` from `commitDigit`).
+   */
+  contractVersion?: 'v2' | 'v3'
 }
 
 /** /api/game/:id/commit — server settles via covenant for both wins, no
@@ -115,6 +123,10 @@ export interface NetworkResponse {
     signerPubkey: string
     version: string
   }
+  /** Escrow contract version the server mints NEW games with. v2 = legacy
+   *  length-encoded predicate; v3 = arkade-script + packet-borne reveals.
+   *  Drives client secret format: v2 = raw bytes; v3 = `[digit] ‖ salt`. */
+  escrowVersion?: 'v2' | 'v3'
 }
 export async function getNetwork(): Promise<NetworkResponse> {
   const resp = await request<NetworkResponse>('/api/network')

@@ -31,10 +31,29 @@ import {
   buildForfeitClaimTransaction,
   COINFLIP_ESCROW_TYPE,
   CoinflipEscrowContractHandler,
+  COINFLIP_ESCROW_V3_TYPE,
+  CoinflipEscrowV3ContractHandler,
+  getPlayerEscrowScriptV3,
+  getHouseEscrowScriptV3,
+  getPlayerEscrowAddressV3,
+  getHouseEscrowAddressV3,
+  getHouseEscrowOptionsV3,
+  getPlayerEscrowOptionsV3,
+  buildCovenantSweepTransactionV3,
+  buildRefundTransactionV3,
+  buildForfeitClaimTransactionV3,
+  determineWinnerV3,
+  computeRollV3,
+  commitDigit,
+  randomUniformInt,
+  type CoinflipEscrowScriptV3,
+  type DigitCommit,
+  type EscrowInputV3,
   type Game,
   type EscrowInput,
   type BuiltOffchainTx,
 } from 'arkade-coinflip'
+import { packets } from '@arklabshq/contract-workflows-prototype'
 import {
   buildOffchainTx,
   decodeTapscript,
@@ -95,6 +114,14 @@ export interface TrustlessPlayResult {
   oddsLo?: number
   /** Total pot the winner sweeps = player stake (`betAmount`) + house stake. */
   pot: number
+  /**
+   * Contract version of the escrow this game uses — 'v2' (today's
+   * legacy length-encoded predicate) or 'v3' (arkade-script + packet-borne
+   * reveals). Defaults to 'v2' on response unless the server is configured
+   * with LEGACY_ESCROW=false. The client uses this to route to the right
+   * contract handler when registering the player's escrow with the SDK.
+   */
+  contractVersion?: 'v2' | 'v3'
 }
 
 export interface TrustlessCommitRequest {
@@ -123,8 +150,33 @@ export interface TrustlessCommitResult {
   txid?: string
 }
 
+/**
+ * Decide which escrow shape to mint NEW games with. v2 is the default. Set
+ * `ESCROW_VERSION=v3` to mint games against the v0.3 arkade-script + reveal-
+ * packet escrow. Existing in-flight games keep using whatever shape they were
+ * minted with (state.contractVersion); only NEW /play calls read this.
+ */
+export function newGameEscrowVersion(): 'v2' | 'v3' {
+  const v = (process.env.ESCROW_VERSION ?? 'v2').trim().toLowerCase()
+  return v === 'v3' ? 'v3' : 'v2'
+}
+
+/**
+ * For v3 we always run the arkade-script with concrete (n, target, lo). The
+ * coin (no client-supplied odds) maps to n=2, target=1, lo=0 — exactly the
+ * regtest's player-wins-iff-roll==0 setup, faithful to a 50/50 coin.
+ */
+const V3_COIN_ODDS = { oddsN: 2, oddsTarget: 1, oddsLo: 0 } as const
+
 /** Per-party state we persist on the game row (reusing house_vtxos_json). */
 interface TrustlessState {
+  /**
+   * Contract version this specific game was minted with. Missing means v2
+   * (forward-compat: rows written before the v3 toggle existed are v2). All
+   * commit/refund/forfeit/recovery paths branch on this so an in-flight v2
+   * game stays v2 even after the operator flips ESCROW_VERSION=v3.
+   */
+  contractVersion?: 'v2' | 'v3'
   finalExpiration: number
   setupExpiration: number
   houseEscrow: Outpoint
@@ -187,6 +239,19 @@ async function getTiers(deps: AppDeps): Promise<number[]> {
 
 
 const toXOnly = (b: Uint8Array) => (b.length === 33 ? b.slice(1) : b)
+
+/**
+ * Per-version dispatch for escrow script builders. Both v2 and v3 take the
+ * same Game shape; only the resulting taptree differs. Centralized here so
+ * /play / /commit / /refund / /forfeit / recovery share one branch.
+ */
+function v3Escrows(game: Game): { player: CoinflipEscrowScriptV3; house: CoinflipEscrowScriptV3 } {
+  return { player: getPlayerEscrowScriptV3(game), house: getHouseEscrowScriptV3(game) }
+}
+
+function v2Escrows(game: Game): { player: ReturnType<typeof getPlayerEscrowScript>; house: ReturnType<typeof getHouseEscrowScript> } {
+  return { player: getPlayerEscrowScript(game), house: getHouseEscrowScript(game) }
+}
 
 /** Build the per-game Game object the lib needs to derive the escrow script. */
 async function buildGame(
@@ -353,6 +418,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   if ((await deps.repos.games.countPendingForPlayer(req.playerPubkey)) >= 3) {
     throw new Error('Too many pending games. Complete or wait for existing games to expire.')
   }
+  const version = newGameEscrowVersion()
 
   // Variable-odds (both params set) vs. the 50/50 coin. The player always stakes
   // `tier`; the house stakes a house-edged multiple so payouts reflect the odds.
@@ -372,9 +438,23 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     odds = { oddsN: n, oddsTarget: target, oddsLo: lo }
   }
 
-  const houseSecret = isVariable
-    ? generateVariableSecret(req.oddsN as number)
-    : generateRandomCoinSecret()
+  // v3 escrow ALWAYS runs the arkade-script with concrete (n, target, lo). The
+  // coin (no client-supplied odds) maps to n=2, target=1, lo=0 — the regtest's
+  // player-wins-iff-roll==0 setup, faithful to a 50/50 coin.
+  if (version === 'v3' && !odds) odds = { ...V3_COIN_ODDS }
+
+  const houseSecret = version === 'v3'
+    // v3: persist the house's reveal as `[digit] || salt` (= packets.encodeReveal).
+    // sha256 of these bytes equals digitHash({digit, salt}), so hashSecret still
+    // produces the on-chain creatorHash unchanged.
+    ? (() => {
+        const n = odds!.oddsN
+        const c = commitDigit(randomUniformInt(n), n)
+        return packets.encodeReveal(c.digit, c.salt)
+      })()
+    : isVariable
+      ? generateVariableSecret(req.oddsN as number)
+      : generateRandomCoinSecret()
   const houseHash = hashSecret(houseSecret)
   const housePubkey = Buffer.from(await deps.identity.compressedPublicKey()).toString('hex')
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
@@ -419,8 +499,10 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   // Per-party escrow: house funds the HOUSE escrow (refundable only by
   // the house); the client funds the PLAYER escrow (refundable only by
   // the player). Abort-theft fix.
-  const houseEscrowScript = getHouseEscrowScript(game)
-  const playerEscrowAddress = getPlayerEscrowAddress(game, networkHrp).encode()
+  const houseEscrowScript = version === 'v3' ? getHouseEscrowScriptV3(game) : getHouseEscrowScript(game)
+  const playerEscrowAddress = (version === 'v3'
+    ? getPlayerEscrowAddressV3(game, networkHrp)
+    : getPlayerEscrowAddress(game, networkHrp)).encode()
 
   const gameId = uuidv4()
   // Atomically (under the selection mutex) check liability and pick + reserve a
@@ -487,6 +569,7 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   // Persist the arkade-forfeit pin so /commit, /refund, /forfeit, and
   // recovery rebuilds derive the EXACT same escrow taproot address.
   const state: TrustlessState = {
+    contractVersion: version,
     finalExpiration,
     setupExpiration,
     houseEscrow,
@@ -523,11 +606,17 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
   // pkScript, so the handler re-derives a byte-identical script. A failure here
   // MUST NOT fail the play — the failsafe reconcile still resolves the game.
   try {
+    const houseAddress = (version === 'v3'
+      ? getHouseEscrowAddressV3(game, networkHrp)
+      : getHouseEscrowAddress(game, networkHrp)).encode()
+    const params = version === 'v3'
+      ? CoinflipEscrowV3ContractHandler.serializeParams(getHouseEscrowOptionsV3(game))
+      : CoinflipEscrowContractHandler.serializeParams(getHouseEscrowOptions(game))
     await deps.contractManager?.createContract({
-      type: COINFLIP_ESCROW_TYPE,
-      params: CoinflipEscrowContractHandler.serializeParams(getHouseEscrowOptions(game)),
+      type: version === 'v3' ? COINFLIP_ESCROW_V3_TYPE : COINFLIP_ESCROW_TYPE,
+      params,
       script: hex.encode(houseEscrowScript.pkScript),
-      address: getHouseEscrowAddress(game, networkHrp).encode(),
+      address: houseAddress,
       state: 'active',
       label: gameId,
     })
@@ -547,12 +636,28 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
     // The PLAYER escrow's serialized contract params (mirrors the house side
     // registered above) — the client registers its own escrow with these so its
     // ContractWatcher reproduces the same script and observes the sweep.
-    escrowContractParams: CoinflipEscrowContractHandler.serializeParams(getPlayerEscrowOptions(game)),
+    escrowContractParams: version === 'v3'
+      ? CoinflipEscrowV3ContractHandler.serializeParams(getPlayerEscrowOptionsV3(game))
+      : CoinflipEscrowContractHandler.serializeParams(getPlayerEscrowOptions(game)),
     oddsN: odds?.oddsN,
     oddsTarget: odds?.oddsTarget,
     oddsLo: odds?.oddsLo,
     pot: req.tier + houseStake,
+    contractVersion: version,
   }
+}
+
+/**
+ * Decode a v3 reveal from a persisted secret. v3 packs `[digit_byte] ‖ salt`
+ * exactly as `packets.encodeReveal(digit, salt)` does — first byte is the
+ * digit, remaining bytes are the salt. Throws if the bytes are too short
+ * for a salted commit (≥ 1 + 1 byte salt).
+ */
+function decodeV3Reveal(secret: Uint8Array): DigitCommit {
+  if (secret.length < 2) {
+    throw new Error(`decodeV3Reveal: v3 reveal must be ≥ 2 bytes, got ${secret.length}`)
+  }
+  return { digit: secret[0], salt: secret.slice(1) }
 }
 
 /**
@@ -561,18 +666,28 @@ export async function handleTrustlessPlay(req: TrustlessPlayRequest, deps: AppDe
  * idempotent-replay path so both produce identical economics.
  */
 interface CommitContext {
+  /** Escrow contract version for THIS game — chooses winner-rule + sweep builder. */
+  version: 'v2' | 'v3'
   winner: 'house' | 'player'
   houseSecret: Uint8Array
   playerSecret: Uint8Array
   houseSecretHex: string
   playerSecretHex: string
-  escrows: EscrowInput[]
+  /** v2 path. Set iff version === 'v2'. */
+  escrowsV2?: EscrowInput[]
+  /** v3 path. Set iff version === 'v3'. */
+  escrowsV3?: [EscrowInputV3, EscrowInputV3]
+  /** v3 path: pre-decoded reveals (for sweep builder + display). */
+  creatorReveal?: DigitCommit
+  playerReveal?: DigitCommit
+  /** Hex of the house-escrow pkScript — for contract deactivation. */
+  houseEscrowPkScriptHex: string
   pot: number
   proof: string
   houseAddress: string
   playerPayoutAddress: string
   networkHrp: string
-  /** Variable-odds echo + rolled value for display; all undefined for the coin. */
+  /** Variable-odds echo + rolled value for display; all undefined for the v2 coin. */
   odds?: { oddsN: number; oddsTarget: number; oddsLo: number }
   roll: number | null
 }
@@ -586,13 +701,28 @@ async function buildCommitContext(
 ): Promise<CommitContext> {
   const houseSecret = new Uint8Array(Buffer.from(game.house_secret_hex, 'hex'))
   const playerSecret = new Uint8Array(Buffer.from(playerSecretHex, 'hex'))
-  // Variable-odds resolve via the mod-N rule; the coin via secret-length parity.
   const odds = oddsFromState(state)
-  const winnerRole = odds
-    ? determineVariableWinner(houseSecret, playerSecret, odds.oddsN, odds.oddsTarget, odds.oddsLo)
-    : determineWinner(houseSecret, playerSecret)
-  const winner: 'house' | 'player' = winnerRole === 'creator' ? 'house' : 'player'
-  const roll = odds ? computeVariableRoll(houseSecret, playerSecret, odds.oddsN) : null
+  const version: 'v2' | 'v3' = state.contractVersion === 'v3' ? 'v3' : 'v2'
+
+  let winner: 'house' | 'player'
+  let roll: number | null
+  let creatorReveal: DigitCommit | undefined
+  let playerReveal: DigitCommit | undefined
+  if (version === 'v3') {
+    if (!odds) throw new Error(`v3 commit for game ${game.id} has no odds persisted`)
+    creatorReveal = decodeV3Reveal(houseSecret)
+    playerReveal = decodeV3Reveal(playerSecret)
+    const role = determineWinnerV3(creatorReveal, playerReveal, odds.oddsN, odds.oddsTarget, odds.oddsLo)
+    winner = role === 'creator' ? 'house' : 'player'
+    roll = computeRollV3(creatorReveal, playerReveal, odds.oddsN)
+  } else {
+    // v2 — variable-odds resolve via the mod-N rule; the coin via secret-length parity.
+    const role = odds
+      ? determineVariableWinner(houseSecret, playerSecret, odds.oddsN, odds.oddsTarget, odds.oddsLo)
+      : determineWinner(houseSecret, playerSecret)
+    winner = role === 'creator' ? 'house' : 'player'
+    roll = odds ? computeVariableRoll(houseSecret, playerSecret, odds.oddsN) : null
+  }
 
   const houseHash = hashSecret(houseSecret)
   const arkadeForfeitPin = rehydrateArkadeForfeit(state)
@@ -600,19 +730,42 @@ async function buildCommitContext(
     deps, game.tier, houseHash, game.player_pubkey, game.player_hash,
     state.finalExpiration, state.setupExpiration, odds, arkadeForfeitPin,
   )
-  const escrows: EscrowInput[] = [
-    { script: getHouseEscrowScript(game2), ...state.houseEscrow },
-    { script: getPlayerEscrowScript(game2), ...playerEscrow },
-  ]
-  const pot = escrows.reduce((a, e) => a + e.value, 0)
-  const proof =
-    `house secret ${houseSecret.length}B, player secret ${playerSecret.length}B ` +
-    `→ ${winner} wins (pot ${pot})${odds ? ` [odds [${odds.oddsLo},${odds.oddsTarget})/${odds.oddsN}]` : ''}.`
+
+  let pot = 0
+  let houseEscrowPkScriptHex = ''
+  let escrowsV2: EscrowInput[] | undefined
+  let escrowsV3: [EscrowInputV3, EscrowInputV3] | undefined
+  if (version === 'v3') {
+    const s = v3Escrows(game2)
+    escrowsV3 = [
+      { script: s.house, ...state.houseEscrow },
+      { script: s.player, ...playerEscrow },
+    ]
+    pot = escrowsV3[0].value + escrowsV3[1].value
+    houseEscrowPkScriptHex = hex.encode(s.house.pkScript)
+  } else {
+    const s = v2Escrows(game2)
+    escrowsV2 = [
+      { script: s.house, ...state.houseEscrow },
+      { script: s.player, ...playerEscrow },
+    ]
+    pot = escrowsV2.reduce((a, e) => a + e.value, 0)
+    houseEscrowPkScriptHex = hex.encode(s.house.pkScript)
+  }
+
+  const proof = version === 'v3'
+    ? `[v3] creatorDigit=${creatorReveal!.digit}, playerDigit=${playerReveal!.digit}, roll=${roll ?? 'n/a'} → ${winner} wins (pot ${pot})${odds ? ` [odds [${odds.oddsLo},${odds.oddsTarget})/${odds.oddsN}]` : ''}.`
+    : `house secret ${houseSecret.length}B, player secret ${playerSecret.length}B ` +
+      `→ ${winner} wins (pot ${pot})${odds ? ` [odds [${odds.oddsLo},${odds.oddsTarget})/${odds.oddsN}]` : ''}.`
 
   return {
+    version,
     winner, houseSecret, playerSecret,
     houseSecretHex: game.house_secret_hex, playerSecretHex,
-    escrows, pot, proof,
+    escrowsV2, escrowsV3,
+    creatorReveal, playerReveal,
+    houseEscrowPkScriptHex,
+    pot, proof,
     houseAddress: await deps.wallet.getAddress(),
     playerPayoutAddress: game.player_change_address!,
     networkHrp: networkHrpFromArkInfo(deps.arkInfo),
@@ -629,16 +782,27 @@ function buildCommitResult(
   ctx: CommitContext,
   deps: AppDeps,
 ): { result: TrustlessCommitResult; sweepTx: BuiltOffchainTx } {
-  const sweepTx = buildCovenantSweepTransaction(deps.arkInfo, ctx.networkHrp, {
-    winner: ctx.winner,
-    escrows: ctx.escrows,
-    payoutAddress: ctx.winner === 'player' ? ctx.playerPayoutAddress : ctx.houseAddress,
-    potAmount: BigInt(ctx.pot),
-    bothSecrets: [
-      new Uint8Array(Buffer.from(ctx.houseSecretHex, 'hex')),
-      new Uint8Array(Buffer.from(ctx.playerSecretHex, 'hex')),
-    ],
-  })
+  const payoutAddress = ctx.winner === 'player' ? ctx.playerPayoutAddress : ctx.houseAddress
+  const potAmount = BigInt(ctx.pot)
+  const sweepTx: BuiltOffchainTx = ctx.version === 'v3'
+    ? buildCovenantSweepTransactionV3(deps.arkInfo, {
+        winner: ctx.winner,
+        escrows: ctx.escrowsV3!,
+        payoutAddress,
+        potAmount,
+        playerReveal: ctx.playerReveal!,
+        creatorReveal: ctx.creatorReveal!,
+      })
+    : buildCovenantSweepTransaction(deps.arkInfo, ctx.networkHrp, {
+        winner: ctx.winner,
+        escrows: ctx.escrowsV2!,
+        payoutAddress,
+        potAmount,
+        bothSecrets: [
+          new Uint8Array(Buffer.from(ctx.houseSecretHex, 'hex')),
+          new Uint8Array(Buffer.from(ctx.playerSecretHex, 'hex')),
+        ],
+      })
   const result: TrustlessCommitResult = {
     winner: ctx.winner,
     houseSecret: ctx.houseSecretHex,
@@ -777,7 +941,7 @@ export async function handleTrustlessCommit(
     })
     reservations.release(gameId)
     // Bet done → stop watching its house escrow. escrows[0] is the house escrow.
-    await deactivateHouseEscrowContract(deps, hex.encode(ctx.escrows[0].script.pkScript))
+    await deactivateHouseEscrowContract(deps, ctx.houseEscrowPkScriptHex)
     return result
   })
 }
@@ -805,7 +969,7 @@ async function resettleCommittedGameLocked(game: GameRow, state: TrustlessState,
       status: 'resolved', houseVtxosJson: JSON.stringify({ ...state, resolveTxid }),
     })
     reservations.release(game.id)
-    await deactivateHouseEscrowContract(deps, hex.encode(ctx.escrows[0].script.pkScript))
+    await deactivateHouseEscrowContract(deps, ctx.houseEscrowPkScriptHex)
     console.log(`[reconcile] re-settled committed game ${game.id} (winner ${ctx.winner}, tx ${resolveTxid})`)
     return 1
   } catch (e) {
@@ -850,6 +1014,7 @@ export async function handleTrustlessRefund(
   if (!game.player_change_address) throw new Error(`Game ${gameId} has no player change address`)
 
   const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
+  const version: 'v2' | 'v3' = state.contractVersion === 'v3' ? 'v3' : 'v2'
   const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
   const arkadeForfeitPin = rehydrateArkadeForfeit(state)
   const game2 = await buildGame(
@@ -857,15 +1022,22 @@ export async function handleTrustlessRefund(
     state.finalExpiration, state.setupExpiration, oddsFromState(state),
     arkadeForfeitPin,
   )
-  const playerEscrowScript = getPlayerEscrowScript(game2)
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
-  const refund = buildRefundTransaction(deps.arkInfo, networkHrp, {
-    escrowScript: playerEscrowScript,
-    txid: req.playerEscrow.txid,
-    vout: req.playerEscrow.vout,
-    value: req.playerEscrow.value,
-    refundAddress: game.player_change_address,
-  })
+  const refund: BuiltOffchainTx = version === 'v3'
+    ? buildRefundTransactionV3(deps.arkInfo, {
+        escrowScript: getPlayerEscrowScriptV3(game2),
+        txid: req.playerEscrow.txid,
+        vout: req.playerEscrow.vout,
+        value: req.playerEscrow.value,
+        refundAddress: game.player_change_address,
+      })
+    : buildRefundTransaction(deps.arkInfo, networkHrp, {
+        escrowScript: getPlayerEscrowScript(game2),
+        txid: req.playerEscrow.txid,
+        vout: req.playerEscrow.vout,
+        value: req.playerEscrow.value,
+        refundAddress: game.player_change_address,
+      })
   return {
     refundPsbt: hex.encode(refund.arkTx.toPSBT()),
     refundCheckpoints: refund.checkpoints.map((c) => hex.encode(c.toPSBT())),
@@ -925,6 +1097,7 @@ export async function handleTrustlessForfeit(
 
   const state = JSON.parse(game.house_vtxos_json as string) as TrustlessState
   if (!state.houseEscrow) throw new Error(`Game ${gameId} has no recorded house escrow`)
+  const version: 'v2' | 'v3' = state.contractVersion === 'v3' ? 'v3' : 'v2'
   const arkadeForfeitPin = rehydrateArkadeForfeit(state)
   const houseHash = hashSecret(new Uint8Array(Buffer.from(game.house_secret_hex, 'hex')))
   const game2 = await buildGame(
@@ -933,16 +1106,24 @@ export async function handleTrustlessForfeit(
     arkadeForfeitPin,
   )
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
-  const escrows: EscrowInput[] = [
-    { script: getHouseEscrowScript(game2), ...state.houseEscrow },
-    { script: getPlayerEscrowScript(game2), ...req.playerEscrow },
-  ]
   const pot = BigInt(arkadeForfeitPin.playerStake + arkadeForfeitPin.houseStake)
-  const forfeit = buildForfeitClaimTransaction(deps.arkInfo, networkHrp, {
-    escrows,
-    payoutAddress: game.player_change_address,
-    potAmount: pot,
-  })
+  const forfeit: BuiltOffchainTx = version === 'v3'
+    ? buildForfeitClaimTransactionV3(deps.arkInfo, {
+        escrows: [
+          { script: getHouseEscrowScriptV3(game2), ...state.houseEscrow },
+          { script: getPlayerEscrowScriptV3(game2), ...req.playerEscrow },
+        ],
+        payoutAddress: game.player_change_address,
+        potAmount: pot,
+      })
+    : buildForfeitClaimTransaction(deps.arkInfo, networkHrp, {
+        escrows: [
+          { script: getHouseEscrowScript(game2), ...state.houseEscrow },
+          { script: getPlayerEscrowScript(game2), ...req.playerEscrow },
+        ],
+        payoutAddress: game.player_change_address,
+        potAmount: pot,
+      })
 
   return {
     forfeitPsbt: hex.encode(forfeit.arkTx.toPSBT()),
@@ -998,22 +1179,33 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
         state.finalExpiration, state.setupExpiration, oddsFromState(state),
         arkadeForfeitPin,
       )
-      const houseEscrowScript = getHouseEscrowScript(game2)
+      const version: 'v2' | 'v3' = state.contractVersion === 'v3' ? 'v3' : 'v2'
       const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
-      const refund = buildRefundTransaction(deps.arkInfo, networkHrp, {
-        escrowScript: houseEscrowScript,
-        txid: state.houseEscrow.txid,
-        vout: state.houseEscrow.vout,
-        value: state.houseEscrow.value,
-        refundAddress: await deps.wallet.getAddress(),
-      })
+      const houseEscrowScriptV2 = version === 'v2' ? getHouseEscrowScript(game2) : undefined
+      const houseEscrowScriptV3 = version === 'v3' ? getHouseEscrowScriptV3(game2) : undefined
+      const houseEscrowScriptPkScript = (houseEscrowScriptV2 ?? houseEscrowScriptV3)!.pkScript
+      const refund: BuiltOffchainTx = version === 'v3'
+        ? buildRefundTransactionV3(deps.arkInfo, {
+            escrowScript: houseEscrowScriptV3!,
+            txid: state.houseEscrow.txid,
+            vout: state.houseEscrow.vout,
+            value: state.houseEscrow.value,
+            refundAddress: await deps.wallet.getAddress(),
+          })
+        : buildRefundTransaction(deps.arkInfo, networkHrp, {
+            escrowScript: houseEscrowScriptV2!,
+            txid: state.houseEscrow.txid,
+            vout: state.houseEscrow.vout,
+            value: state.houseEscrow.value,
+            refundAddress: await deps.wallet.getAddress(),
+          })
       const txid = await submitOffchain(deps, refund.arkTx, refund.checkpoints, [0])
       await deps.repos.games.update(game.id, {
         houseVtxosJson: JSON.stringify({ ...state, houseRefundTxid: txid } as TrustlessState),
       })
       reservations.release(game.id)
       // Bet done (house stake reclaimed) → stop watching its house escrow.
-      await deactivateHouseEscrowContract(deps, hex.encode(houseEscrowScript.pkScript))
+      await deactivateHouseEscrowContract(deps, hex.encode(houseEscrowScriptPkScript))
       recovered++
       console.log(`[recovery] reclaimed house escrow for stalled game ${game.id} (${state.houseEscrow.value} sats), txid ${txid}`)
     } catch (err) {

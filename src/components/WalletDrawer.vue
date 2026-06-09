@@ -40,17 +40,66 @@
       </div>
 
       <div class="drawer-body">
-        <!-- ── Receive (unified) ──────────────────────────────────── -->
+        <!-- ── Receive (unified BIP-21 + copy sheet) ─────────────── -->
         <section v-if="tab === 'receive'" class="section-body">
-          <!-- Lightning: amount in → invoice out -->
-          <div class="recv-block">
-            <div class="block-label">&#9889; Lightning</div>
-            <div v-if="!depositInvoice">
+          <!-- Unified QR: encodes bitcoin:<onchain>?ark=<arkAddr>&lightning=<lnurl|bolt11>
+               so a generic BIP-21 wallet pays on-chain, an Ark wallet uses
+               the off-chain `ark=` leg, and a Lightning wallet pays the
+               `lightning=` leg (LNURL when amountless, BOLT11 when an
+               amount has been set). -->
+          <div class="recv-block recv-qr-block">
+            <QrCode v-if="qrValue" :value="qrValue" :size="244" @copy="copyText(qrValue)" title="Tap to copy" />
+            <div v-else class="qr-skeleton">{{ ready ? 'Generating…' : 'Connecting…' }}</div>
+            <div class="qr-meta">
+              <!-- When an individual method is selected, the QR holds its raw
+                   value — say so explicitly so it's clear this isn't the
+                   unified URI. -->
+              <div v-if="selectedPayload && selectedPayloadId !== 'unified'" class="qr-meta-label">
+                {{ selectedPayload.label }} <span class="hint">&middot; raw value</span>
+              </div>
+              <template v-else>
+                <div v-if="depositInvoice" class="qr-meta-label">Lightning invoice ({{ Number(depositAmount).toLocaleString() }} sats)</div>
+                <div v-else-if="lnurlStatus === 'open'" class="qr-meta-label">Pay any amount &middot; on-chain + Ark + Lightning</div>
+                <div v-else-if="lnurlStatus === 'opening'" class="qr-meta-label hint">Connecting to LNURL server&hellip;</div>
+                <div v-else-if="lnurlStatus === 'error'" class="qr-meta-label hint error-hint" :title="lnurlError || ''">
+                  Lightning receive unavailable (server error)
+                </div>
+                <div v-else-if="lnurlStatus === 'disabled'" class="qr-meta-label hint">Lightning receive unavailable (no LNURL server configured)</div>
+              </template>
+            </div>
+            <div class="qr-actions">
+              <!-- Deep link: only shown when the QR holds a scheme-prefixed
+                   URI (the unified BIP-21). Tapping it hands the URI to the
+                   OS so a mobile wallet can pick it up. -->
+              <a v-if="qrIsUri" class="btn-outline btn-sm" :href="qrValue">Open in wallet</a>
+              <button class="btn-outline btn-sm" @click="copySheetOpen = !copySheetOpen" :disabled="!copyOptions.length">
+                Payment method &#8964;
+              </button>
+              <button class="btn-outline btn-sm" v-if="!depositInvoice" @click="showAmountForm = !showAmountForm" :disabled="!ready">
+                {{ showAmountForm ? 'Hide' : 'Add amount (LN invoice)' }}
+              </button>
+            </div>
+
+            <!-- Method picker: choosing a row swaps the QR to that payload's
+                 RAW value (unified URI, ark, on-chain, LNURL, BOLT11) so
+                 wallet dialects that don't parse BIP-21 can scan the exact
+                 string they need. Tap the QR afterwards to copy it. -->
+            <div v-if="copySheetOpen" class="copy-sheet">
+              <button v-for="opt in copyOptions" :key="opt.id" class="copy-sheet-item"
+                      :class="{ active: opt.id === selectedPayloadId }" @click="selectPayload(opt)">
+                <span class="copy-sheet-label">{{ opt.label }}</span>
+                <span class="copy-sheet-value mono">{{ opt.value.length > 36 ? opt.value.slice(0, 18) + '…' + opt.value.slice(-12) : opt.value }}</span>
+              </button>
+            </div>
+
+            <!-- Amount form: only for fixed-amount BOLT11 via Boltz reverse
+                 swap. Amountless LN receive is handled by the LNURL session
+                 above. -->
+            <div v-if="showAmountForm && !depositInvoice" class="amt-form">
               <div class="input-row">
                 <input class="input" type="number" v-model.number="depositAmount" placeholder="Amount in sats"
                        :min="limits?.min" :max="limits?.max" :disabled="!ready" />
-                <button class="btn-primary btn-sm" :disabled="!depositAmount || depositLoading || !ready"
-                        :title="!ready ? 'Connecting to Ark…' : ''" @click="createLnDeposit">
+                <button class="btn-primary btn-sm" :disabled="!depositAmount || depositLoading || !ready" @click="createLnDeposit">
                   {{ depositLoading ? 'Creating…' : 'Invoice' }}
                 </button>
               </div>
@@ -62,35 +111,21 @@
                 &middot; {{ fees.reverse.percentage }}% + {{ (fees.reverse.minerFees.lockup + fees.reverse.minerFees.claim).toLocaleString() }} fee
               </div>
             </div>
-            <div v-else class="swap-result">
+            <div v-if="depositInvoice" class="amt-form">
               <div class="status-badge" :class="depositStatus">{{ depositStatusText }}</div>
-              <div class="address-box" @click="copyText(depositInvoice)">
-                <code class="mono">{{ depositInvoice }}</code>
-                <span class="address-action">Click to copy</span>
-              </div>
-              <button class="btn-outline btn-sm" @click="resetDeposit">New Invoice</button>
+              <button class="btn-outline btn-sm" @click="resetDeposit">New invoice</button>
             </div>
           </div>
 
-          <!-- Ark address -->
-          <div class="recv-block">
-            <div class="block-label">Ark address</div>
-            <div class="address-box" @click="copyText(arkAddress)">
-              <code class="mono">{{ arkAddress || (ready ? '—' : 'Connecting…') }}</code>
-              <span class="address-action" v-if="arkAddress">Click to copy</span>
-            </div>
-            <button v-if="isMutinyTestnet && ready" class="btn-outline btn-sm" @click="requestFaucet">
-              Request Testnet Faucet
-            </button>
+          <!-- Testnet faucet still surfaced as a one-tap shortcut. -->
+          <div v-if="isMutinyTestnet && ready" class="recv-block">
+            <button class="btn-outline btn-sm" @click="requestFaucet">Request Testnet Faucet</button>
           </div>
 
-          <!-- On-chain boarding -->
+          <!-- On-chain boarding — only the settle/banner block now; the
+               address itself is in the unified QR + copy sheet. -->
           <div class="recv-block">
-            <div class="block-label">On-chain</div>
-            <div class="address-box" @click="copyText(boardingAddress)">
-              <code class="mono">{{ boardingAddress || (ready ? '—' : 'Connecting…') }}</code>
-              <span class="address-action" v-if="boardingAddress">Click to copy</span>
-            </div>
+            <div class="block-label">On-chain status</div>
             <div v-if="boardingUtxos.length > 0" class="boarding-list">
               <div v-for="utxo in boardingUtxos" :key="utxo.outpoint.txid + ':' + utxo.outpoint.vout" class="boarding-item">
                 <span class="boarding-dot"></span>
@@ -272,6 +307,9 @@ import {
 } from '@/services/boltz'
 import { copyToClipboard } from '@/utils/clipboard'
 import { detectLnurlInput, resolveLnurlToInvoice } from '@/utils/lnurl'
+import { encodeBip21 } from '@/utils/bip21'
+import { openLnurlSession, lnurlServerForNetwork, type LnurlSession } from '@/services/lnurlSession'
+import QrCode from '@/components/QrCode.vue'
 
 type SendKind = 'empty' | 'lightning' | 'lnurl' | 'ark' | 'onchain' | 'unknown'
 interface SendTarget { kind: SendKind; amountSats: number; address: string }
@@ -324,6 +362,7 @@ function detectSend(raw: string): SendTarget {
 
 export default defineComponent({
   name: 'WalletDrawer',
+  components: { QrCode },
   props: {
     open: { type: Boolean, default: false },
   },
@@ -352,7 +391,13 @@ export default defineComponent({
     // Auto-trigger connection when the drawer opens and we're not yet connected.
     // Also fetch fees+limits once we are.
     watch(() => props.open, async (isOpen) => {
-      if (!isOpen) return
+      if (!isOpen) {
+        // Close the LNURL SSE stream when the drawer closes — we can re-open
+        // it on next focus. Keeps the long-poll connection from racking up
+        // on the server when the user isn't actively receiving.
+        closeLnurlSession()
+        return
+      }
       if (arkStatus.value !== 'connected' && arkStatus.value !== 'connecting') {
         await reconnect()
       } else if (arkStatus.value === 'connected') {
@@ -362,6 +407,10 @@ export default defineComponent({
         store.dispatch('ark/refreshBalance').catch(() => { /* transient */ })
         loadActivityIfViewing()
       }
+      // Open the LNURL session lazily once the drawer is shown. Failing
+      // softly (no server / network down) lets the rest of the receive
+      // panel still work — the QR just won't have a `lightning=` leg.
+      ensureLnurlSession()
     })
 
     // Re-fetch fees once swap service comes online
@@ -406,6 +455,99 @@ export default defineComponent({
     })
     const isMutinyTestnet = computed(() => arkServer.value === 'https://mutinynet.arkade.sh')
     const txHistory = computed(() => store.getters['ark/txHistory'] || [])
+
+    // ── LNURL session (amountless Lightning Address receive) ──────────
+    // Mirrors the wallet's behaviour: open an SSE session against the
+    // shared Arkade LNURL server, get back a static `lnurl1...` bech32
+    // string the user can share. Server delivers any incoming LNURL pay
+    // via the same SSE stream; we just refresh the balance on receipt
+    // (the contract watcher picks up the VTXO arrival anyway).
+    const networkName = computed<string | null>(() => store.state.ark?.info?.network ?? null)
+    const lnurlServerUrl = computed(() => lnurlServerForNetwork(networkName.value))
+    const lnurlSession = ref<LnurlSession | null>(null)
+    const lnurlString = computed(() => lnurlSession.value?.lnurl ?? '')
+    const lnurlStatus = ref<'idle' | 'opening' | 'open' | 'error' | 'disabled'>('idle')
+    const lnurlError = ref<string | null>(null)
+    async function ensureLnurlSession() {
+      if (lnurlSession.value || lnurlStatus.value === 'opening') return
+      const pk = store.state.wallet?.privateKey
+      const server = lnurlServerUrl.value
+      if (!pk || !server) {
+        lnurlStatus.value = 'disabled'
+        return
+      }
+      lnurlStatus.value = 'opening'
+      lnurlError.value = null
+      try {
+        lnurlSession.value = await openLnurlSession({
+          serverUrl: server,
+          privateKeyHex: pk,
+          onPaymentReceived: () => store.dispatch('ark/refreshBalance').catch(() => { /* transient */ }),
+          onError: (err) => { lnurlError.value = err.message; lnurlStatus.value = 'error' },
+        })
+        lnurlStatus.value = 'open'
+      } catch (e) {
+        lnurlError.value = e instanceof Error ? e.message : String(e)
+        lnurlStatus.value = 'error'
+      }
+    }
+    function closeLnurlSession() {
+      try { lnurlSession.value?.close() } catch { /* ignore */ }
+      lnurlSession.value = null
+      lnurlStatus.value = 'idle'
+    }
+
+    // ── Unified BIP-21 receive URI ────────────────────────────────────
+    // Lightning leg: when the user has set a fixed amount we hand it to
+    // Boltz for a one-shot reverse swap and bake the resulting BOLT11
+    // into the URI; when amountless, fall back to the static LNURL session
+    // string so generic wallets can still drive a Lightning pay.
+    const unifiedUri = computed(() => {
+      const lightning =
+        depositInvoice.value ? depositInvoice.value :
+        lnurlString.value ? lnurlString.value :
+        undefined
+      return encodeBip21({
+        btc: boardingAddress.value || undefined,
+        ark: arkAddress.value || undefined,
+        lightning,
+        amountSats: depositInvoice.value && depositAmount.value ? Number(depositAmount.value) : undefined,
+      })
+    })
+    const copySheetOpen = ref(false)
+    // Reveal the fixed-amount BOLT11 form (Boltz reverse swap). Amountless
+    // Lightning receive is always on via the LNURL session, so this stays
+    // collapsed by default.
+    const showAmountForm = ref(false)
+    const copyOptions = computed(() => {
+      const out: { id: string; label: string; value: string }[] = []
+      if (unifiedUri.value) out.push({ id: 'unified', label: 'Unified BIP-21', value: unifiedUri.value })
+      if (arkAddress.value) out.push({ id: 'ark', label: 'Ark address', value: arkAddress.value })
+      if (boardingAddress.value) out.push({ id: 'onchain', label: 'On-chain address', value: boardingAddress.value })
+      if (depositInvoice.value) out.push({ id: 'invoice', label: 'Lightning invoice', value: depositInvoice.value })
+      if (lnurlString.value) out.push({ id: 'lnurl', label: 'Lightning Address (LNURL)', value: lnurlString.value })
+      return out
+    })
+
+    // Which payload the QR renders. 'unified' shows the BIP-21 URI (the
+    // default, scannable by any wallet); selecting an individual method
+    // switches the QR to that method's RAW value (bare address / invoice /
+    // lnurl) for wallets that don't parse BIP-21.
+    const selectedPayloadId = ref('unified')
+    // Falls back to the first available payload (the unified URI when present)
+    // if the selected method disappears — e.g. an LNURL error or a reset
+    // invoice removes its option from the list.
+    const selectedPayload = computed(() =>
+      copyOptions.value.find((o) => o.id === selectedPayloadId.value) ?? copyOptions.value[0] ?? null,
+    )
+    const qrValue = computed(() => selectedPayload.value?.value ?? '')
+    // Only a scheme-prefixed payload (the unified BIP-21 URI) is an openable
+    // deep link; raw addresses / invoices / lnurl strings are not.
+    const qrIsUri = computed(() => /^(bitcoin|ark|lightning):/i.test(qrValue.value))
+    function selectPayload(opt: { id: string }) {
+      selectedPayloadId.value = opt.id
+      copySheetOpen.value = false
+    }
 
     function formatRelative(ts: number): string {
       const diff = Date.now() - ts
@@ -680,6 +822,9 @@ export default defineComponent({
       isMutinyTestnet, txHistory, formatRelative,
       tab,
       depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
+      showAmountForm, copySheetOpen, copyOptions,
+      selectPayload, selectedPayload, selectedPayloadId, qrValue, qrIsUri,
+      lnurlStatus, lnurlError,
       sendInput, sendAmount, sendLoading, sendStatus, sendStatusText,
       sendDetected, sendNeedsAmount, sendKindLabel, sendButtonLabel, canSend,
       sendSetMax, doSend, resetSend,
@@ -794,6 +939,41 @@ export default defineComponent({
   font-size: 0.72rem; font-weight: 700; letter-spacing: 1px;
   text-transform: uppercase; color: var(--text-muted);
 }
+
+/* Unified receive: QR centred, caption + actions stacked beneath it. */
+.recv-qr-block { align-items: center; text-align: center; gap: 12px; }
+.qr-skeleton {
+  width: 244px; height: 244px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-elevated); border: 1px dashed var(--border-light);
+  border-radius: 14px; color: var(--text-muted); font-size: 0.85rem;
+}
+.qr-meta { min-height: 1.1rem; }
+.qr-meta-label { font-size: 0.78rem; color: var(--text); font-weight: 600; }
+.qr-meta-label.hint { color: var(--text-muted); font-weight: 400; }
+.qr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; width: 100%; }
+.qr-actions .btn-outline { flex: 1; min-width: 130px; }
+
+/* Copy sheet: one tappable row per individual payload. */
+.copy-sheet {
+  display: flex; flex-direction: column; gap: 6px;
+  width: 100%; margin-top: 4px;
+}
+.copy-sheet-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; text-align: left;
+  background: var(--bg-elevated); border: 1px solid var(--border-light);
+  border-radius: 10px; color: var(--text); cursor: pointer;
+  font-family: inherit; font-size: 0.8rem;
+  transition: border-color 0.15s ease, color 0.15s ease;
+  &:hover { border-color: var(--blue); color: var(--blue); }
+  &.active { border-color: var(--gold); color: var(--gold); background: rgba(247, 201, 72, 0.08); }
+}
+.copy-sheet-label { font-weight: 600; white-space: nowrap; }
+.copy-sheet-value { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
+
+/* Fixed-amount BOLT11 form + active-invoice status block. */
+.amt-form { display: flex; flex-direction: column; gap: 10px; width: 100%; }
 
 /* Unified send input + detected-rail chip. */
 .send-input {

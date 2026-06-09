@@ -1,6 +1,6 @@
 {
   "name": "arkade-coinflip",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "description": "Trustless coinflip betting protocol for Ark",
   "main": "dist/index.js",
   "module": "dist/index.js",

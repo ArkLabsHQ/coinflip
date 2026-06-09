@@ -13,10 +13,10 @@ describe('copyToClipboard', () => {
 
   beforeEach(() => {
     // jsdom doesn't implement execCommand; provide a spy returning success.
-    ;(document as any).execCommand = vi.fn(() => true)
+    (document as any).execCommand = vi.fn(() => true)
   })
   afterEach(() => {
-    ;(navigator as any).clipboard = origClipboard
+    (navigator as any).clipboard = origClipboard
     ;(document as any).execCommand = origExec
     vi.restoreAllMocks()
   })
@@ -44,7 +44,7 @@ describe('copyToClipboard', () => {
 
   it('falls back to execCommand in a NON-secure context (the LAN-IP bug)', async () => {
     // No navigator.clipboard at all (how non-secure contexts present it).
-    ;(navigator as any).clipboard = undefined
+    (navigator as any).clipboard = undefined
     setSecureContext(false)
     expect(await copyToClipboard('bcrt1p...')).toBe(true)
     expect(document.execCommand).toHaveBeenCalledWith('copy')
@@ -60,7 +60,7 @@ describe('copyToClipboard', () => {
   })
 
   it('returns false (not throw) when both paths fail', async () => {
-    ;(navigator as any).clipboard = undefined
+    (navigator as any).clipboard = undefined
     setSecureContext(false)
     ;(document as any).execCommand = vi.fn(() => { throw new Error('blocked') })
     expect(await copyToClipboard('x')).toBe(false)

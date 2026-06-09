@@ -707,7 +707,7 @@ export default defineComponent({
       // Skin
       skins: SKINS, currentSkinId, currentSkin, selectSkin,
       skinOwnsGesture, onSkinLaunch, onSkinCashout,
-      oddsEdgeBps,
+      oddsEdgeBps, dust,
       // History modal
       historyOpen, historyGames, openHistory,
       detailOpen, detailGameId, openDetail, playerPubkey, networkName,

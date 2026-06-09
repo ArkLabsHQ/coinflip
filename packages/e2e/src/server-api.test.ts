@@ -125,7 +125,7 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
     expect(resp.body.maxAvailable).toBeGreaterThanOrEqual(BET_AMOUNT)
   })
 
-  it('POST /api/play starts a trustless game and escrows the house stake', async () => {
+  it('POST /api/play starts a trustless game and returns the pot economics', async () => {
     if (!arkAvailable) return
 
     // A funded player wallet, used only to commit a hash + change address.
@@ -157,7 +157,7 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
     expect(playRes.status).toBe(200)
     expect(playRes.body.gameId).toBeTruthy()
     expect(playRes.body.escrowAddress).toBeTruthy()
-    expect(playRes.body.houseEscrow?.value).toBe(BET_AMOUNT)
+    expect(playRes.body.pot - playRes.body.betAmount).toBe(BET_AMOUNT)
     expect(playRes.body.houseHash).toMatch(/^[0-9a-f]{64}$/i)
 
     const row = await serverDeps!.repos.games.get(playRes.body.gameId)

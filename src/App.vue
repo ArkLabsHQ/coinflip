@@ -4,8 +4,10 @@
          that replaces the entire topbar nav. Click opens the WalletDrawer. -->
     <button v-if="isInitialized" class="float-pill mono" @click="walletOpen = true" :title="connTitle">
       <span class="conn-dot" :class="arkStatus"></span>
+      <span class="wallet-ico" aria-hidden="true">👛</span>
       <span class="balance-num">{{ formatSats(walletBalance) }}</span>
       <span class="balance-unit">sats</span>
+      <span class="pill-caret" aria-hidden="true">›</span>
     </button>
 
     <router-view v-slot="{ Component }">
@@ -20,7 +22,7 @@
       &laquo; play
     </router-link>
 
-    <WalletDrawer v-model:open="walletOpen" />
+    <WalletDrawer v-model:open="walletOpen" :dismissible="!forceWalletOpen" />
   </div>
 </template>
 
@@ -52,6 +54,14 @@ export default defineComponent({
 
     const walletOpen = ref(false)
 
+    // A connected wallet with a zero balance can't play — force the drawer open
+    // (and non-dismissible, via :dismissible below) so the user funds it first.
+    // Gated on 'connected' so a transient 0 during connect/error doesn't trap them.
+    const forceWalletOpen = computed(() =>
+      isInitialized.value && arkStatus.value === 'connected' && walletBalance.value === 0,
+    )
+    watch(forceWalletOpen, (force) => { if (force) walletOpen.value = true }, { immediate: true })
+
     // Deep-link support: /wallet (legacy) or /?wallet=open both open the drawer.
     function maybeOpenFromRoute() {
       if (route.path === '/wallet' || route.query.wallet === 'open') {
@@ -70,7 +80,7 @@ export default defineComponent({
 
     function formatSats(n: number): string { return n.toLocaleString() }
 
-    return { isInitialized, walletBalance, formatSats, walletOpen, arkStatus, connTitle }
+    return { isInitialized, walletBalance, formatSats, walletOpen, forceWalletOpen, arkStatus, connTitle }
   },
 })
 </script>
@@ -90,20 +100,40 @@ export default defineComponent({
   z-index: 50;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border-light);
+  /* Stronger, always-on affordance so it reads as a tappable wallet button. */
+  border: 1px solid var(--gold-dim, #d4a530);
   color: var(--text);
-  padding: 8px 14px;
+  padding: 8px 12px 8px 14px;
   border-radius: 999px;
   font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.18s ease;
   backdrop-filter: blur(10px);
-  &:hover { border-color: var(--gold); box-shadow: 0 0 12px var(--gold-glow); }
+  box-shadow: 0 0 0 1px rgba(247, 201, 72, 0.08), 0 4px 14px rgba(0, 0, 0, 0.35);
+  &:hover {
+    border-color: var(--gold);
+    box-shadow: 0 0 16px var(--gold-glow);
+    transform: translateY(-1px);
+    .pill-caret { transform: translateX(2px); color: var(--gold); }
+  }
+  .wallet-ico { font-size: 0.95rem; line-height: 1; }
   .balance-num { color: var(--gold); }
   .balance-unit { color: var(--text-muted); font-size: 0.72rem; }
+  .pill-caret { color: var(--text-muted); font-size: 1.1rem; line-height: 1; transition: transform 0.18s ease, color 0.18s ease; }
+}
+
+/* Widescreen: the top-right corner is far from the centered content column and
+   easy to miss — align the pill to the middle-top, matching the layout container. */
+@media (min-width: 768px) {
+  .float-pill {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    &:hover { transform: translateX(-50%) translateY(-1px); }
+  }
 }
 
 .mode-switch {

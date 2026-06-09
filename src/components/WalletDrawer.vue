@@ -12,7 +12,8 @@
             <span class="balance-unit">sats</span>
           </div>
         </div>
-        <button class="close-btn" @click="close" aria-label="Close">&times;</button>
+        <button v-if="dismissible" class="close-btn" @click="close" aria-label="Close">&times;</button>
+        <span v-else class="must-fund-hint">Add funds to play</span>
       </header>
 
       <!-- Connection state banner — gates all action buttons so we can't
@@ -365,6 +366,10 @@ export default defineComponent({
   components: { QrCode },
   props: {
     open: { type: Boolean, default: false },
+    // When false (e.g. zero balance), the drawer can't be dismissed — the close
+    // button is hidden and backdrop clicks are ignored — so the user funds the
+    // wallet before returning to the game.
+    dismissible: { type: Boolean, default: true },
   },
   emits: ['update:open'],
   setup(props, { emit }) {
@@ -803,7 +808,7 @@ export default defineComponent({
       if (await copyToClipboard(text)) showToast('Copied!')
     }
 
-    function close() { emit('update:open', false) }
+    function close() { if (props.dismissible) emit('update:open', false) }
 
     // Balance updates are push-based via the SDK contract watcher (one SSE
     // stream + a 60s failsafe poll, wired in ark.ts `notifyIncomingFunds`), so
@@ -876,6 +881,11 @@ export default defineComponent({
   font-size: 1.8rem; cursor: pointer; line-height: 1; padding: 4px 8px;
 }
 .close-btn:hover { color: var(--text); }
+.must-fund-hint {
+  font-size: 0.7rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--gold); background: rgba(247, 201, 72, 0.1);
+  border: 1px solid var(--gold); border-radius: 999px; padding: 5px 12px; align-self: center;
+}
 
 .conn-banner {
   margin: 12px 16px 0;

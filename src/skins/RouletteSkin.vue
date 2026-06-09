@@ -39,7 +39,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, computed, ref, watch, type PropType } from 'vue'
+import { defineComponent, computed, ref, watch, onUnmounted, type PropType } from 'vue'
 import type { SkinState } from './types'
 
 // One full revolution under the pointer takes WHEEL_SPIN_MS. We rotate by a
@@ -83,29 +83,54 @@ export default defineComponent({
     // rotations across games (always > previous angle) so consecutive spins
     // visibly turn forward.
     const rotation = ref(0)
+    // While waiting for the on-chain reveal we free-spin at a constant rate
+    // (driven by rAF, transition disabled) so the wheel NEVER stops before the
+    // result lands — a fixed-duration pre-spin would freeze if the settle takes
+    // longer than the animation. When `roll` arrives we hand back to an eased
+    // CSS transition that decelerates onto the exact slot.
+    const freeSpin = ref(false)
+    const FREE_DPS = (360 * SPIN_TURNS) / (WHEEL_SPIN_MS / 1000) // deg/sec
+    let rafId: number | null = null
+    let lastTs = 0
+
+    function stepSpin(ts: number) {
+      if (!freeSpin.value) return
+      if (lastTs) rotation.value += FREE_DPS * ((ts - lastTs) / 1000)
+      lastTs = ts
+      rafId = requestAnimationFrame(stepSpin)
+    }
 
     watch(() => phase.value, (p) => {
       if (p === 'flipping') {
-        // Pre-roll spin: a few full turns; the final position is locked in
-        // after the on-chain reveal hits the `resolved` watcher below.
-        rotation.value = rotation.value + 360 * SPIN_TURNS
+        freeSpin.value = true
+        lastTs = 0
+        rafId = requestAnimationFrame(stepSpin)
+      } else if (p === 'idle') {
+        freeSpin.value = false
+        if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
+        rotation.value = 0
       }
     })
 
     watch(() => roll.value, (newRoll) => {
       if (newRoll === null || newRoll === undefined) return
-      // Land on the rolled slot. Snap to the next full N turns past the
-      // current rotation so the wheel only ever spins forward.
+      // Stop free-spinning and ease onto the rolled slot. Snap to the next full
+      // N turns past the current rotation so the wheel only ever spins forward.
+      freeSpin.value = false
+      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
       const settle = 360 * SPIN_TURNS - angleOf(newRoll)
-      const cur = rotation.value
-      const turns = Math.ceil(cur / 360)
+      const turns = Math.ceil(rotation.value / 360)
       rotation.value = turns * 360 + settle
     })
 
+    onUnmounted(() => { if (rafId !== null) cancelAnimationFrame(rafId) })
+
     // CSS transition is driven by inline-style transform on .wheel-inner.
+    // During the free-spin the transition is off (rAF drives it); once the roll
+    // lands we re-enable the eased transition so it decelerates onto the slot.
     const wheelStyle = computed(() => ({
       transform: `rotate(${rotation.value}deg)`,
-      transition: phase.value === 'idle'
+      transition: phase.value === 'idle' || freeSpin.value
         ? 'none'
         : `transform ${WHEEL_SPIN_MS}ms cubic-bezier(0.2, 0.7, 0.2, 1)`,
     }))

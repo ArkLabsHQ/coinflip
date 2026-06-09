@@ -3,6 +3,13 @@
     <div class="gauge">
       <div class="gauge-mult mono">{{ gaugeText }}</div>
       <div class="gauge-sub">{{ gaugeSub }}</div>
+      <!-- Chosen cash-out alongside the outcome — visible from the moment the
+           bet is committed (no mid-game cash-out) through the revealed result. -->
+      <div v-if="showReadout" class="gauge-readout">
+        <span class="ro-chosen mono">YOU {{ lockedMult.toFixed(2) }}×</span>
+        <span class="ro-arrow">→</span>
+        <span class="ro-result mono" :class="resultClass">{{ resultText }}</span>
+      </div>
     </div>
 
     <div class="rocket-controls">
@@ -29,7 +36,8 @@
       </button>
 
       <div v-else-if="state.phase === 'settling' || state.phase === 'flipping'" class="rocket-settling">
-        LOCKING IN @ {{ lockedMult.toFixed(2) }}×
+        <span class="settling-label">LOCKED IN @ {{ lockedMult.toFixed(2) }}×</span>
+        <span class="settling-dots"><i></i><i></i><i></i></span>
       </div>
     </div>
 
@@ -161,6 +169,36 @@ export default defineComponent({
     })
     onUnmounted(() => { if (rafId !== null) cancelAnimationFrame(rafId) })
 
+    // The multiplier the rocket actually reached, derived from the revealed
+    // roll. roll = lo is exactly the player's locked multiplier (the boundary):
+    // roll > lo → reached higher (win), roll < lo → crashed early (loss). So
+    // this single value is the "target"/outcome the chosen cash-out is measured
+    // against — shown alongside the player's pick so the result is legible.
+    const crashMult = computed<number | null>(() => {
+      const roll = props.state.outcome?.roll
+      if (roll == null) return null
+      return ROCKET_ODDS_N / Math.max(1, ROCKET_ODDS_N - roll)
+    })
+    // Readout (chosen vs. outcome) shows from cash-out through the result —
+    // you can't cash out once it's committed, so keep both numbers on screen.
+    const showReadout = computed(() =>
+      props.state.phase === 'settling' || props.state.phase === 'flipping' || props.state.phase === 'resolved',
+    )
+    const resultText = computed(() => {
+      if (props.state.phase === 'settling' || props.state.phase === 'flipping') return 'resolving…'
+      if (props.state.phase === 'resolved') {
+        if (crashMult.value != null) {
+          return `${props.state.outcome?.won ? 'reached' : 'crashed'} ${crashMult.value.toFixed(2)}×`
+        }
+        return props.state.outcome?.won ? 'won' : 'lost'
+      }
+      return ''
+    })
+    const resultClass = computed(() => {
+      if (props.state.phase === 'resolved') return props.state.outcome?.won ? 'won' : 'lost'
+      return 'pending'
+    })
+
     // ── Gauge presentation ────────────────────────────────────────────
     const gaugeClass = computed(() => {
       if (props.state.phase === 'climbing') return 'climbing'
@@ -192,6 +230,7 @@ export default defineComponent({
     return {
       gaugeClass, gaugeText, gaugeSub,
       displayMult, lockedMult, minMult, targetMult, cashoutSats,
+      showReadout, resultText, resultClass,
       canLaunch, canCashOut,
       onLaunch, onCashOut,
     }
@@ -241,8 +280,12 @@ export default defineComponent({
   box-shadow: 0 0 24px rgba(56, 189, 248, 0.25), inset 0 0 36px rgba(56, 189, 248, 0.06);
 }
 .rocket-skin.climbing .gauge-mult { color: var(--blue, #38bdf8); animation: climbPulse 0.9s ease-in-out infinite; }
-.rocket-skin.settling .gauge { border-color: var(--gold); box-shadow: 0 0 22px var(--gold-glow); }
-.rocket-skin.settling .gauge-mult { color: var(--gold); }
+.rocket-skin.settling .gauge { border-color: var(--gold); animation: settleBreath 1.2s ease-in-out infinite; }
+.rocket-skin.settling .gauge-mult { color: var(--gold); animation: climbPulse 0.9s ease-in-out infinite; }
+@keyframes settleBreath {
+  0%, 100% { box-shadow: 0 0 18px var(--gold-glow); }
+  50%      { box-shadow: 0 0 36px rgba(247, 201, 72, 0.5), inset 0 0 32px rgba(247, 201, 72, 0.08); }
+}
 .rocket-skin.won .gauge {
   border-color: var(--green, #22c55e);
   box-shadow: 0 0 30px rgba(34, 197, 94, 0.4), inset 0 0 40px rgba(34, 197, 94, 0.08);
@@ -305,7 +348,35 @@ export default defineComponent({
   50%      { box-shadow: 0 0 28px rgba(34, 197, 94, 0.55); }
 }
 .rocket-cashout-sats { font-size: 0.68rem; font-weight: 700; letter-spacing: 1px; opacity: 0.85; }
-.rocket-settling { color: var(--gold); font-weight: 700; letter-spacing: 2px; font-size: 0.78rem; }
+
+/* Chosen-vs-outcome readout under the gauge multiplier. */
+.gauge-readout {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  margin-top: 6px; font-size: 0.74rem; font-weight: 700; letter-spacing: 0.5px;
+}
+.ro-chosen { color: var(--text-muted); }
+.ro-arrow { color: var(--text-dim, #6b6b80); }
+.ro-result.pending { color: var(--gold); }
+.ro-result.won { color: var(--green, #22c55e); }
+.ro-result.lost { color: var(--red); }
+
+/* Animated "resolving" state — keeps the panel alive while the server settles
+   so the game never freezes between cash-out and result. */
+.rocket-settling {
+  color: var(--gold); font-weight: 700; letter-spacing: 2px; font-size: 0.78rem;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+}
+.settling-dots { display: inline-flex; gap: 5px; }
+.settling-dots i {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--gold);
+  display: inline-block; animation: settleDot 1s ease-in-out infinite;
+}
+.settling-dots i:nth-child(2) { animation-delay: 0.16s; }
+.settling-dots i:nth-child(3) { animation-delay: 0.32s; }
+@keyframes settleDot {
+  0%, 100% { opacity: 0.3; transform: translateY(0); }
+  50%      { opacity: 1; transform: translateY(-4px); }
+}
 .rocket-hint {
   font-size: 0.62rem; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted);
 }

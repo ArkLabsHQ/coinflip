@@ -10,15 +10,19 @@ process.env.ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:707
 process.env.ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000'
 process.env.DATA_DIR = process.env.DATA_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'coinflip-regtest-'))
 
-const ESPLORA = process.env.ESPLORA_URL
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function faucet(address, amountBtc) {
-  const r = await fetch(`${ESPLORA}/faucet`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, amount: amountBtc }),
-  })
-  if (!r.ok) throw new Error(`faucet failed: ${r.status} ${await r.text()}`)
+  // The denigiri/master arkade-regtest stack dropped nigiri's HTTP `/faucet`
+  // (esplora no longer exposes it), so the old `fetch(${ESPLORA}/faucet)` 404s
+  // and house funding fails on startup. Fund through the Node orchestrator's
+  // bitcoin-core faucet instead — the same path the e2e helpers use. execFileSync
+  // with an argument array (no shell) keeps the address/amount free of any
+  // interpolation surface.
+  const { execFileSync } = require('child_process')
+  const script = path.resolve(__dirname, '../../arkade-regtest/regtest.mjs')
+  execFileSync('node', [script, 'faucet', address, String(amountBtc), '--confirm'],
+    { stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
 async function waitFor(wallet, kind, min, timeoutMs = 120000) {

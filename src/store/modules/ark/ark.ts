@@ -509,6 +509,25 @@ function requireWalletAndKey(rootState: RootState): { wallet: Wallet; privateKey
 }
 
 /**
+ * Both claim actions accept either a bare gameId (legacy callers) or a
+ * `{ gameId, mode }` object. Normalise to the object form, defaulting `mode` to
+ * 'manual' (a user click) when unspecified.
+ */
+function parseClaimPayload(
+  payload: string | { gameId: string; mode?: ClaimMode },
+): { gameId: string; mode: ClaimMode } {
+  return typeof payload === 'string'
+    ? { gameId: payload, mode: 'manual' }
+    : { gameId: payload.gameId, mode: payload.mode ?? 'manual' }
+}
+
+/** Decode an array of checkpoint PSBTs (hex) into Transactions — the shape both
+ *  the refund and forfeit claim submissions need before co-signing. */
+function decodeCheckpointTxs(checkpointsHex: string[]): Transaction[] {
+  return checkpointsHex.map((c) => Transaction.fromPSBT(hex.decode(c)))
+}
+
+/**
  * Subscribe to the ContractManager so a player escrow being spent on-Ark clears
  * its stalled-bet stash EAGERLY — the atomic sweep (house OR player win) spends
  * both escrows, so a `vtxo_spent` on the player's `coinflip-escrow` means the
@@ -1212,8 +1231,7 @@ const ark: Module<ArkState, RootState> = {
       { state, rootState, commit },
       payload: string | { gameId: string; mode?: ClaimMode },
     ) {
-      const { gameId, mode = 'manual' } =
-        typeof payload === 'string' ? { gameId: payload, mode: 'manual' as ClaimMode } : payload
+      const { gameId, mode } = parseClaimPayload(payload)
       if (state.claimingGames[gameId]) {
         throw new Error('A claim is already in progress for this game.')
       }
@@ -1238,7 +1256,7 @@ const ark: Module<ArkState, RootState> = {
         }
         const identity = SingleKey.fromHex(privateKey)
         const refundArk = Transaction.fromPSBT(hex.decode(stash.refundPsbt))
-        const refundCps = stash.refundCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+        const refundCps = decodeCheckpointTxs(stash.refundCheckpoints)
         try {
           await submitOffchain(wallet.arkProvider, identity, refundArk, refundCps, [0])
         } catch (e) {
@@ -1271,8 +1289,7 @@ const ark: Module<ArkState, RootState> = {
       { state, rootState, commit },
       payload: string | { gameId: string; mode?: ClaimMode },
     ) {
-      const { gameId, mode = 'manual' } =
-        typeof payload === 'string' ? { gameId: payload, mode: 'manual' as ClaimMode } : payload
+      const { gameId, mode } = parseClaimPayload(payload)
       if (state.claimingGames[gameId]) {
         throw new Error('A claim is already in progress for this game.')
       }
@@ -1298,7 +1315,7 @@ const ark: Module<ArkState, RootState> = {
         // signs both player slots; arkd signs server slots; the emulator signs
         // the tweaked slots after running the arkade script.
         const signed = await identity.sign(arkTx, [0, 1])
-        const cps = stash.forfeitCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
+        const cps = decodeCheckpointTxs(stash.forfeitCheckpoints)
 
         // POST to the emulator's /v1/tx with the partially-signed PSBT +
         // checkpoint PSBTs. The emulator returns the finalized PSBT once arkd

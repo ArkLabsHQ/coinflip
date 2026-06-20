@@ -11,6 +11,7 @@
 <script lang="ts">
 import { defineComponent, ref, watch } from 'vue'
 import QRCode from 'qrcode'
+import { getErrorMessage } from '@/utils/errors'
 
 /**
  * A minimal QR renderer used by the wallet receive panel.
@@ -61,7 +62,7 @@ export default defineComponent({
         pathD.value = path.join('')
         dataUrl.value = 'svg'
       } catch (e) {
-        console.warn('[QrCode] render failed:', e instanceof Error ? e.message : e)
+        console.warn('[QrCode] render failed:', getErrorMessage(e))
         dataUrl.value = ''
       }
     }

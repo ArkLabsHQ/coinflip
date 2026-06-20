@@ -80,6 +80,7 @@ import { defineComponent, PropType, ref, watch, computed } from 'vue'
 import { getGameDetails, type GameDetailsResponse } from '@/services/api'
 import { explorerTxUrl } from '@/utils/explorerUrl'
 import { copyToClipboard } from '@/utils/clipboard'
+import { getErrorMessage } from '@/utils/errors'
 
 // Tiny inline components — keeping this file standalone since they're not
 // reused elsewhere.
@@ -149,7 +150,7 @@ export default defineComponent({
       try {
         details.value = await getGameDetails(props.gameId, props.playerPubkey)
       } catch (e) {
-        const raw = e instanceof Error ? e.message : String(e)
+        const raw = getErrorMessage(e)
         // Server returns 404 + body `{"error":"Game not found"}` for BOTH
         // truly-missing IDs and pubkey-mismatch (auth shield). Surface a
         // friendlier message that hints at the most common cause for a

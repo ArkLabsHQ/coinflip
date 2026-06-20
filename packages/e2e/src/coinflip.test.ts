@@ -329,6 +329,10 @@ describe('integration: ark server connection', () => {
     const vtxoScript = new DefaultVtxo.Script({
       pubKey: pubkey,
       serverPubKey: serverPubkey,
+      // SDK 0.4.36 made csvTimelock required; use the SDK's own default
+      // (144 blocks) — this test only derives an address, so the exit
+      // timelock value is immaterial.
+      csvTimelock: DefaultVtxo.Script.DEFAULT_TIMELOCK,
     })
 
     const address = vtxoScript.address('rark', serverPubkey)

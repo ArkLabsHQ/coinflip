@@ -21,6 +21,7 @@ import {
   type Outpoint, type ForfeitResponse,
 } from '@/services/api'
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
+import { locateEscrowVtxo } from './locateEscrow'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
 import { getErrorMessage } from '@/utils/errors'
@@ -1089,23 +1090,15 @@ const ark: Module<ArkState, RootState> = {
       // rejected with `AMOUNT_TOO_LOW`). Replaces the prior hand-rolled
       // buildOffchainTx + submitOffchain.
       const playerEscrowTxid = await wallet.send({ address: playRes.escrowAddress, amount: tier })
-      // Find OUR output within the send tx — the SDK adds anchor + metadata
-      // outputs in arbitrary positions, so vout isn't guaranteed to be 0.
-      // Poll the indexer briefly for the matching VTXO.
-      const escrowPkHex = addressToPkScriptHex(playRes.escrowAddress)
+      // Find OUR output within the send tx (vout isn't guaranteed to be 0 — the
+      // SDK adds anchor/metadata outputs) and wait out indexer lag. The matching
+      // + poll/timeout logic lives in locateEscrowVtxo (unit-tested).
       const indexer = new RestIndexerProvider(state.server)
-      const playerEscrow: Outpoint = await (async () => {
-        const deadline = Date.now() + 10_000
-        while (Date.now() < deadline) {
-          try {
-            const { vtxos } = await indexer.getVtxos({ scripts: [escrowPkHex] })
-            const hit = vtxos.find((v) => v.txid === playerEscrowTxid && v.value === tier)
-            if (hit) return { txid: hit.txid, vout: hit.vout, value: hit.value }
-          } catch { /* transient — retry */ }
-          await new Promise((r) => setTimeout(r, 250))
-        }
-        throw new Error(`Could not locate player escrow VTXO in tx ${playerEscrowTxid} after 10s`)
-      })()
+      const playerEscrow: Outpoint = await locateEscrowVtxo(indexer, {
+        escrowPkHex: addressToPkScriptHex(playRes.escrowAddress),
+        txid: playerEscrowTxid,
+        amount: tier,
+      })
 
       // 2b. Stash a self-submittable refund BEFORE revealing. If the server now
       // stalls, the player can still reclaim the escrow after finalExpiration

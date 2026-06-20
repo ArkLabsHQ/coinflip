@@ -389,7 +389,7 @@ async function registerEscrowContract(stash: StashedRefund): Promise<void> {
     await cm.createContract({
       type: stash.contractVersion === 'v3' ? COINFLIP_ESCROW_V3_TYPE : COINFLIP_ESCROW_TYPE,
       params: stash.escrowContractParams,
-      script: hex.encode(ArkAddress.decode(stash.escrowAddress).pkScript),
+      script: addressToPkScriptHex(stash.escrowAddress),
       address: stash.escrowAddress,
       state: 'active',
       label: stash.gameId,
@@ -463,10 +463,48 @@ async function deactivateEscrowContract(stash: StashedRefund | undefined): Promi
   if (!sdkWallet || !stash?.escrowAddress) return
   try {
     const cm = await sdkWallet.getContractManager()
-    await cm.setContractState(hex.encode(ArkAddress.decode(stash.escrowAddress).pkScript), 'inactive')
+    await cm.setContractState(addressToPkScriptHex(stash.escrowAddress), 'inactive')
   } catch (e) {
     console.warn('[contract] could not deactivate player escrow (continuing):', getErrorMessage(e))
   }
+}
+
+/** Address → pkScript hex — the dense `ArkAddress.decode(...).pkScript` chain,
+ *  named once so its three call sites read as intent, not bit-twiddling. */
+function addressToPkScriptHex(address: string): string {
+  return hex.encode(ArkAddress.decode(address).pkScript)
+}
+
+/** Load the stashed refund for a game, if any. The stash is the trustless
+ *  backstop; several actions look it up by the same `gameId` find. */
+async function getRefundStash(gameId: string): Promise<StashedRefund | undefined> {
+  return (await loadRefunds()).find((x) => x.gameId === gameId)
+}
+
+/**
+ * A bet is finished — resolved on the happy path, or claimed/reclaimed on a
+ * stall: drop its stash AND stop the ContractWatcher watching its escrow. Both
+ * steps are best-effort and must always run together, so they live here rather
+ * than being re-paired at four call sites.
+ */
+async function finishBet(gameId: string, stash: StashedRefund | undefined): Promise<void> {
+  await clearRefund(gameId)
+  await deactivateEscrowContract(stash)
+}
+
+/**
+ * Assert the wallet is connected AND the private key is available — the guard
+ * every signing action (play / reclaim / forfeit-claim) opens with — and return
+ * both. Returning the wallet (rather than just throwing) hands the caller a
+ * NON-NULL `Wallet`, so TypeScript narrows it for the rest of the action without
+ * each site re-checking the module-scoped `sdkWallet`. Stays in this module
+ * because it reads that module-scoped global.
+ */
+function requireWalletAndKey(rootState: RootState): { wallet: Wallet; privateKey: string } {
+  if (!sdkWallet) throw new Error('Wallet not connected')
+  const privateKey = rootState.wallet.privateKey
+  if (!privateKey) throw new Error('No wallet key available')
+  return { wallet: sdkWallet, privateKey }
 }
 
 /**
@@ -981,9 +1019,7 @@ const ark: Module<ArkState, RootState> = {
       { state, rootState },
       { tier, side, oddsN, oddsTarget, oddsLo }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
     ) {
-      if (!sdkWallet) throw new Error('Wallet not connected')
-      const privateKey = rootState.wallet.privateKey
-      if (!privateKey) throw new Error('No wallet key available')
+      const { wallet, privateKey } = requireWalletAndKey(rootState)
       const playerPubkey = rootState.wallet.publicKey
       if (!playerPubkey) throw new Error('No wallet public key available')
       const playerChangeAddress = state.arkAddress
@@ -991,7 +1027,7 @@ const ark: Module<ArkState, RootState> = {
 
       const identity = SingleKey.fromHex(privateKey)
       void identity // kept for downstream signing helpers (refund stash)
-      const arkProvider = sdkWallet.arkProvider
+      const arkProvider = wallet.arkProvider
       const arkInfo = await arkProvider.getInfo()
       void arkInfo // ensures arkProvider is warm before /play call
 
@@ -1026,7 +1062,7 @@ const ark: Module<ArkState, RootState> = {
         }
         crypto.getRandomValues(secretBytes)
       }
-      const playerSecretHex = Array.from(secretBytes).map((b) => b.toString(16).padStart(2, '0')).join('')
+      const playerSecretHex = hex.encode(secretBytes)
       const playerHash = await createHash(secretBytes)
 
       // Sanity check spendable balance BEFORE starting the game. Doing it after
@@ -1034,7 +1070,7 @@ const ark: Module<ArkState, RootState> = {
       // strand the game on any selection failure, and stranded games count
       // against the server's per-player cap → "Too many pending games". The
       // actual VTXO selection happens inside wallet.send below.
-      const spendableTotal = (await sdkWallet.getVtxos())
+      const spendableTotal = (await wallet.getVtxos())
         .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
         .reduce((sum: number, v: ExtendedVirtualCoin) => sum + v.value, 0)
       if (spendableTotal < tier) {
@@ -1052,11 +1088,11 @@ const ark: Module<ArkState, RootState> = {
       // output, which arkd accepts (a non-OP_RETURN sub-dust output is
       // rejected with `AMOUNT_TOO_LOW`). Replaces the prior hand-rolled
       // buildOffchainTx + submitOffchain.
-      const playerEscrowTxid = await sdkWallet.send({ address: playRes.escrowAddress, amount: tier })
+      const playerEscrowTxid = await wallet.send({ address: playRes.escrowAddress, amount: tier })
       // Find OUR output within the send tx — the SDK adds anchor + metadata
       // outputs in arbitrary positions, so vout isn't guaranteed to be 0.
       // Poll the indexer briefly for the matching VTXO.
-      const escrowPkHex = hex.encode(ArkAddress.decode(playRes.escrowAddress).pkScript)
+      const escrowPkHex = addressToPkScriptHex(playRes.escrowAddress)
       const indexer = new RestIndexerProvider(state.server)
       const playerEscrow: Outpoint = await (async () => {
         const deadline = Date.now() + 10_000
@@ -1143,10 +1179,8 @@ const ark: Module<ArkState, RootState> = {
           `Your ${tier} sat stake is safe; if it doesn't resolve you can reclaim it after ${when} (see "Reclaim stalled bets").`,
         )
       }
-      const doneStash = (await loadRefunds()).find((x) => x.gameId === playRes.gameId)
-      await clearRefund(playRes.gameId)
-      // Bet done → stop watching this escrow (best-effort).
-      await deactivateEscrowContract(doneStash)
+      // Bet resolved → drop the stash and stop watching the escrow (best-effort).
+      await finishBet(playRes.gameId, await getRefundStash(playRes.gameId))
 
       // No manual refresh — the contract watcher fires on the sweep's vtxo
       // events and pushes a (coalesced, light) balance update.
@@ -1190,10 +1224,8 @@ const ark: Module<ArkState, RootState> = {
       if (state.claimingGames[gameId]) {
         throw new Error('A claim is already in progress for this game.')
       }
-      if (!sdkWallet) throw new Error('Wallet not connected')
-      const privateKey = rootState.wallet.privateKey
-      if (!privateKey) throw new Error('No wallet key available')
-      const stash = (await loadRefunds()).find((x) => x.gameId === gameId)
+      const { wallet, privateKey } = requireWalletAndKey(rootState)
+      const stash = await getRefundStash(gameId)
       if (!stash) throw new Error('No stashed refund for this game')
       commit('SET_CLAIMING', { gameId, info: { kind: 'refund', mode } })
       try {
@@ -1215,7 +1247,7 @@ const ark: Module<ArkState, RootState> = {
         const refundArk = Transaction.fromPSBT(hex.decode(stash.refundPsbt))
         const refundCps = stash.refundCheckpoints.map((c) => Transaction.fromPSBT(hex.decode(c)))
         try {
-          await submitOffchain(sdkWallet.arkProvider, identity, refundArk, refundCps, [0])
+          await submitOffchain(wallet.arkProvider, identity, refundArk, refundCps, [0])
         } catch (e) {
           // Race: our chain-time read passed the CLTV but arkd's tip MTP still
           // trails it. Surface a clear "wait for the next block" instead of the
@@ -1226,9 +1258,8 @@ const ark: Module<ArkState, RootState> = {
           }
           throw e
         }
-        await clearRefund(gameId)
-        // Bet done (own stake reclaimed) → stop watching this escrow.
-        await deactivateEscrowContract(stash)
+        // Own stake reclaimed → drop the stash and stop watching the escrow.
+        await finishBet(gameId, stash)
         // Balance update is push-based via the contract watcher (refund vtxo event).
       } finally {
         commit('CLEAR_CLAIMING', gameId)
@@ -1252,10 +1283,8 @@ const ark: Module<ArkState, RootState> = {
       if (state.claimingGames[gameId]) {
         throw new Error('A claim is already in progress for this game.')
       }
-      if (!sdkWallet) throw new Error('Wallet not connected')
-      const privateKey = rootState.wallet.privateKey
-      if (!privateKey) throw new Error('No wallet key available')
-      const stash = (await loadRefunds()).find((x) => x.gameId === gameId)
+      const { privateKey } = requireWalletAndKey(rootState)
+      const stash = await getRefundStash(gameId)
       // hasStashedForfeit folds revealed + all-fields-present into one predicate
       // shared with StalledBets and the auto-claim poll. Keep the "wasn't
       // revealed" case as a distinct message (it points the user at refund); the
@@ -1299,9 +1328,8 @@ const ark: Module<ArkState, RootState> = {
           throw new Error(`Emulator rejected forfeit: ${text}`)
         }
 
-        await clearRefund(gameId)
-        // Bet done (full pot claimed via forfeit) → stop watching this escrow.
-        await deactivateEscrowContract(stash)
+        // Full pot claimed via forfeit → drop the stash and stop watching the escrow.
+        await finishBet(gameId, stash)
         // Balance update is push-based via the contract watcher (claim vtxo event).
       } finally {
         commit('CLEAR_CLAIMING', gameId)
@@ -1329,8 +1357,7 @@ const ark: Module<ArkState, RootState> = {
         // contract — so the panel still clears even if the event path no-ops.
         try {
           if ((await apiGetGame(stash.gameId)).status === 'resolved') {
-            await clearRefund(stash.gameId)
-            await deactivateEscrowContract(stash)
+            await finishBet(stash.gameId, stash)
             continue
           }
         } catch { /* server unreachable — fall through to the CLTV-gated claim */ }

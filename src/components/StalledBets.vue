@@ -57,6 +57,7 @@
 import { defineComponent, ref, computed, onMounted, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import type { StashedRefund, ClaimingInfo } from '@/store/modules/ark/ark'
+import { hasStashedForfeit } from '@/store/modules/ark/forfeitStash'
 
 export default defineComponent({
   name: 'StalledBets',
@@ -92,9 +93,10 @@ export default defineComponent({
       if (typeof t === 'number') chainTime.value = t
     }
 
-    /** True when the stash has an arkade-script forfeit and the player has revealed. */
-    const hasForfeit = (b: StashedRefund) =>
-      b.revealed === true && !!b.forfeitPsbt && !!b.forfeitEmulatorUrl && b.forfeitClaimableAt !== undefined
+    /** True when the stash holds a complete, revealed arkade-script forfeit.
+     *  Single source of truth shared with the store's claimForfeit guard and
+     *  the background auto-claim poll (see forfeitStash.hasStashedForfeit). */
+    const hasForfeit = (b: StashedRefund) => hasStashedForfeit(b)
 
     /** Forfeit claimable-at: absolute CLTV pinned in the leaf at /play time. */
     const forfeitClaimableAt = (b: StashedRefund): number => b.forfeitClaimableAt ?? Number.MAX_SAFE_INTEGER

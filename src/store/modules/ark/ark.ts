@@ -18,8 +18,9 @@ import { initSwaps, destroySwaps } from '@/services/boltz'
 import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
   forfeit as apiForfeit, getGame as apiGetGame,
-  type Outpoint,
+  type Outpoint, type ForfeitResponse,
 } from '@/services/api'
+import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
 
@@ -395,6 +396,58 @@ async function registerEscrowContract(stash: StashedRefund): Promise<void> {
     const msg = e instanceof Error ? e.message : String(e)
     if (/already exists|duplicate/i.test(msg)) return // re-register is fine
     console.warn('[contract] could not register player escrow (continuing):', msg)
+  }
+}
+
+/**
+ * Best-effort R1 forfeit recovery, attempted ONLY after a `/commit` failure.
+ *
+ * Why here, why now: the joint pot the forfeit leaf sweeps exists only once the
+ * house has escrowed, which — under lazy funding (v0.3.5+) — happens at the
+ * START of `/commit`, before the covenant sweep. So a FAILED `/commit` is the
+ * single window in which a funded-but-unswept pot can linger; that is exactly
+ * the state the arkade-script `playerForfeit` leaf recovers. We probe
+ * `/forfeit`: the server returns a claim PSBT iff that pot exists, otherwise it
+ * refuses (surfaced here as an undefined `forfeit`) and the player still has the
+ * self-refund stash for their own stake.
+ *
+ * The security decision — emulator present? pot present? payout bound to OUR
+ * change address? — lives in the pure, unit-tested `resolveForfeitStash`; this
+ * wrapper is only the network/storage glue around it. It NEVER throws: a forfeit
+ * that can't be stashed must not disturb the "still settling" path that follows.
+ */
+async function stashForfeitRecovery(
+  gameId: string,
+  playerEscrow: Outpoint,
+  expectedPayoutAddress: string,
+  playerSecretHex: string,
+): Promise<void> {
+  let emulatorUrl: string | undefined
+  let forfeit: ForfeitResponse | undefined
+  try {
+    const net = await getNetwork()
+    emulatorUrl = net.emulator?.url
+    // Only probe the server when an emulator exists — without the covenant
+    // co-signer the forfeit leaf is unspendable, so the call would be wasted.
+    if (emulatorUrl) {
+      try {
+        forfeit = await apiForfeit(gameId, playerEscrow)
+      } catch (e) {
+        // Expected whenever there is no joint pot yet (house never funded), the
+        // game already resolved, or it is a legacy non-arkade game. Not an error:
+        // `resolveForfeitStash` maps the undefined `forfeit` to a 'no-pot' skip.
+        console.warn('[trustless] /forfeit probe found no claimable pot (continuing):', e instanceof Error ? e.message : e)
+      }
+    }
+  } catch (e) {
+    console.warn('[trustless] could not reach /api/network for forfeit (continuing):', e instanceof Error ? e.message : e)
+  }
+
+  const decision = resolveForfeitStash({ emulatorUrl, forfeit, expectedPayoutAddress, playerSecretHex })
+  if (decision.kind === 'stash') {
+    await updateRefundStash(gameId, decision.patch)
+  } else {
+    console.warn(`[trustless] forfeit not stashed (${decision.reason})`)
   }
 }
 
@@ -1046,31 +1099,12 @@ const ark: Module<ArkState, RootState> = {
         console.warn('[trustless] could not stash refund (continuing):', e instanceof Error ? e.message : e)
       }
 
-      // 2c. Stash the arkade-script forfeit tx. The emulator URL comes from
-      // /api/network (the server publishes the browser-reachable one). The
-      // PSBT goes to the emulator's /v1/tx — the emulator validates the
-      // covenant, co-signs the tweaked slot, and forwards to arkd.
-      // VERIFY before stashing: payoutAddress must equal our own change address.
-      try {
-        const { emulator } = await getNetwork()
-        if (!emulator) {
-          throw new Error('Server reports no emulator configured — required for forfeit stash')
-        }
-        const f = await apiForfeit(playRes.gameId, playerEscrow)
-        if (f.payoutAddress !== playerChangeAddress) {
-          console.warn('[trustless] forfeit payoutAddress mismatch — refusing to stash')
-        } else {
-          await updateRefundStash(playRes.gameId, {
-            forfeitPsbt: f.forfeitPsbt,
-            forfeitCheckpoints: f.forfeitCheckpoints,
-            forfeitClaimableAt: f.forfeitClaimableAt,
-            forfeitEmulatorUrl: emulator.url,
-            playerSecretHex,
-          })
-        }
-      } catch (e) {
-        console.warn('[trustless] could not stash forfeit (continuing):', e instanceof Error ? e.message : e)
-      }
+      // NOTE: the arkade-script forfeit is intentionally NOT stashed here. The
+      // joint pot it sweeps does not exist yet — under lazy funding the house
+      // only escrows at /commit. Probing /forfeit now would always be refused
+      // ("no joint pot"). The forfeit is stashed instead in the /commit failure
+      // path below, the one window where a funded-but-unswept pot can linger.
+      // See stashForfeitRecovery().
 
       // 3. Reveal + resolve. The server settles via the emulator-bound
       // covenant for both win cases — no client signature needed. On
@@ -1085,6 +1119,17 @@ const ark: Module<ArkState, RootState> = {
         await updateRefundStash(playRes.gameId, { revealed: true })
         result = await apiCommit(playRes.gameId, playerSecretHex, playerEscrow)
       } catch (e) {
+        // /commit failed AFTER the player revealed (revealed:true is stashed
+        // above). Under lazy funding the house escrow is created at the START of
+        // /commit (fundHouseEscrowOnce) — before the covenant sweep — so a
+        // failure here can leave a funded-but-unswept joint pot. That is the one
+        // state the R1 `playerForfeit` leaf recovers: probe /forfeit now (it only
+        // succeeds once that pot exists) and stash the claim so the player can
+        // sweep the FULL pot after the CLTV if the operator never re-settles.
+        // Race-free: the forfeit's CLTV opens at finalExpiration, long after a
+        // healthy operator's autonomous reconcile would have landed.
+        await stashForfeitRecovery(playRes.gameId, playerEscrow, playerChangeAddress, playerSecretHex)
+
         // Soft messaging: a /commit failure almost always means the operator is
         // still settling (it finishes autonomously). Surface that calmly and
         // log the underlying error rather than steering the user straight at
@@ -1209,14 +1254,16 @@ const ark: Module<ArkState, RootState> = {
       const privateKey = rootState.wallet.privateKey
       if (!privateKey) throw new Error('No wallet key available')
       const stash = (await loadRefunds()).find((x) => x.gameId === gameId)
-      if (
-        !stash || !stash.forfeitPsbt || !stash.forfeitCheckpoints ||
-        !stash.forfeitEmulatorUrl || stash.forfeitClaimableAt === undefined
-      ) {
+      // hasStashedForfeit folds revealed + all-fields-present into one predicate
+      // shared with StalledBets and the auto-claim poll. Keep the "wasn't
+      // revealed" case as a distinct message (it points the user at refund); the
+      // forfeit fields are written atomically, so `forfeitPsbt && !revealed` is
+      // exactly "a forfeit was built but never revealed".
+      if (!stash || !hasStashedForfeit(stash)) {
+        if (stash?.forfeitPsbt && stash.revealed !== true) {
+          throw new Error("Can't forfeit-claim a game that wasn't revealed — use refund instead.")
+        }
         throw new Error('No forfeit stashed for this game — use reclaim instead.')
-      }
-      if (!stash.revealed) {
-        throw new Error("Can't forfeit-claim a game that wasn't revealed — use refund instead.")
       }
 
       commit('SET_CLAIMING', { gameId, info: { kind: 'forfeit', mode } })
@@ -1285,12 +1332,10 @@ const ark: Module<ArkState, RootState> = {
             continue
           }
         } catch { /* server unreachable — fall through to the CLTV-gated claim */ }
-        const canForfeit =
-          stash.revealed === true &&
-          !!stash.forfeitPsbt &&
-          !!stash.forfeitEmulatorUrl &&
-          stash.forfeitClaimableAt !== undefined &&
-          chainTime >= stash.forfeitClaimableAt
+        // Structural check (revealed + complete forfeit) is shared; the CLTV
+        // maturity gate is the auto-claim poll's own extra condition. The type
+        // guard narrows forfeitClaimableAt to a number for this comparison.
+        const canForfeit = hasStashedForfeit(stash) && chainTime >= stash.forfeitClaimableAt
         const canRefund = chainTime >= stash.finalExpiration
         try {
           if (canForfeit) {

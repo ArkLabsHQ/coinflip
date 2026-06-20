@@ -438,6 +438,44 @@ describe('trustless coin flow (server handlers)', () => {
     await expect(server.handleTrustlessForfeit(gameId, { playerEscrow }, deps)).rejects.toThrow(/resolved/)
   }, 120_000)
 
+  // --- Lazy-funding forfeit TIMING (the R1 client-relocation contract) ---------
+  //
+  // The client used to stash the forfeit right after /play. Lazy house funding
+  // (the house escrows only at /commit) made that always fail — there was no
+  // joint pot yet — so the forfeit recovery was effectively dead. The fix moved
+  // the client's probe to the /commit-failure window. This test pins the half of
+  // the SERVER contract that wasn't yet covered: a forfeit is REFUSED before the
+  // house funds. The post-funding half (a forfeit IS built once a house escrow
+  // exists) is the "builds a player forfeit PSBT" test above.
+  //
+  // NOTE: a stronger variant that drives a REAL commit-failure (valid secret +
+  // bogus player escrow ⇒ the house funds at /commit but the sweep can't be
+  // assembled, leaving a genuine funded-but-unswept pot) was prototyped and
+  // confirmed to make the forfeit reachable. It is intentionally NOT committed:
+  // the forced failure strands an orphaned, funded house escrow on-chain, which
+  // poisons the shared house wallet for every later test in this --runInBand
+  // suite (observed: subsequent house settles fail with INVALID_INTENT_PROOF).
+  // The post-funding success is already covered above, so the refusal half is
+  // the safe, non-polluting addition.
+
+  it('refuses a forfeit BEFORE the house funds at /commit — the pre-/commit lazy state the old eager client probe always hit', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    // A fresh game (played + escrowed, NOT committed) has no house escrow under
+    // lazy funding, hence no joint pot to sweep. This is precisely when the OLD
+    // client stashed the forfeit — and why it always failed. The server must
+    // refuse here so the relocated client falls back to the self-refund.
+    const { gameId, playerEscrow } = await playAndEscrow()
+
+    // Precondition: the persisted state genuinely has no house escrow yet.
+    const row = await deps.repos.games.get(gameId)
+    const state = JSON.parse(row.house_vtxos_json as string)
+    expect(state.houseEscrow).toBeFalsy()
+
+    await expect(
+      server.handleTrustlessForfeit(gameId, { playerEscrow }, deps),
+    ).rejects.toThrow(/no joint pot|house only funds at \/commit/i)
+  }, 120_000)
+
   it('plays a variable-odds game end-to-end (asymmetric house-edged stakes, winner takes the pot)', async () => {
     if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
     const oddsN = 6, oddsTarget = 2 // player wins ~1/3; house stakes the edged 2x multiple

@@ -22,7 +22,12 @@ export interface Outpoint {
   value: number
 }
 
-/** /api/play — the house has escrowed its stake; the player funds `escrowAddress`. */
+/**
+ * /api/play — the player funds `escrowAddress` with their stake. The house does
+ * NOT escrow here: under lazy funding (v0.3.5+) it funds its own side at
+ * `/commit`, so there is no `houseEscrow` in this response (it was a stale,
+ * never-sent field left over from the eager-funding model and has been removed).
+ */
 export interface PlayResponse {
   gameId: string
   escrowAddress: string
@@ -31,7 +36,6 @@ export interface PlayResponse {
   serverPubkey: string
   betAmount: number
   finalExpiration: number
-  houseEscrow: Outpoint
   /**
    * Serialized params of the PLAYER escrow's `coinflip-escrow` contract. The
    * client registers its escrow with these (via ContractManager.createContract)

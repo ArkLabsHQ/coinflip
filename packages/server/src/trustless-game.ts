@@ -406,10 +406,6 @@ async function submitOffchain(
   return arkTxid
 }
 
-function houseVtxoToInput(v: ExtendedVirtualCoin): ArkTxInput {
-  return { txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree }
-}
-
 /**
  * After a `wallet.send` returns its txid, locate the specific output
  * within that tx that pays our target pkScript. The SDK's send tx layout

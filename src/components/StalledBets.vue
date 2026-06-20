@@ -57,6 +57,8 @@
 import { defineComponent, ref, computed, onMounted, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import type { StashedRefund, ClaimingInfo } from '@/store/modules/ark/ark'
+import { hasStashedForfeit } from '@/store/modules/ark/forfeitStash'
+import { isCltvMatured } from '@/utils/cltv'
 
 export default defineComponent({
   name: 'StalledBets',
@@ -92,19 +94,19 @@ export default defineComponent({
       if (typeof t === 'number') chainTime.value = t
     }
 
-    /** True when the stash has an arkade-script forfeit and the player has revealed. */
-    const hasForfeit = (b: StashedRefund) =>
-      b.revealed === true && !!b.forfeitPsbt && !!b.forfeitEmulatorUrl && b.forfeitClaimableAt !== undefined
+    /** True when the stash holds a complete, revealed arkade-script forfeit.
+     *  Single source of truth shared with the store's claimForfeit guard and
+     *  the background auto-claim poll (see forfeitStash.hasStashedForfeit). */
+    const hasForfeit = (b: StashedRefund) => hasStashedForfeit(b)
 
     /** Forfeit claimable-at: absolute CLTV pinned in the leaf at /play time. */
     const forfeitClaimableAt = (b: StashedRefund): number => b.forfeitClaimableAt ?? Number.MAX_SAFE_INTEGER
 
-    /** Self-refund readiness. */
-    const isReady = (b: StashedRefund) => chainTime.value !== null && chainTime.value >= b.finalExpiration
+    /** Self-refund readiness — chain time has reached the refund CLTV. */
+    const isReady = (b: StashedRefund) => isCltvMatured(chainTime.value, b.finalExpiration)
 
-    /** Forfeit readiness — chain time has reached the absolute CLTV. */
-    const isForfeitReady = (b: StashedRefund) =>
-      chainTime.value !== null && chainTime.value >= forfeitClaimableAt(b)
+    /** Forfeit readiness — chain time has reached the absolute forfeit CLTV. */
+    const isForfeitReady = (b: StashedRefund) => isCltvMatured(chainTime.value, forfeitClaimableAt(b))
 
     function statusLabel(b: StashedRefund): string {
       if (isAutoClaiming(b)) return 'Auto-claiming…'

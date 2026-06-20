@@ -309,6 +309,7 @@ import {
 import { copyToClipboard } from '@/utils/clipboard'
 import { detectLnurlInput, resolveLnurlToInvoice } from '@/utils/lnurl'
 import { encodeBip21 } from '@/utils/bip21'
+import { getErrorMessage } from '@/utils/errors'
 import { openLnurlSession, lnurlServerForNetwork, type LnurlSession } from '@/services/lnurlSession'
 import QrCode from '@/components/QrCode.vue'
 
@@ -492,7 +493,7 @@ export default defineComponent({
         })
         lnurlStatus.value = 'open'
       } catch (e) {
-        lnurlError.value = e instanceof Error ? e.message : String(e)
+        lnurlError.value = getErrorMessage(e)
         lnurlStatus.value = 'error'
       }
     }

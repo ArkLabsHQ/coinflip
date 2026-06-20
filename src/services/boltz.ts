@@ -23,6 +23,17 @@ export function getSwaps(): ArkadeSwaps | null {
 }
 
 /**
+ * Return the live swap service, or throw if it has not been initialised yet.
+ * Every swap operation needs a connected wallet behind `ArkadeSwaps`; routing
+ * them all through one guard keeps the seven call sites to a single readable
+ * line each and gives them one consistent "not initialized" error.
+ */
+function requireSwaps(): ArkadeSwaps {
+  if (!swaps) throw new Error('Swap service not initialized')
+  return swaps
+}
+
+/**
  * Initialize the swap service with an SDK wallet.
  * Call this after the Ark wallet connects.
  *
@@ -61,8 +72,7 @@ export async function createLnDeposit(
   amount: number,
   description?: string,
 ): Promise<CreateLightningInvoiceResponse> {
-  if (!swaps) throw new Error('Swap service not initialized')
-  return swaps.createLightningInvoice({ amount, description })
+  return requireSwaps().createLightningInvoice({ amount, description })
 }
 
 /**
@@ -71,8 +81,7 @@ export async function createLnDeposit(
 export async function waitForDeposit(
   pendingSwap: PendingReverseSwap,
 ): Promise<{ txid: string }> {
-  if (!swaps) throw new Error('Swap service not initialized')
-  return swaps.waitAndClaim(pendingSwap)
+  return requireSwaps().waitAndClaim(pendingSwap)
 }
 
 // ─── Withdraw (Ark → LN): submarine swap ─────────────────────────
@@ -80,8 +89,7 @@ export async function waitForDeposit(
 export async function createLnWithdraw(
   invoice: string,
 ): Promise<SendLightningPaymentResponse> {
-  if (!swaps) throw new Error('Swap service not initialized')
-  return swaps.sendLightningPayment({ invoice })
+  return requireSwaps().sendLightningPayment({ invoice })
 }
 
 /** Amount encoded in a BOLT11 invoice (0 for amountless invoices / parse error). */
@@ -96,25 +104,21 @@ export function invoiceSats(invoice: string): number {
 // ─── Fee & Limit Info ─────────────────────────────────────────────
 
 export async function getFees(): Promise<FeesResponse> {
-  if (!swaps) throw new Error('Swap service not initialized')
-  return swaps.getFees()
+  return requireSwaps().getFees()
 }
 
 export async function getLimits(): Promise<LimitsResponse> {
-  if (!swaps) throw new Error('Swap service not initialized')
-  return swaps.getLimits()
+  return requireSwaps().getLimits()
 }
 
 // ─── Swap Status & History ────────────────────────────────────────
 
 export async function getSwapStatus(swapId: string) {
-  if (!swaps) throw new Error('Swap service not initialized')
-  return swaps.getSwapStatus(swapId)
+  return requireSwaps().getSwapStatus(swapId)
 }
 
 export async function getSwapHistory() {
-  if (!swaps) throw new Error('Swap service not initialized')
-  return swaps.getSwapHistory()
+  return requireSwaps().getSwapHistory()
 }
 
 // ─── Re-exports for convenience ───────────────────────────────────

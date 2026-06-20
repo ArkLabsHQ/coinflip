@@ -23,6 +23,8 @@ import {
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
+import { getErrorMessage } from '@/utils/errors'
+import { isCltvMatured } from '@/utils/cltv'
 
 /** VtxoInput shape expected by the server's /api/play endpoint. */
 export interface VtxoInput {
@@ -393,7 +395,7 @@ async function registerEscrowContract(stash: StashedRefund): Promise<void> {
       label: stash.gameId,
     })
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
+    const msg = getErrorMessage(e)
     if (/already exists|duplicate/i.test(msg)) return // re-register is fine
     console.warn('[contract] could not register player escrow (continuing):', msg)
   }
@@ -436,11 +438,11 @@ async function stashForfeitRecovery(
         // Expected whenever there is no joint pot yet (house never funded), the
         // game already resolved, or it is a legacy non-arkade game. Not an error:
         // `resolveForfeitStash` maps the undefined `forfeit` to a 'no-pot' skip.
-        console.warn('[trustless] /forfeit probe found no claimable pot (continuing):', e instanceof Error ? e.message : e)
+        console.warn('[trustless] /forfeit probe found no claimable pot (continuing):', getErrorMessage(e))
       }
     }
   } catch (e) {
-    console.warn('[trustless] could not reach /api/network for forfeit (continuing):', e instanceof Error ? e.message : e)
+    console.warn('[trustless] could not reach /api/network for forfeit (continuing):', getErrorMessage(e))
   }
 
   const decision = resolveForfeitStash({ emulatorUrl, forfeit, expectedPayoutAddress, playerSecretHex })
@@ -463,7 +465,7 @@ async function deactivateEscrowContract(stash: StashedRefund | undefined): Promi
     const cm = await sdkWallet.getContractManager()
     await cm.setContractState(hex.encode(ArkAddress.decode(stash.escrowAddress).pkScript), 'inactive')
   } catch (e) {
-    console.warn('[contract] could not deactivate player escrow (continuing):', e instanceof Error ? e.message : e)
+    console.warn('[contract] could not deactivate player escrow (continuing):', getErrorMessage(e))
   }
 }
 
@@ -492,7 +494,7 @@ async function startEscrowContractWatch(dispatch: (type: string, payload?: unkno
         // Bet done → stop watching this escrow.
         await cm.setContractState(event.contract.script, 'inactive').catch(() => { /* best-effort */ })
       } catch (e) {
-        console.error('[contract] vtxo_spent handler failed:', e instanceof Error ? e.message : e)
+        console.error('[contract] vtxo_spent handler failed:', getErrorMessage(e))
       }
     })()
   })
@@ -743,7 +745,7 @@ const ark: Module<ArkState, RootState> = {
           }
           escrowEventStop = await startEscrowContractWatch(dispatch)
         } catch (e) {
-          console.warn('[contract] escrow contract watch unavailable; relying on stash + auto-claim:', e instanceof Error ? e.message : e)
+          console.warn('[contract] escrow contract watch unavailable; relying on stash + auto-claim:', getErrorMessage(e))
         }
 
         // Background stalled-bet auto-claim. Fire once now so a stash
@@ -1096,7 +1098,7 @@ const ark: Module<ArkState, RootState> = {
         // Best-effort — the stash itself is the trustless backstop.
         await registerEscrowContract(stash)
       } catch (e) {
-        console.warn('[trustless] could not stash refund (continuing):', e instanceof Error ? e.message : e)
+        console.warn('[trustless] could not stash refund (continuing):', getErrorMessage(e))
       }
 
       // NOTE: the arkade-script forfeit is intentionally NOT stashed here. The
@@ -1134,7 +1136,7 @@ const ark: Module<ArkState, RootState> = {
         // still settling (it finishes autonomously). Surface that calmly and
         // log the underlying error rather than steering the user straight at
         // the reclaim path. The stash + forfeit watcher remain the backstop.
-        console.warn('[trustless] /commit failed (operator settles autonomously):', e instanceof Error ? e.message : e)
+        console.warn('[trustless] /commit failed (operator settles autonomously):', getErrorMessage(e))
         const when = new Date(playRes.finalExpiration * 1000).toLocaleString()
         throw new Error(
           `Still settling — the operator finishes this automatically and it usually lands within a minute. ` +
@@ -1218,7 +1220,7 @@ const ark: Module<ArkState, RootState> = {
           // Race: our chain-time read passed the CLTV but arkd's tip MTP still
           // trails it. Surface a clear "wait for the next block" instead of the
           // raw FORFEIT_CLOSURE_LOCKED — the stash is kept so a retry still works.
-          const msg = e instanceof Error ? e.message : String(e)
+          const msg = getErrorMessage(e)
           if (/FORFEIT_CLOSURE_LOCKED|is locked|locked/i.test(msg)) {
             throw new Error("Not reclaimable yet — the chain hasn't mined a block past the timelock. Try again shortly.")
           }
@@ -1332,11 +1334,11 @@ const ark: Module<ArkState, RootState> = {
             continue
           }
         } catch { /* server unreachable — fall through to the CLTV-gated claim */ }
-        // Structural check (revealed + complete forfeit) is shared; the CLTV
-        // maturity gate is the auto-claim poll's own extra condition. The type
-        // guard narrows forfeitClaimableAt to a number for this comparison.
-        const canForfeit = hasStashedForfeit(stash) && chainTime >= stash.forfeitClaimableAt
-        const canRefund = chainTime >= stash.finalExpiration
+        // Structural check (revealed + complete forfeit) is shared; CLTV
+        // maturity is the auto-claim poll's own extra gate (isCltvMatured). The
+        // type guard narrows forfeitClaimableAt to a number for the comparison.
+        const canForfeit = hasStashedForfeit(stash) && isCltvMatured(chainTime, stash.forfeitClaimableAt)
+        const canRefund = isCltvMatured(chainTime, stash.finalExpiration)
         try {
           if (canForfeit) {
             await dispatch('claimForfeit', { gameId: stash.gameId, mode: 'auto' })
@@ -1348,7 +1350,7 @@ const ark: Module<ArkState, RootState> = {
           // failure shows up in console.
           console.warn(
             `[auto-claim] ${stash.gameId} failed:`,
-            e instanceof Error ? e.message : e,
+            getErrorMessage(e),
           )
         }
       }

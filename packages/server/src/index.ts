@@ -55,6 +55,13 @@ export {
   type TrustlessForfeitResult,
   type Outpoint,
 } from './trustless-game.js'
+export {
+  handleV4Play,
+  type V4PlayRequest,
+  type V4PlayResult,
+  type V4CovenantParams,
+  type V4State,
+} from './trustless-game-v4.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'
 export { createAdminRoutes } from './admin/routes.js'

@@ -108,6 +108,10 @@ export function buildJointPotSettleTx(args: {
   serverUnroll: CSVMultisigTapscript.Type
 }): BuiltJointPotTx {
   const { pot, cofund, winner, winnerPayoutPkScript, potAmount } = args
+  // Same balance guard as the forfeit builder — payout must equal the pot.
+  if (potAmount <= 0n || potAmount !== BigInt(cofund.value)) {
+    throw new Error(`buildJointPotSettleTx: potAmount ${potAmount} must equal the pot value ${cofund.value}`)
+  }
   const leaf = winner === 'player' ? pot.playerWinCovenant() : pot.creatorWinCovenant()
   const arkadeScript = winner === 'player' ? pot.playerWinFullArkadeScript : pot.creatorWinFullArkadeScript
 
@@ -155,6 +159,11 @@ export function buildJointPotForfeitClaim(args: {
   serverUnroll: CSVMultisigTapscript.Type
 }): BuiltJointPotTx {
   const { pot, cofund } = args
+  // The pot is 1-input→1-output with no ark-tx fee: the payout MUST equal the
+  // pot value. Fail loud + early on a mismatch (cofund.value is a number).
+  if (args.potAmount <= 0n || args.potAmount !== BigInt(cofund.value)) {
+    throw new Error(`buildJointPotForfeitClaim: potAmount ${args.potAmount} must equal the pot value ${cofund.value}`)
+  }
   const input: ArkTxInput = {
     txid: cofund.txid, vout: cofund.vout, value: cofund.value,
     tapLeafScript: pot.playerForfeit(), tapTree: pot.encode(),

@@ -177,8 +177,11 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   const exitDelay = Math.max(512, Math.ceil(rawExitDelay / 512) * 512)
   const now = Math.floor(Date.now() / 1000)
   // Forfeit/refund CLTV window. Configurable (V4_FINAL_EXPIRATION_SECS) so the
-  // recovery e2e can use a short timelock; production default is 30 min.
-  const finalExpiration = now + Number(process.env.V4_FINAL_EXPIRATION_SECS ?? 1800)
+  // recovery e2e can use a short timelock; production default is 30 min. Guard
+  // against a malformed env (Number('x') → NaN) silently breaking the window.
+  const finalExpirationSecs = Number(process.env.V4_FINAL_EXPIRATION_SECS ?? 1800)
+  const finalExpiration =
+    now + (Number.isFinite(finalExpirationSecs) && finalExpirationSecs > 0 ? finalExpirationSecs : 1800)
   const setupExpiration = now + 600
 
   const housePubkey = toXOnly(await deps.identity.compressedPublicKey())

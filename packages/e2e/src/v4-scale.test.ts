@@ -43,10 +43,11 @@ const toInput = (v: Vtxo): ArkTxInput => ({ txid: v.txid, vout: v.vout, value: v
 // (so it's not safely retryable). The v4 design funnels all submits through the
 // API, so serializing this one boundary models the real architecture; the rest
 // of the pipeline (build, sign, emulator settle, verify) stays fully concurrent.
+const ARK_GAP = Number(process.env.LOAD_GAP || 0) // optional ms between arkd submits
 let arkLock: Promise<unknown> = Promise.resolve()
 function withArkLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = arkLock.then(fn, fn)
-  arkLock = run.catch(() => undefined)
+  arkLock = ARK_GAP > 0 ? run.then(() => sleep(ARK_GAP), () => sleep(ARK_GAP)) : run.catch(() => undefined)
   return run
 }
 
@@ -111,30 +112,40 @@ describe('v4 scale: many concurrent joint-pot games', () => {
     await ark.finalizeTx(arkTxid, finals)
     return arkTxid
   }
-  // Fund + split a wallet into n VTXOs of PER_VTXO sats each.
+  // Fund + split a wallet into n stake VTXOs of PER_VTXO sats. Splits in chunks
+  // because arkd caps outputs per offchain tx; each chunk spends the wallet's
+  // largest VTXO (the running change carries the rest forward).
   async function provision(id: SingleKey, n: number): Promise<{ vtxos: Vtxo[]; payoutPk: Uint8Array }> {
     const w = await makeWallet(id)
     const need = n * PER_VTXO + 5000
-    await faucet(await w.getBoardingAddress(), need / 1e8 + 0.0001)
+    // Fund in whole sats, formatted to a clean 8-decimal BTC string (avoids FP
+    // dust like 0.0006500000000000001 that the faucet CLI rejects).
+    await faucet(await w.getBoardingAddress(), +((need + 10000) / 1e8).toFixed(8))
     await waitBoarding(w, n * PER_VTXO)
     await settleRetry(w)
     await waitSettled(w, n * PER_VTXO)
-    const big = (await w.getVtxos())[0]
     const selfPk = ArkAddress.decode(await w.getAddress()).pkScript
-    const outs = Array.from({ length: n }, () => ({ script: selfPk, amount: BigInt(PER_VTXO) }))
-    const change = big.value - n * PER_VTXO
-    if (change > 330) outs.push({ script: selfPk, amount: BigInt(change) })
-    const { arkTx, checkpoints } = buildOffchainTx([toInput(big as unknown as Vtxo)], outs, unroll)
-    const txid = await submitMultisig(arkTx, checkpoints, [{ id, vin: 0 }])
-    // Re-fetch via the WALLET (enriches each VTXO with forfeitTapLeafScript +
-    // tapTree, which the raw indexer response omits — buildOffchainTx needs them).
-    for (let i = 0; i < 30; i++) {
-      const all = await w.getVtxos()
-      const stakes = all.filter((v) => v.txid === txid && v.value === PER_VTXO)
-      if (stakes.length >= n) return { vtxos: stakes.slice(0, n) as unknown as Vtxo[], payoutPk: selfPk }
-      await sleep(1000)
+    const CHUNK = 80
+    const stakes: Vtxo[] = []
+    while (stakes.length < n) {
+      const take = Math.min(CHUNK, n - stakes.length)
+      const big = (await w.getVtxos()).sort((a, b) => b.value - a.value)[0]
+      const outs = Array.from({ length: take }, () => ({ script: selfPk, amount: BigInt(PER_VTXO) }))
+      const change = big.value - take * PER_VTXO
+      if (change > 330) outs.push({ script: selfPk, amount: BigInt(change) })
+      const { arkTx, checkpoints } = buildOffchainTx([toInput(big as unknown as Vtxo)], outs, unroll)
+      // Re-fetch via the WALLET (enriches each VTXO with forfeitTapLeafScript +
+      // tapTree, which the raw indexer response omits — buildOffchainTx needs them).
+      const txid = await withArkLock(() => submitMultisig(arkTx, checkpoints, [{ id, vin: 0 }]))
+      let got: Vtxo[] = []
+      for (let i = 0; i < 30 && got.length < take; i++) {
+        got = (await w.getVtxos()).filter((v) => v.txid === txid && v.value === PER_VTXO) as unknown as Vtxo[]
+        if (got.length < take) await sleep(1000)
+      }
+      if (got.length < take) throw new Error(`split chunk did not appear (${got.length}/${take})`)
+      stakes.push(...got.slice(0, take))
     }
-    throw new Error('split VTXOs did not appear')
+    return { vtxos: stakes, payoutPk: selfPk }
   }
 
   // One full v4 game; returns per-phase timings (ms). Payout pkScripts precomputed.
@@ -150,17 +161,22 @@ describe('v4 scale: many concurrent joint-pot games', () => {
     })
     const potAddr = potS.address(HRP, serverPub).pkScript
 
-    const t0 = Date.now()
     const cofundOuts = [
       { script: potAddr, amount: BigInt(2 * BET) },
       { script: ppk, amount: BigInt(pv.value - BET) },
       { script: hpk, amount: BigInt(hv.value - BET) },
     ]
-    const cf = buildOffchainTx([toInput(pv), toInput(hv)], cofundOuts, unroll)
-    const cofundTxid = await withArkLock(() => submitMultisig(cf.arkTx, cf.checkpoints, [{ id: playerId, vin: 0 }, { id: houseId, vin: 1 }]))
-    const cofundMs = Date.now() - t0
+    // Build + submit INSIDE the lock (fresh checkpoint). Time the operation
+    // itself, excluding lock-queue wait — throughput/wall-time captures contention.
+    let cofundMs = 0
+    const cofundTxid = await withArkLock(async () => {
+      const s = Date.now()
+      const cf = buildOffchainTx([toInput(pv), toInput(hv)], cofundOuts, unroll)
+      const txid = await submitMultisig(cf.arkTx, cf.checkpoints, [{ id: playerId, vin: 0 }, { id: houseId, vin: 1 }])
+      cofundMs = Date.now() - s
+      return txid
+    })
 
-    const t1 = Date.now()
     const leaf = winner === 'player' ? potS.playerWinCovenant() : potS.creatorWinCovenant()
     const arkadeScript = winner === 'player' ? potS.playerWinFullArkadeScript : potS.creatorWinFullArkadeScript
     const winPk = winner === 'player' ? ppk : hpk
@@ -178,14 +194,13 @@ describe('v4 scale: many concurrent joint-pot games', () => {
       if (r.ok) return { ok: true, txid: Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id }
       return { ok: false, status: r.status, text: await r.text() }
     }
-    let settleTxid = ''
+    let settleTxid = '', settleMs = 0
     for (let a = 0; a < 12; a++) {
-      const res = await withArkLock(postOnce)
-      if (res.ok) { settleTxid = res.txid; break }
-      if (!(res.status >= 500 && /not found|VTXO_NOT_FOUND|failed to process/i.test(res.text)) || a === 11) throw new Error(`settle: ${res.status} ${res.text}`)
+      const res = await withArkLock(async () => { const s = Date.now(); const r = await postOnce(); return { r, ms: Date.now() - s } })
+      if (res.r.ok) { settleTxid = res.r.txid; settleMs = res.ms; break }
+      if (!(res.r.status >= 500 && /not found|VTXO_NOT_FOUND|failed to process/i.test(res.r.text)) || a === 11) throw new Error(`settle: ${res.r.status} ${res.r.text}`)
       await sleep(500 + a * 500)
     }
-    const settleMs = Date.now() - t1
     // r.ok ⇒ the emulator cosigned AND forwarded the finalized settle to arkd
     // (arkd accepted it). Real on-chain landing is sample-verified after the run.
     return { cofundMs, settleMs, settleTxid, winPkHex: hex.encode(winPk) }
@@ -193,39 +208,53 @@ describe('v4 scale: many concurrent joint-pot games', () => {
 
   it(`runs ${TOTAL} games (${WALLETS} clients × ${GAMES_PER_WALLET}, conc ${CONC}) and reports per-phase timing`, async () => {
     if (!ok) { console.warn('ark/emu unavailable — skipped'); return }
-    console.log(`[scale] provisioning ${WALLETS} clients × ${GAMES_PER_WALLET} stake VTXOs + house pool of ${TOTAL}…`)
+    // Provision with retry headroom: a fraction of co-funds hit a transient
+    // INVALID_SIGNATURE that consumes the input, so a game may burn >1 stake VTXO.
+    const HEADROOM = 1.7
+    console.log(`[scale] provisioning ${WALLETS} clients × ${GAMES_PER_WALLET} games (+${Math.round((HEADROOM - 1) * 100)}% VTXO headroom) + house pool…`)
     const houseId = SingleKey.fromRandomBytes()
     const housePub = await houseId.xOnlyPublicKey()
     const [houseProv, ...playerSets] = await Promise.all([
-      provision(houseId, TOTAL),
+      provision(houseId, Math.ceil(TOTAL * HEADROOM)),
       ...Array.from({ length: WALLETS }, async () => {
         const id = SingleKey.fromRandomBytes()
-        const prov = await provision(id, GAMES_PER_WALLET)
-        return { id, pub: await id.xOnlyPublicKey(), vtxos: prov.vtxos, payoutPk: prov.payoutPk }
+        const prov = await provision(id, Math.ceil(GAMES_PER_WALLET * HEADROOM))
+        return { id, pub: await id.xOnlyPublicKey(), vtxos: prov.vtxos, payoutPk: prov.payoutPk, idx: 0 }
       }),
-    ]) as [{ vtxos: Vtxo[]; payoutPk: Uint8Array }, ...{ id: SingleKey; pub: Uint8Array; vtxos: Vtxo[]; payoutPk: Uint8Array }[]]
+    ]) as [{ vtxos: Vtxo[]; payoutPk: Uint8Array }, ...{ id: SingleKey; pub: Uint8Array; vtxos: Vtxo[]; payoutPk: Uint8Array; idx: number }[]]
     const houseVtxos = houseProv.vtxos, housePk = houseProv.payoutPk
+    const house = { idx: 0 }
 
-    const jobs: { p: typeof playerSets[number]; pv: Vtxo; hv: Vtxo }[] = []
-    let hi = 0
-    for (const p of playerSets) for (const pv of p.vtxos) jobs.push({ p, pv, hv: houseVtxos[hi++] })
+    // One job per game, tagged with its client. VTXOs are popped at play time so a
+    // consumed-input failure retries with a FRESH pair (never a double-spend).
+    const jobs: typeof playerSets[number][] = []
+    for (const p of playerSets) for (let g = 0; g < GAMES_PER_WALLET; g++) jobs.push(p)
 
     const cofunds: number[] = [], settles: number[] = [], totals: number[] = []
     const settled: { txid: string; pk: string }[] = []
-    let done = 0, failed = 0
+    let done = 0, failed = 0, retries = 0
     const failModes = new Map<string, number>()
+    const isTransient = (e: unknown) => /INVALID_SIGNATURE|VTXO_NOT_FOUND|not found|failed to process|ALREADY_SPENT/i.test(String(e))
     const start = Date.now()
     let next = 0
     async function worker() {
       while (next < jobs.length) {
-        const j = jobs[next++]
-        try {
-          const t = await playGameInner(j.p.id, j.p.pub, j.p.payoutPk, j.pv, houseId, housePub, housePk, j.hv)
-          cofunds.push(t.cofundMs); settles.push(t.settleMs); totals.push(t.cofundMs + t.settleMs); done++
-          settled.push({ txid: t.settleTxid, pk: t.winPkHex })
-        } catch (e) {
+        const p = jobs[next++]
+        let lastErr: unknown = new Error('no attempt')
+        let result: Awaited<ReturnType<typeof playGameInner>> | null = null
+        for (let attempt = 0; attempt < 4; attempt++) {
+          // Synchronous pop (no await between read+increment) = atomic across workers.
+          const pv = p.vtxos[p.idx++], hv = houseVtxos[house.idx++]
+          if (!pv || !hv) { lastErr = new Error('VTXO pool exhausted (raise HEADROOM)'); break }
+          try { result = await playGameInner(p.id, p.pub, p.payoutPk, pv, houseId, housePub, housePk, hv); break }
+          catch (e) { lastErr = e; if (!isTransient(e) || attempt === 3) break; retries++ }
+        }
+        if (result) {
+          cofunds.push(result.cofundMs); settles.push(result.settleMs); totals.push(result.cofundMs + result.settleMs); done++
+          settled.push({ txid: result.settleTxid, pk: result.winPkHex })
+        } else {
           failed++
-          const m = String(e instanceof Error ? e.message : e).slice(0, 60)
+          const m = String(lastErr instanceof Error ? lastErr.message : lastErr).slice(0, 60)
           failModes.set(m, (failModes.get(m) || 0) + 1)
         }
       }
@@ -247,7 +276,7 @@ describe('v4 scale: many concurrent joint-pot games', () => {
     }
 
     console.log('\n========== v4 SCALE RESULTS ==========')
-    console.log(`games: ${done}/${TOTAL} settled, ${failed} failed`)
+    console.log(`games: ${done}/${TOTAL} settled, ${failed} failed, ${retries} transient retries`)
     console.log(`sample-verified on-chain: ${verified}/${sample.length}`)
     console.log(`wall time: ${(wallMs / 1000).toFixed(1)}s  → throughput ${(done / (wallMs / 60000)).toFixed(1)} games/min`)
     console.log(`co-fund ms: p50 ${pct(cofunds, 50)}  p95 ${pct(cofunds, 95)}`)
@@ -256,7 +285,7 @@ describe('v4 scale: many concurrent joint-pot games', () => {
     if (failModes.size) { console.log('failure modes:'); for (const [m, c] of failModes) console.log(`  ${c}× ${m}`) }
     console.log('======================================\n')
 
-    expect(done).toBeGreaterThan(0)
+    expect(done).toBeGreaterThanOrEqual(Math.floor(TOTAL * 0.95)) // retry recovers transient failures
     expect(verified).toBe(sample.length) // every sampled settle really landed on-chain
   }, 1_800_000)
 })

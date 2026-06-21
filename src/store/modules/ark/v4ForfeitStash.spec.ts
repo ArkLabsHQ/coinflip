@@ -100,12 +100,14 @@ describe('hasClaimableV4Forfeit', () => {
   })
 
   it('rejects when the pot outpoint is missing', () => {
-    const { potOutpoint: _omit, ...rest } = complete
-    expect(hasClaimableV4Forfeit(rest)).toBe(false)
+    const partial: Partial<StashedV4Forfeit> = { ...complete }
+    delete partial.potOutpoint
+    expect(hasClaimableV4Forfeit(partial)).toBe(false)
   })
 
   it('rejects when the covenant is missing', () => {
-    const { covenant: _omit, ...rest } = complete
-    expect(hasClaimableV4Forfeit(rest)).toBe(false)
+    const partial: Partial<StashedV4Forfeit> = { ...complete }
+    delete partial.covenant
+    expect(hasClaimableV4Forfeit(partial)).toBe(false)
   })
 })

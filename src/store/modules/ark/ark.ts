@@ -1660,6 +1660,27 @@ const ark: Module<ArkState, RootState> = {
           )
         }
       }
+
+      // v0.4 joint-pot forfeits live in their own store + claim path. The happy
+      // path clears the stash on settle, so a lingering one is almost always a
+      // genuine stall — fire the client-built claim once the CLTV matures.
+      for (const v4 of await loadV4Forfeits()) {
+        if (state.claimingGames[v4.gameId]) continue
+        if (!hasClaimableV4Forfeit(v4)) continue
+        if (!isCltvMatured(chainTime, v4.forfeitClaimableAt)) continue
+        try {
+          await dispatch('claimV4Forfeit', { gameId: v4.gameId, mode: 'auto' })
+        } catch (e) {
+          const msg = getErrorMessage(e)
+          // Pot already spent ⇒ the server settled normally and the happy-path
+          // clear was missed; GC the stale stash so the poll stops retrying.
+          if (/already spent|spent|not found|missing/i.test(msg)) {
+            await deleteV4Forfeit(v4.gameId).catch(() => { /* next tick */ })
+          } else {
+            console.warn(`[auto-claim:v4] ${v4.gameId} failed:`, msg)
+          }
+        }
+      }
     },
   },
 

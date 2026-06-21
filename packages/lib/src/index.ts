@@ -129,6 +129,7 @@ export {
 export {
   buildJointPotCofundTx,
   buildJointPotSettleTx,
+  buildJointPotForfeitClaim,
   jointPotCofundOutputs,
   encodeSettleForEmulator,
   serializeTapLeaf,

@@ -133,6 +133,46 @@ export function buildJointPotSettleTx(args: {
   return built
 }
 
+/**
+ * Build the player's FORFEIT claim — the recovery path when the pot is funded
+ * but the server never settles. Spends the joint pot via the `playerForfeit`
+ * leaf into payTo(player, pot): the player sweeps the WHOLE pot. That leaf is
+ * CLTVMultisig[player, server, emu_tweaked(payTo(player,pot))], so the claim is
+ * collaborative (player + server + emulator) and valid only after the game's
+ * finalExpiration (the leaf's absolute timelock). The server signs its slot via
+ * /api/v4/game/:id/forfeit; the player signs and POSTs to the emulator.
+ *
+ * No reveal packets: the covenant is a bare payTo (it reads no secrets). For a
+ * server that's gone entirely, the unilateral `playerForfeitExit` leaf (player +
+ * emulator, after the CSV exit delay, with the secret as a condition witness) is
+ * the no-server backstop — a separate builder still to come.
+ */
+export function buildJointPotForfeitClaim(args: {
+  pot: CoinflipJointPotScript
+  cofund: Outpoint
+  playerPayoutPkScript: Uint8Array
+  potAmount: bigint
+  serverUnroll: CSVMultisigTapscript.Type
+}): BuiltJointPotTx {
+  const { pot, cofund } = args
+  const input: ArkTxInput = {
+    txid: cofund.txid, vout: cofund.vout, value: cofund.value,
+    tapLeafScript: pot.playerForfeit(), tapTree: pot.encode(),
+  }
+  const built = buildOffchainTx([input], [{ script: args.playerPayoutPkScript, amount: args.potAmount }], args.serverUnroll)
+
+  const cp = built.checkpoints[0]
+  const cpIn = cp.getInput(0)
+  if (cpIn?.witnessUtxo) {
+    cp.updateInput(0, { witnessUtxo: { script: pot.pkScript, amount: cpIn.witnessUtxo.amount } })
+  }
+  // Emulator packet: forfeitArkadeScript = payTo(player, pot), inspects output 0.
+  emulator.addPacket(built.arkTx, [
+    { vin: 0, script: pot.forfeitArkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
+  ])
+  return built
+}
+
 /** Serialize a built tx for an emulator `/v1/tx` POST body. */
 export function encodeSettleForEmulator(built: BuiltJointPotTx): { arkTx: string; checkpointTxs: string[] } {
   return {

@@ -19,10 +19,10 @@ import {
   SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository,
   decodeTapscript, CSVMultisigTapscript, RestIndexerProvider, Transaction, ArkAddress, buildOffchainTx, type ArkTxInput,
 } from '@arkade-os/sdk'
-import { CoinflipJointPotScript, buildCofundFromPlay } from 'arkade-coinflip'
+import { CoinflipJointPotScript, buildCofundFromPlay, buildJointPotForfeitClaim } from 'arkade-coinflip'
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { packets } = require('@arklabshq/contract-workflows-prototype')
-import { faucet, settleWithRetry } from './helpers'
+import { faucet, settleWithRetry, setChainTime, resetChainTime } from './helpers'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const toInput = (v: any): ArkTxInput => ({ txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree })
@@ -115,6 +115,9 @@ describe('v4 server: handleV4Play', () => {
   }, 180_000)
 
   afterAll(() => {
+    // The forfeit-recovery test advances chain time via setmocktime; restore it
+    // so the shared regtest stays usable for other suites / dev.
+    resetChainTime()
     if (dataDir && fs.existsSync(dataDir)) {
       try { fs.rmSync(dataDir, { recursive: true, force: true }) } catch { /* best effort */ }
     }
@@ -449,4 +452,106 @@ describe('v4 server: handleV4Play', () => {
     expect(reveal.payout).toBe(2 * BET)
     console.log('[v4-http] full game over HTTP →', reveal.winner, 'settled', reveal.settleTxid)
   }, 240_000)
+
+  it('player RECOVERS the whole pot via the forfeit leaf when the server never settles', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await Wallet.create({
+      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+      settlementConfig: false,
+    })
+    await faucet(await playerW.getBoardingAddress(), 0.001)
+    await waitForBoarding(playerW, BET)
+    await settleWithRetry(playerW)
+    await waitForSettled(playerW, BET)
+
+    const salt = crypto.getRandomValues(new Uint8Array(16))
+    const playerReveal = packets.encodeReveal(0, salt)
+    const playerHash = createHash('sha256').update(playerReveal).digest('hex')
+    const addr = await playerW.getAddress()
+
+    // Short forfeit window so the CLTV matures during the test.
+    process.env.V4_FINAL_EXPIRATION_SECS = '10'
+    const res = await server.handleV4Play({
+      tier: BET, playerPubkey: hex.encode(toXOnly(await playerId.compressedPublicKey())),
+      playerHash, playerPayoutAddress: addr, playerChangeAddress: addr,
+    }, deps)
+    delete process.env.V4_FINAL_EXPIRATION_SECS
+
+    // Co-fund the pot — then the player will NOT reveal (server stalls).
+    const pv = (await playerW.getVtxos())[0]
+    const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+    const cf = buildCofundFromPlay({
+      play: res, playerInputs: [toInput(pv)],
+      playerChangePkScript: ArkAddress.decode(addr).pkScript, betAmount: BET, serverUnroll,
+    })
+    const arkTxSigned = await playerId.sign(cf.arkTx, [0])
+    const cofundRes = await server.handleV4Cofund(res.gameId, {
+      arkTx: base64.encode(arkTxSigned.toPSBT()),
+      checkpoints: cf.checkpoints.map((c: Transaction) => base64.encode(c.toPSBT())),
+    }, deps)
+    const signedCps = await Promise.all(cofundRes.playerCheckpoints.map(async (b64: string) => {
+      const cp = Transaction.fromPSBT(base64.decode(b64))
+      let s = cp
+      try { s = await playerId.sign(cp, Array.from({ length: cp.inputsLength }, (_, i) => i)) }
+      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+      return base64.encode(s.toPSBT())
+    }))
+    const finRes = await server.handleV4CofundFinalize(res.gameId, { playerCheckpoints: signedCps }, deps)
+    expect(finRes.potOutpoint.value).toBe(2 * BET)
+
+    // ── Server stalls (NO /reveal). After finalExpiration the player sweeps the
+    //    WHOLE pot via the playerForfeit leaf — player + arkd + emulator, no house. ──
+    const cv = res.covenant
+    const pot = new CoinflipJointPotScript({
+      creatorPubkey: hex.decode(cv.creatorPubkey), playerPubkey: hex.decode(cv.playerPubkey),
+      serverPubkey: hex.decode(cv.serverPubkey), creatorHash: hex.decode(cv.creatorHash),
+      playerHash: hex.decode(cv.playerHash), finalExpiration: BigInt(cv.finalExpiration),
+      exitDelay: BigInt(cv.exitDelay), oddsN: cv.oddsN, oddsTarget: cv.oddsTarget, oddsLo: cv.oddsLo,
+      emulatorPubkey: hex.decode(cv.emulatorPubkey), playerPayoutPkScript: hex.decode(cv.playerPayoutPkScript),
+      housePayoutPkScript: hex.decode(cv.housePayoutPkScript), playerStake: BigInt(cv.playerStake), houseStake: BigInt(cv.houseStake),
+    })
+
+    // Advance the chain's median-time-past beyond finalExpiration (real-time
+    // waiting can't — CLTV is evaluated against MTP). NOTE: this freezes the
+    // regtest clock, so this test must run isolated + the stack restarted after.
+    await setChainTime(cv.finalExpiration + 60, 14)
+
+    const claim = buildJointPotForfeitClaim({
+      pot, cofund: finRes.potOutpoint,
+      playerPayoutPkScript: ArkAddress.decode(addr).pkScript, potAmount: BigInt(2 * BET), serverUnroll,
+    })
+    const claimSigned = await playerId.sign(claim.arkTx, [0])
+    const claimCps = await Promise.all(claim.checkpoints.map(async (c: Transaction) => {
+      let s = c
+      try { s = await playerId.sign(c, Array.from({ length: c.inputsLength }, (_, i) => i)) }
+      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+      return base64.encode(s.toPSBT())
+    }))
+    const body = JSON.stringify({ arkTx: base64.encode(claimSigned.toPSBT()), checkpointTxs: claimCps })
+    let claimTxid = ''
+    for (let a = 0; a < 12; a++) {
+      const r = await fetch(`${EMULATOR_URL}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(30_000) })
+      if (r.ok) { claimTxid = Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id; break }
+      const text = await r.text()
+      if (!(r.status >= 500 && /not found|VTXO_NOT_FOUND|failed to process/i.test(text)) || a === 11) throw new Error(`forfeit claim rejected: ${r.status} ${text}`)
+      await sleep(700 + a * 700)
+    }
+    expect(claimTxid).toBeTruthy()
+
+    // The player recovered the WHOLE pot.
+    const indexer3 = new RestIndexerProvider(ARK_SERVER_URL)
+    const playerPk = hex.encode(ArkAddress.decode(addr).pkScript)
+    let recovered = false
+    for (let i = 0; i < 20 && !recovered; i++) {
+      const { vtxos } = await indexer3.getVtxos({ scripts: [playerPk] })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (vtxos.some((x: any) => x.txid === claimTxid && x.value === 2 * BET)) recovered = true
+      else await sleep(1000)
+    }
+    expect(recovered).toBe(true)
+    console.log('[v4-forfeit] server stalled → player swept the whole pot via forfeit:', claimTxid)
+  }, 300_000)
 })

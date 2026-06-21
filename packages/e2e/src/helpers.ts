@@ -120,6 +120,14 @@ export async function setChainTime(toUnixSeconds: number, blocks = 12): Promise<
   await mineBlock(blocks)
 }
 
+/** Re-enable real chain time after setChainTime (mocktime → 0). Best-effort;
+ *  the median-time-past self-heals as the wall clock catches the mocked future. */
+export function resetChainTime(): void {
+  const container = process.env.REGTEST_BTC_CONTAINER || 'bitcoin'
+  const cli = `docker exec ${container} bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123`
+  try { execSync(`${cli} setmocktime 0`, { stdio: ['ignore', 'pipe', 'pipe'] }) } catch { /* best effort */ }
+}
+
 /**
  * Fund a (boarding) address with `amountBtc` and confirm it in a block.
  * Shared by every live e2e test — replaces the per-file `fetch(ESPLORA/faucet)`

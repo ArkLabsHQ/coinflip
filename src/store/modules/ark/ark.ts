@@ -4,8 +4,8 @@ import type { State as RootState } from '@/store'
 import {
   Wallet, SingleKey, VtxoScript,
   ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
-  contractHandlers, RestIndexerProvider,
-  type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity,
+  contractHandlers, RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
+  type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity, type ArkTxInput,
 } from '@arkade-os/sdk'
 import {
   COINFLIP_ESCROW_TYPE,
@@ -13,11 +13,15 @@ import {
   registerCoinflipContracts,
 } from 'arkade-coinflip/contract'
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
+// Subpath import (not the package root) so the browser bundle doesn't pull in
+// the v2 transactions module, which imports Node's `crypto`.
+import { buildCofundFromPlay } from 'arkade-coinflip/dist/joint-pot-tx'
 import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
   forfeit as apiForfeit, getGame as apiGetGame,
+  v4Play, v4Cofund, v4CofundFinalize, v4Reveal,
   type Outpoint, type ForfeitResponse,
 } from '@/services/api'
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
@@ -1197,6 +1201,109 @@ const ark: Module<ArkState, RootState> = {
       // No manual refresh — the contract watcher fires on the sweep's vtxo
       // events and pushes a (coalesced, light) balance update.
       return result
+    },
+
+    /**
+     * Play one v0.4 JOINT-POT game end-to-end (opt-in: the server advertises
+     * `protocolVersion: 'v4'` on /api/network). Two on-chain txs:
+     *   1. POST /api/v4/play — the house reserves a stake VTXO and returns the
+     *      joint-pot covenant params + its serialized stake input.
+     *   2. Build the atomic co-fund (player stake VTXO + house stake VTXO → one
+     *      joint pot) with the lib's `buildCofundFromPlay`; sign vin 0 and run the
+     *      2-round handshake — POST /cofund (server signs vin 1 + submits, returns
+     *      our checkpoint) → sign it → POST /cofund-finalize (creates the pot).
+     *   3. POST /api/v4/reveal — the server settles the WHOLE pot to the winner.
+     * Returns { winner, settleTxid, payout, roll, houseSecretHex }.
+     *
+     * NOTE: v0.4 stake-recovery (the covenant's cooperative-refund + unilateral
+     * exit leaves) has no client claim flow yet — a stalled co-fund/reveal throws
+     * with guidance. Only the happy path is wired; recovery is a follow-up.
+     */
+    async playV4Game(
+      { state, rootState },
+      { tier, side, oddsN, oddsTarget, oddsLo }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
+    ) {
+      const { wallet, privateKey } = requireWalletAndKey(rootState)
+      const playerPubkey = rootState.wallet.publicKey
+      if (!playerPubkey) throw new Error('No wallet public key available')
+      const playerAddress = state.arkAddress
+      if (!playerAddress) throw new Error('No Ark address available — wallet still connecting?')
+
+      const identity = SingleKey.fromHex(privateKey)
+      const arkInfo = await wallet.arkProvider.getInfo()
+      const serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+
+      // Player reveal — same `[digit] ‖ salt` shape as v3. Coin → n=2, digit
+      // side=heads→0 / tails→1; variable-odds → uniform in [0, oddsN).
+      const isVariable = oddsN !== undefined && oddsTarget !== undefined
+      const n = isVariable ? (oddsN as number) : 2
+      const digit = isVariable ? uniformRandomInt(n) : (side === 'tails' ? 1 : 0)
+      const reveal = v3CommitDigit(digit, n)
+      const secretBytes = cwpPackets.encodeReveal(reveal.digit, reveal.salt)
+      const playerSecretHex = hex.encode(secretBytes)
+      const playerHash = await createHash(secretBytes)
+
+      // The co-fund spends ONE player stake VTXO (vin 0). Pick the largest
+      // spendable; v0.4 needs a single VTXO ≥ tier (settle to consolidate if split).
+      const playerVtxo = (await wallet.getVtxos())
+        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed')
+        .sort((a: ExtendedVirtualCoin, b: ExtendedVirtualCoin) => b.value - a.value)[0]
+      if (!playerVtxo || playerVtxo.value < tier) {
+        throw new Error(`v0.4 needs a single VTXO ≥ ${tier} sat for the co-fund — settle/consolidate your balance, then retry.`)
+      }
+
+      // 1. /play — reserve the house stake + get the covenant params.
+      const playRes = await v4Play(
+        tier, playerPubkey, playerHash, playerAddress, playerAddress,
+        isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number, oddsLo: oddsLo ?? 0 } : undefined,
+      )
+
+      // 2. Build the atomic co-fund (player input from our own VTXO; house input
+      // rebuilt from the /play response) and run the 2-round signing handshake.
+      const playerInput: ArkTxInput = {
+        txid: playerVtxo.txid, vout: playerVtxo.vout, value: playerVtxo.value,
+        tapLeafScript: playerVtxo.forfeitTapLeafScript, tapTree: playerVtxo.tapTree,
+      }
+      const cof = buildCofundFromPlay({
+        play: playRes,
+        playerInput,
+        playerChangePkScript: ArkAddress.decode(playerAddress).pkScript,
+        betAmount: tier,
+        serverUnroll,
+      })
+      const arkTxSigned = await identity.sign(cof.arkTx, [0])
+      const cofundRes = await v4Cofund(
+        playRes.gameId,
+        base64.encode(arkTxSigned.toPSBT()),
+        cof.checkpoints.map((c) => base64.encode(c.toPSBT())),
+      )
+      const playerCp = Transaction.fromPSBT(base64.decode(cofundRes.playerCheckpoint))
+      let playerCpSigned = playerCp
+      try {
+        playerCpSigned = await identity.sign(playerCp, Array.from({ length: playerCp.inputsLength }, (_, i) => i))
+      } catch (e) {
+        if (!getErrorMessage(e).includes('No taproot scripts signed')) throw e
+      }
+      await v4CofundFinalize(playRes.gameId, base64.encode(playerCpSigned.toPSBT()))
+
+      // 3. Reveal → the server settles the whole pot to the winner.
+      return v4Reveal(playRes.gameId, playerSecretHex)
+    },
+
+    /**
+     * Place a bet via whichever trustless flow the server advertises — v0.3
+     * per-party escrow (default) or v0.4 joint pot when `protocolVersion: 'v4'`
+     * is set on /api/network. The single entry point the UI dispatches; v0.4 is
+     * strictly opt-in, so existing deployments keep playing v0.3 untouched.
+     */
+    async placeTrustlessBet(
+      { dispatch },
+      payload: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
+    ) {
+      const net = await getNetwork()
+      return net.protocolVersion === 'v4'
+        ? dispatch('playV4Game', payload)
+        : dispatch('playTrustlessGame', payload)
     },
 
     /** Locally-stashed stalled bets (escrows reclaimable if the server stalled). */

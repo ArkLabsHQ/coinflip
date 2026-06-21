@@ -61,6 +61,7 @@ export {
   handleV4Cofund,
   handleV4CofundFinalize,
   handleV4Reveal,
+  newGameProtocolVersion,
   type V4PlayRequest,
   type V4PlayResult,
   type V4CovenantParams,

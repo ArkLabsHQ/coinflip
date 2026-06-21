@@ -33,6 +33,16 @@ const toXOnly = (b: Uint8Array): Uint8Array => (b.length === 33 ? b.slice(1) : b
 /** The coin (no client odds) maps to n=2,target=1,lo=0 — player wins iff roll==0. */
 const COIN_ODDS = { oddsN: 2, oddsTarget: 1, oddsLo: 0 } as const
 
+/**
+ * Which protocol NEW games use — 'v3' (per-party escrow, the default) or 'v4'
+ * (joint pot). Set PROTOCOL_VERSION=v4 to advertise + serve the v0.4 flow; the
+ * client reads it from /api/network and routes to /api/v4 accordingly. Defaults
+ * to 'v3' so the joint-pot path is strictly opt-in.
+ */
+export function newGameProtocolVersion(): 'v3' | 'v4' {
+  return (process.env.PROTOCOL_VERSION ?? 'v3').trim().toLowerCase() === 'v4' ? 'v4' : 'v3'
+}
+
 async function getTiers(deps: AppDeps): Promise<number[]> {
   return JSON.parse((await deps.repos.config.get('tiers')) || '[1000,5000,10000,50000]')
 }

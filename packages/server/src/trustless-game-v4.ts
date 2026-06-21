@@ -15,7 +15,7 @@
  */
 
 import { base64, hex } from '@scure/base'
-import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, type ExtendedVirtualCoin, type TapLeafScript } from '@arkade-os/sdk'
 import {
   CoinflipJointPotScript, commitDigit, randomUniformInt,
   determineWinnerV3, computeRollV3, buildJointPotSettleTx, encodeSettleForEmulator,
@@ -37,6 +37,22 @@ async function getTiers(deps: AppDeps): Promise<number[]> {
 }
 async function getOddsEdgeBps(deps: AppDeps): Promise<number> {
   return parseInt((await deps.repos.config.get('variable_odds_edge_bps')) || '300', 10)
+}
+
+/** A TapLeafScript serialized for HTTP transport (all bytes → hex). */
+export interface SerializedTapLeaf {
+  controlBlock: { version: number; internalKey: string; merklePath: string[] }
+  script: string
+}
+function serializeTapLeaf(tl: TapLeafScript): SerializedTapLeaf {
+  return {
+    controlBlock: {
+      version: tl[0].version,
+      internalKey: hex.encode(tl[0].internalKey),
+      merklePath: tl[0].merklePath.map((m) => hex.encode(m)),
+    },
+    script: hex.encode(tl[1]),
+  }
 }
 
 export interface V4PlayRequest {
@@ -83,6 +99,10 @@ export interface V4PlayResult {
   houseStake: number
   /** The house's RESERVED stake input — vin 1 of the co-fund. */
   houseVtxo: { txid: string; vout: number; value: number }
+  /** The house input's forfeit leaf + tapTree, so the client assembles vin 1
+   *  of the co-fund without any server-side VTXO access. */
+  houseLeaf: SerializedTapLeaf
+  houseTapTree: string
   housePubkey: string
   houseHash: string
   serverPubkey: string
@@ -191,6 +211,8 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   // Reserve a SPECIFIC house stake VTXO (vin 1 of the co-fund). Unlike v3's
   // liability-only reservation, v4 pins the exact outpoint the co-fund spends.
   let houseVtxo: { txid: string; vout: number; value: number } | null = null
+  let houseLeaf: SerializedTapLeaf | null = null
+  let houseTapTree = ''
   await selectionMutex.runExclusive(async () => {
     let vtxos = await houseVtxoCache.get(deps)
     let candidate = vtxos.find((v) => settledOrPre(v) && v.value >= houseStake && !reservations.isReserved(outpointKey(v.txid, v.vout)))
@@ -204,9 +226,11 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       throw new HouseBusyError('House is busy (no free stake VTXO). Try again shortly.')
     }
     houseVtxo = { txid: candidate.txid, vout: candidate.vout, value: candidate.value }
+    houseLeaf = serializeTapLeaf(candidate.forfeitTapLeafScript)
+    houseTapTree = hex.encode(candidate.tapTree)
     reservations.reserve(gameId, [outpointKey(candidate.txid, candidate.vout)], houseStake)
   })
-  if (!houseVtxo) throw new HouseBusyError('House is busy. Try again shortly.')
+  if (!houseVtxo || !houseLeaf) throw new HouseBusyError('House is busy. Try again shortly.')
 
   const covenant: V4CovenantParams = {
     creatorPubkey: hex.encode(housePubkey),
@@ -244,7 +268,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
 
   return {
     gameId, potAddress, networkHrp, pot, betAmount: req.tier, houseStake,
-    houseVtxo, housePubkey: hex.encode(housePubkey), houseHash,
+    houseVtxo, houseLeaf, houseTapTree, housePubkey: hex.encode(housePubkey), houseHash,
     serverPubkey: hex.encode(serverPubkey), emulatorPubkey: hex.encode(emulator.signerPubkey),
     finalExpiration, oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
     covenant,

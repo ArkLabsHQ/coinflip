@@ -71,6 +71,7 @@ export {
   type V4CofundFinalizeResult,
   type V4RevealRequest,
   type V4RevealResult,
+  type SerializedTapLeaf,
 } from './trustless-game-v4.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'

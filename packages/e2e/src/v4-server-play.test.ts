@@ -12,12 +12,18 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
-import { hex } from '@scure/base'
-import { SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository } from '@arkade-os/sdk'
-import { CoinflipJointPotScript } from 'arkade-coinflip'
+import { base64, hex } from '@scure/base'
+import {
+  SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository,
+  decodeTapscript, CSVMultisigTapscript, RestIndexerProvider, Transaction, ArkAddress, type ArkTxInput,
+} from '@arkade-os/sdk'
+import { CoinflipJointPotScript, buildJointPotCofundTx, jointPotCofundOutputs } from 'arkade-coinflip'
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { packets } = require('@arklabshq/contract-workflows-prototype')
 import { faucet, settleWithRetry } from './helpers'
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const toInput = (v: any): ArkTxInput => ({ txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree })
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
@@ -67,6 +73,9 @@ describe('v4 server: handleV4Play', () => {
     await waitForBoarding(deps.wallet, HOUSE_FUND_BTC * 1e8 * 0.9)
     await settleWithRetry(deps.wallet)
     await waitForSettled(deps.wallet, BET * 5)
+    // Fragment into a small pool — v4 spends a WHOLE house VTXO per game, so each
+    // game needs its own free stake input (one big VTXO would go "house busy").
+    await server.ensureHouseVtxoPool(deps, { targetCount: 6, pieceSize: BET * 5 })
   }, 180_000)
 
   afterAll(() => {
@@ -130,4 +139,78 @@ describe('v4 server: handleV4Play', () => {
 
     console.log('[v4-play] gameId', res.gameId, '→ pot', res.potAddress, '(', res.pot, 'sats )')
   }, 120_000)
+
+  it('co-funds the joint pot via the 2-round handshake → pot VTXO lands', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+
+    // Fund a player (provides the player stake input).
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await Wallet.create({
+      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+      settlementConfig: false,
+    })
+    await faucet(await playerW.getBoardingAddress(), 0.001)
+    await waitForBoarding(playerW, BET)
+    await settleWithRetry(playerW)
+    await waitForSettled(playerW, BET)
+
+    const salt = crypto.getRandomValues(new Uint8Array(16))
+    const playerReveal = packets.encodeReveal(0, salt)
+    const playerHash = createHash('sha256').update(playerReveal).digest('hex')
+    const res = await server.handleV4Play({
+      tier: BET,
+      playerPubkey: hex.encode(toXOnly(await playerId.compressedPublicKey())),
+      playerHash,
+      playerPayoutAddress: await playerW.getAddress(),
+      playerChangeAddress: await playerW.getAddress(),
+    }, deps)
+
+    // Client builds the co-fund: player input (funded) + the reserved house input.
+    const pv = (await playerW.getVtxos())[0]
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const hv = (await deps.wallet.getVtxos()).find((v: any) => v.txid === res.houseVtxo.txid && v.vout === res.houseVtxo.vout)
+    expect(hv).toBeDefined()
+    const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+    const cofundOuts = jointPotCofundOutputs({
+      potPkScript: ArkAddress.decode(res.potAddress).pkScript, potAmount: BigInt(res.pot),
+      playerChangePkScript: ArkAddress.decode(await playerW.getAddress()).pkScript, playerChange: BigInt(pv.value - BET),
+      houseChangePkScript: ArkAddress.decode(await deps.wallet.getAddress()).pkScript, houseChange: BigInt(hv.value - res.houseStake),
+    })
+    const cf = buildJointPotCofundTx(toInput(pv), toInput(hv), cofundOuts, serverUnroll)
+    const arkTxPlayerSigned = await playerId.sign(cf.arkTx, [0])
+
+    // Round 1: /cofund — server signs house input + checkpoint, returns the player checkpoint.
+    const cofundRes = await server.handleV4Cofund(res.gameId, {
+      arkTx: base64.encode(arkTxPlayerSigned.toPSBT()),
+      checkpoints: cf.checkpoints.map((c: Transaction) => base64.encode(c.toPSBT())),
+    }, deps)
+    expect(typeof cofundRes.arkTxid).toBe('string')
+
+    // Client signs its checkpoint (vin 0).
+    const playerCp = Transaction.fromPSBT(base64.decode(cofundRes.playerCheckpoint))
+    let playerCpSigned = playerCp
+    try { playerCpSigned = await playerId.sign(playerCp, Array.from({ length: playerCp.inputsLength }, (_, i) => i)) }
+    catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+
+    // Round 2: /cofund-finalize — server finalizes → pot VTXO created.
+    const finRes = await server.handleV4CofundFinalize(res.gameId, {
+      playerCheckpoint: base64.encode(playerCpSigned.toPSBT()),
+    }, deps)
+    expect(finRes.cofundTxid).toBe(cofundRes.arkTxid)
+    expect(finRes.potOutpoint.value).toBe(2 * BET)
+
+    // The joint-pot VTXO is live on-chain.
+    const indexer = new RestIndexerProvider(ARK_SERVER_URL)
+    const potPk = hex.encode(ArkAddress.decode(res.potAddress).pkScript)
+    let found = false
+    for (let i = 0; i < 20 && !found; i++) {
+      const { vtxos } = await indexer.getVtxos({ scripts: [potPk] })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (vtxos.some((x: any) => x.txid === finRes.cofundTxid && x.value === 2 * BET)) found = true
+      else await sleep(1000)
+    }
+    expect(found).toBe(true)
+    console.log('[v4-cofund] pot VTXO live:', finRes.cofundTxid, ':0 =', finRes.potOutpoint.value, 'sats')
+  }, 240_000)
 })

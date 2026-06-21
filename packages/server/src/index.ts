@@ -57,10 +57,16 @@ export {
 } from './trustless-game.js'
 export {
   handleV4Play,
+  handleV4Cofund,
+  handleV4CofundFinalize,
   type V4PlayRequest,
   type V4PlayResult,
   type V4CovenantParams,
   type V4State,
+  type V4CofundRequest,
+  type V4CofundResult,
+  type V4CofundFinalizeRequest,
+  type V4CofundFinalizeResult,
 } from './trustless-game-v4.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'

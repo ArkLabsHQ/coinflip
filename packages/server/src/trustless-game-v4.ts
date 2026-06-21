@@ -14,8 +14,8 @@
  *   - (next) handleV4Reveal — settle the pot to the winner via the win covenant.
  */
 
-import { hex } from '@scure/base'
-import { ArkAddress, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { base64, hex } from '@scure/base'
+import { ArkAddress, Transaction, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { CoinflipJointPotScript, commitDigit, randomUniformInt } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
@@ -106,6 +106,11 @@ export interface V4State {
   /** The reserved house stake input. */
   houseVtxo: { txid: string; vout: number; value: number }
   covenant: V4CovenantParams
+  /** Set by /cofund: the submitted arkTx id + the house-signed checkpoint (vin 1), base64. */
+  cofundArkTxid?: string
+  houseSignedCheckpoint?: string
+  /** Set by /cofund-finalize: the on-chain co-fund txid (== the pot VTXO txid). */
+  cofundTxid?: string
 }
 
 const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
@@ -241,4 +246,104 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     finalExpiration, oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
     covenant,
   }
+}
+
+// ── Co-fund handshake (endpoints 2-3) ───────────────────────────────────────
+
+/**
+ * Serialize the server's arkd submits/finalizes. Independent concurrent submits
+ * race arkd's round assembly → a spurious INVALID_SIGNATURE that still consumes
+ * the input (proven in v4-scale). The server is the single submit funnel, so one
+ * in-process mutex around submitTx/finalizeTx is the natural serialization point.
+ */
+let arkSubmitLock: Promise<unknown> = Promise.resolve()
+function withArkSubmit<T>(fn: () => Promise<T>): Promise<T> {
+  const run = arkSubmitLock.then(fn, fn)
+  arkSubmitLock = run.catch(() => undefined)
+  return run
+}
+
+async function loadV4Game(deps: AppDeps, gameId: string): Promise<{ state: V4State; status: string }> {
+  const game = await deps.repos.games.get(gameId)
+  if (!game) throw new Error('Game not found')
+  const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
+  if (state.protocolVersion !== 'v4') throw new Error('Not a v4 game')
+  return { state, status: game.status }
+}
+
+export interface V4CofundRequest {
+  /** The co-fund arkTx (player-signed input vin 0), base64 PSBT. */
+  arkTx: string
+  /** The co-fund checkpoints (one per input), base64 PSBTs. */
+  checkpoints: string[]
+}
+export interface V4CofundResult {
+  arkTxid: string
+  /** The player's checkpoint (vin 0) for the client to sign, base64 PSBT. */
+  playerCheckpoint: string
+}
+
+/**
+ * POST /api/v4/game/:id/cofund — the client has signed the co-fund arkTx's
+ * player input (vin 0). The server signs the house input (vin 1), submits the
+ * tx, signs the house checkpoint (vin 1), and returns the player checkpoint
+ * (vin 0) for the client to sign in the finalize step.
+ */
+export async function handleV4Cofund(gameId: string, req: V4CofundRequest, deps: AppDeps): Promise<V4CofundResult> {
+  const { state, status } = await loadV4Game(deps, gameId)
+  if (status !== 'pending') throw new Error('Game is not pending')
+  if (state.cofundArkTxid) throw new Error('Co-fund already submitted')
+  if (req.checkpoints.length !== 2) throw new Error(`Co-fund must have exactly 2 checkpoints (got ${req.checkpoints.length})`)
+
+  const arkTx = Transaction.fromPSBT(base64.decode(req.arkTx))
+  // Guard: output 0 must be the agreed pot (exact amount to the covenant script).
+  const potOut = arkTx.getOutput(0)
+  const potPkScript = ArkAddress.decode(state.potAddress).pkScript
+  if (!potOut || potOut.amount !== BigInt(state.pot) || !potOut.script || hex.encode(potOut.script) !== hex.encode(potPkScript)) {
+    throw new Error('Co-fund output 0 does not match the agreed pot (amount or script mismatch)')
+  }
+
+  // Sign the house input (vin 1), then submit (serialized) + sign the house checkpoint (vin 1).
+  const signed = await deps.identity.sign(arkTx, [1])
+  const { arkTxid, signedCheckpointTxs } = await withArkSubmit(() =>
+    deps.wallet.arkProvider.submitTx(base64.encode(signed.toPSBT()), req.checkpoints),
+  )
+  if (signedCheckpointTxs.length !== 2) throw new Error(`Expected 2 checkpoints back, got ${signedCheckpointTxs.length}`)
+  const cp1 = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[1]))
+  const cp1Signed = await deps.identity.sign(cp1, Array.from({ length: cp1.inputsLength }, (_, i) => i))
+
+  state.cofundArkTxid = arkTxid
+  state.houseSignedCheckpoint = base64.encode(cp1Signed.toPSBT())
+  await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
+
+  return { arkTxid, playerCheckpoint: signedCheckpointTxs[0] }
+}
+
+export interface V4CofundFinalizeRequest {
+  /** The player's checkpoint (vin 0), now player-signed, base64 PSBT. */
+  playerCheckpoint: string
+}
+export interface V4CofundFinalizeResult {
+  cofundTxid: string
+  potOutpoint: { txid: string; vout: number; value: number }
+}
+
+/**
+ * POST /api/v4/game/:id/cofund-finalize — the client has signed its checkpoint
+ * (vin 0). The server finalizes the co-fund (player checkpoint + the house
+ * checkpoint it signed at /cofund), creating the joint-pot VTXO.
+ */
+export async function handleV4CofundFinalize(gameId: string, req: V4CofundFinalizeRequest, deps: AppDeps): Promise<V4CofundFinalizeResult> {
+  const { state } = await loadV4Game(deps, gameId)
+  if (!state.cofundArkTxid || !state.houseSignedCheckpoint) throw new Error('Co-fund not submitted yet (call /cofund first)')
+  if (state.cofundTxid) throw new Error('Co-fund already finalized')
+
+  // finalizeTx takes the checkpoints in input order: [vin0 (player), vin1 (house)].
+  await withArkSubmit(() =>
+    deps.wallet.arkProvider.finalizeTx(state.cofundArkTxid!, [req.playerCheckpoint, state.houseSignedCheckpoint!]),
+  )
+  state.cofundTxid = state.cofundArkTxid
+  await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
+
+  return { cofundTxid: state.cofundArkTxid, potOutpoint: { txid: state.cofundArkTxid, vout: 0, value: state.pot } }
 }

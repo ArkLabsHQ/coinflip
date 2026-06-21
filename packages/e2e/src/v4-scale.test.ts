@@ -132,13 +132,14 @@ describe('v4 scale: many concurrent joint-pot games', () => {
     const stakes: Vtxo[] = []
     while (stakes.length < n) {
       const take = Math.min(CHUNK, n - stakes.length)
+      // getVtxos() returns WALLET-enriched VTXOs (forfeitTapLeafScript + tapTree,
+      // which the raw indexer response omits and toInput/buildOffchainTx need) —
+      // for both the input spent here and the freshly-split stakes re-fetched below.
       const big = (await w.getVtxos()).sort((a, b) => b.value - a.value)[0]
       const outs = Array.from({ length: take }, () => ({ script: selfPk, amount: BigInt(PER_VTXO) }))
       const change = big.value - take * PER_VTXO
       if (change > 330) outs.push({ script: selfPk, amount: BigInt(change) })
       const { arkTx, checkpoints } = buildOffchainTx([toInput(big as unknown as Vtxo)], outs, unroll)
-      // Re-fetch via the WALLET (enriches each VTXO with forfeitTapLeafScript +
-      // tapTree, which the raw indexer response omits — buildOffchainTx needs them).
       const txid = await withArkLock(() => submitMultisig(arkTx, checkpoints, [{ id, vin: 0 }]))
       let got: Vtxo[] = []
       for (let i = 0; i < 30 && got.length < take; i++) {

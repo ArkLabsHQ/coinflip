@@ -141,11 +141,12 @@
       <section class="hiw-section">
         <h2>Design evolution</h2>
         <p class="section-intro">
-          The contract has gone through three shipped designs, with a fourth proven server-side.
-          <strong>v0.3</strong> is what this client plays today — all detailed sections below describe it.
-          <strong>v0.4</strong> (the joint pot) is the next step: protocol + server are done and proven on
-          regtest, web-client wiring is in progress. The earlier variants are kept here for reference — each
-          one fixes a real flaw in the previous.
+          The contract has gone through three shipped designs, plus a fourth (<strong>v0.4</strong>, the joint
+          pot) now wired end-to-end. <strong>v0.3</strong> is the default this client plays — all detailed
+          sections below describe it. <strong>v0.4</strong> is opt-in: when the server sets
+          <span class="mono">PROTOCOL_VERSION=v4</span> it advertises the joint-pot flow via /api/network and
+          the client routes to it (only the happy path is wired so far). The earlier variants are kept for
+          reference — each one fixes a real flaw in the previous.
         </p>
         <div class="variant-tabs evolution-tabs" role="tablist" aria-label="Design evolution">
           <button v-for="e in EVOLUTION" :key="e.id" type="button" role="tab"
@@ -385,7 +386,7 @@ const EVOLUTION: { id: Evolution; tab: string }[] = [
   { id: 'v1', tab: 'v0.1 — setup/final (original)' },
   { id: 'v2', tab: 'v0.2 — per-party covenant' },
   { id: 'v3', tab: 'v0.3 — Arkade-Script + packets ★' },
-  { id: 'v4', tab: 'v0.4 — joint pot (next)' },
+  { id: 'v4', tab: 'v0.4 — joint pot (opt-in)' },
 ]
 interface EvolutionCard {
   version: string
@@ -453,9 +454,9 @@ const EVOLUTION_BY: Record<Evolution, EvolutionCard> = {
   v4: {
     version: 'v0.4',
     title: 'Joint pot — atomic co-fund, 2 on-chain txs',
-    badge: { label: 'next · server proven', cls: 'badge-prev' },
+    badge: { label: 'opt-in · wired', cls: 'badge-prev' },
     summary:
-      "Collapses the two per-party escrows into ONE joint-pot VTXO funded by a single atomic two-party co-fund, then settled by paying the whole pot to the winner — 2 on-chain txs (co-fund + settle) instead of v0.3's three, with the same commit–reveal fairness and emulator covenant. Protocol library + house server are complete and proven on regtest; web-client wiring is in progress.",
+      "Collapses the two per-party escrows into ONE joint-pot VTXO funded by a single atomic two-party co-fund, then settled by paying the whole pot to the winner — 2 on-chain txs (co-fund + settle) instead of v0.3's three, with the same commit–reveal fairness and emulator covenant. Library, house server, and web client are all wired and proven on regtest; v0.4 is opt-in (server PROTOCOL_VERSION=v4), v0.3 stays the default, and only the happy path is wired client-side so far.",
     how: [
       'One co-fund tx spends BOTH stake VTXOs (player + house) into a single joint pot — a 2-round signing handshake the API orchestrates, where each party signs only its OWN input + checkpoint (proven feasible on regtest; v0.3 deliberately avoided this).',
       'The pot is an 8-leaf taptree whose win leaves pay the WHOLE pot to the winner via `payTo(winner, pot)` on the one VTXO — vs v0.3\'s two-escrow `atomicSweep`. Same arkade-script win-predicate + `OP_INSPECTPACKET` reveals.',

@@ -26,7 +26,7 @@ A covenant leaf is an ordinary multisig whose emulator pubkey is *tweaked* by a 
 - **Collaborative path** — once both secrets are revealed, the operator and the emulator settle the winner immediately. Fast and cheap.
 - **Unilateral fallback** — if the operator or the counterparty disappears, the affected party still claims, forfeits, or refunds on-chain through the exit leaves. This is what makes the game non-custodial.
 
-### v0.4 — the joint pot (next-generation, in progress)
+### v0.4 — the joint pot (opt-in)
 
 v0.4 collapses the two per-party escrows into a **single joint-pot VTXO** funded by one **atomic two-party co-fund**, then settled by paying the whole pot to the winner — **two on-chain transactions** (co-fund + settle) instead of v0.3's three, with the same commit–reveal fairness and emulator covenant.
 
@@ -34,7 +34,7 @@ v0.4 collapses the two per-party escrows into a **single joint-pot VTXO** funded
 - **One settle tx** pays the whole pot to the winner through their win-covenant leaf + the emulator, off a single player reveal.
 - The pot is an 8-leaf taptree (win / forfeit / cooperative-refund + CSV exit mirrors); win leaves use `payTo(winner, pot)` on the one VTXO instead of v0.3's two-escrow `atomicSweep`.
 
-The protocol library and house server are **complete and proven on regtest** — the full game settles end-to-end through `/api/v4/play`, `/api/v4/game/:id/cofund`, `/api/v4/game/:id/cofund-finalize`, and `/api/v4/game/:id/reveal`, and a concurrency harness runs hundreds of games (~90 ms co-fund / ~70 ms settle each). The web client still plays v0.3; v0.4 client wiring is in progress. The in-app **How It Works → Design evolution** has the full walk-through.
+The protocol library and house server are **complete and proven on regtest** — the full game settles end-to-end through `/api/v4/play`, `/api/v4/game/:id/cofund`, `/api/v4/game/:id/cofund-finalize`, and `/api/v4/game/:id/reveal`, and a concurrency harness runs hundreds of games (~90 ms co-fund / ~70 ms settle each). The web client is wired for it too, **strictly opt-in**: set `PROTOCOL_VERSION=v4` on the server and it advertises the joint pot via `/api/network`, and the client routes to the `/api/v4` flow; otherwise v0.3 stays the default. (Client-side stake-recovery — the cooperative-refund + unilateral-exit leaves — isn't wired yet, so only the happy path is.) The in-app **How It Works → Design evolution** has the full walk-through.
 
 ## Repository layout
 

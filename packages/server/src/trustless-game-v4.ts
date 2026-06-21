@@ -1,17 +1,16 @@
 /**
- * v4 joint-pot game — server side (Phase 3).
+ * v4 joint-pot game — server side.
  *
  * v4 replaces v3's two per-party escrows + lazy house funding with ONE joint-pot
  * VTXO funded by an atomic two-party co-fund, settled in 2 on-chain txs. The
  * protocol + tx-builders are proven (v4-game-probe, v4-scale, lib/joint-pot-tx).
  *
- * This module implements the API the design's co-fund handshake needs. Built
- * incrementally, each endpoint verified e2e (bootstrapDeps + supertest) before
- * the next:
+ * This module implements the API the design's co-fund handshake needs; each
+ * endpoint is verified e2e (bootstrapDeps + supertest):
  *   - handleV4Play  — reserve a house stake VTXO, derive the joint-pot covenant,
  *     persist the game, return the covenant params for the client to co-fund.
- *   - (next) handleV4Cofund / handleV4CofundFinalize — the 2-round co-fund.
- *   - (next) handleV4Reveal — settle the pot to the winner via the win covenant.
+ *   - handleV4Cofund / handleV4CofundFinalize — the 2-round co-fund.
+ *   - handleV4Reveal — settle the pot to the winner via the win covenant.
  */
 
 import { base64, hex } from '@scure/base'

@@ -119,6 +119,12 @@ export {
   type CoinflipEscrowOptionsV3,
 } from './script-v3'
 
+// v0.4 joint-pot taptree — see joint-pot.ts module header.
+export {
+  CoinflipJointPotScript,
+  type CoinflipJointPotOptions,
+} from './joint-pot'
+
 // v0.3 transaction-building helpers — see transactions-v3.ts module header.
 export {
   getPlayerEscrowScriptV3,

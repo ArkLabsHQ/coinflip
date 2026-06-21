@@ -10,13 +10,16 @@
  */
 import { base64, hex } from '@scure/base'
 import { createHash } from 'crypto'
-import { CoinflipJointPotScript, determineWinnerV3 } from 'arkade-coinflip'
+import {
+  CoinflipJointPotScript, determineWinnerV3,
+  buildJointPotCofundTx, buildJointPotSettleTx, jointPotCofundOutputs, encodeSettleForEmulator,
+} from 'arkade-coinflip'
 import {
   Wallet, SingleKey, RestArkProvider, RestIndexerProvider, InMemoryWalletRepository,
   InMemoryContractRepository, decodeTapscript, buildOffchainTx, CSVMultisigTapscript,
   Transaction, ArkAddress, type ArkInfo, type ArkProvider, type ArkTxInput, type Identity,
 } from '@arkade-os/sdk'
-import { emulator, packets } from '@arklabshq/contract-workflows-prototype'
+import { packets } from '@arklabshq/contract-workflows-prototype'
 import { faucet } from './helpers'
 
 const ARK = process.env.ARK_SERVER_URL || 'http://localhost:7070'
@@ -161,32 +164,29 @@ describe('v4 scale: many concurrent joint-pot games', () => {
     })
     const potAddr = potS.address(HRP, serverPub).pkScript
 
-    const cofundOuts = [
-      { script: potAddr, amount: BigInt(2 * BET) },
-      { script: ppk, amount: BigInt(pv.value - BET) },
-      { script: hpk, amount: BigInt(hv.value - BET) },
-    ]
+    const cofundOuts = jointPotCofundOutputs({
+      potPkScript: potAddr, potAmount: BigInt(2 * BET),
+      playerChangePkScript: ppk, playerChange: BigInt(pv.value - BET),
+      houseChangePkScript: hpk, houseChange: BigInt(hv.value - BET),
+    })
     // Build + submit INSIDE the lock (fresh checkpoint). Time the operation
     // itself, excluding lock-queue wait — throughput/wall-time captures contention.
     let cofundMs = 0
     const cofundTxid = await withArkLock(async () => {
       const s = Date.now()
-      const cf = buildOffchainTx([toInput(pv), toInput(hv)], cofundOuts, unroll)
+      const cf = buildJointPotCofundTx(toInput(pv), toInput(hv), cofundOuts, unroll)
       const txid = await submitMultisig(cf.arkTx, cf.checkpoints, [{ id: playerId, vin: 0 }, { id: houseId, vin: 1 }])
       cofundMs = Date.now() - s
       return txid
     })
 
-    const leaf = winner === 'player' ? potS.playerWinCovenant() : potS.creatorWinCovenant()
-    const arkadeScript = winner === 'player' ? potS.playerWinFullArkadeScript : potS.creatorWinFullArkadeScript
     const winPk = winner === 'player' ? ppk : hpk
-    const settle = buildOffchainTx([{ txid: cofundTxid, vout: 0, value: 2 * BET, tapLeafScript: leaf, tapTree: potS.encode() }], [{ script: winPk, amount: BigInt(2 * BET) }], unroll)
-    const cp = settle.checkpoints[0], cpIn = cp.getInput(0)
-    if (cpIn?.witnessUtxo) cp.updateInput(0, { witnessUtxo: { script: potS.pkScript, amount: cpIn.witnessUtxo.amount } })
-    emulator.addPacket(settle.arkTx, [{ vin: 0, script: arkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) }])
-    packets.addRevealPacket(settle.arkTx, packets.REVEAL_PLAYER_PACKET_TYPE, pReveal)
-    packets.addRevealPacket(settle.arkTx, packets.REVEAL_CREATOR_PACKET_TYPE, cReveal)
-    const body = JSON.stringify({ arkTx: base64.encode(settle.arkTx.toPSBT()), checkpointTxs: settle.checkpoints.map((c) => base64.encode(c.toPSBT())) })
+    const settle = buildJointPotSettleTx({
+      pot: potS, cofund: { txid: cofundTxid, vout: 0, value: 2 * BET },
+      winner, winnerPayoutPkScript: winPk, potAmount: BigInt(2 * BET),
+      playerRevealBytes: pReveal, creatorRevealBytes: cReveal, serverUnroll: unroll,
+    })
+    const body = JSON.stringify(encodeSettleForEmulator(settle))
     // The emulator forwards the settle to arkd, so each POST is an arkd submit —
     // serialize it under the same lock (backoff happens outside the lock).
     const postOnce = async (): Promise<{ ok: true; txid: string } | { ok: false; status: number; text: string }> => {

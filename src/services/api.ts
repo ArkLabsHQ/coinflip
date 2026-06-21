@@ -184,6 +184,94 @@ export function getGame(gameId: string): Promise<GameResponse> {
   return request(`/api/game/${gameId}`)
 }
 
+// ── v0.4 joint-pot endpoints ────────────────────────────────────────────────
+// The 2-tx joint-pot flow: play → (build+sign co-fund) → cofund → (sign
+// checkpoint) → cofund-finalize → reveal. Shapes mirror the server's
+// trustless-game-v4 handlers; V4PlayResponse is structurally a lib
+// `PlayResponseForCofund`, so `buildCofundFromPlay` consumes it directly.
+
+export interface V4SerializedTapLeaf {
+  controlBlock: { version: number; internalKey: string; merklePath: string[] }
+  script: string
+}
+export interface V4CovenantParams {
+  creatorPubkey: string; playerPubkey: string; serverPubkey: string
+  creatorHash: string; playerHash: string
+  finalExpiration: number; exitDelay: number
+  oddsN: number; oddsTarget: number; oddsLo: number
+  emulatorPubkey: string
+  playerPayoutPkScript: string; housePayoutPkScript: string
+  playerStake: number; houseStake: number
+}
+export interface V4PlayResponse {
+  gameId: string
+  potAddress: string
+  networkHrp: string
+  pot: number
+  betAmount: number
+  houseStake: number
+  houseVtxo: { txid: string; vout: number; value: number }
+  houseLeaf: V4SerializedTapLeaf
+  houseTapTree: string
+  housePubkey: string
+  houseHash: string
+  serverPubkey: string
+  emulatorPubkey: string
+  finalExpiration: number
+  oddsN: number; oddsTarget: number; oddsLo: number
+  covenant: V4CovenantParams
+}
+export interface V4CofundResponse { arkTxid: string; playerCheckpoint: string }
+export interface V4CofundFinalizeResponse {
+  cofundTxid: string
+  potOutpoint: { txid: string; vout: number; value: number }
+}
+export interface V4RevealResponse {
+  winner: 'player' | 'house'
+  settleTxid: string
+  payout: number
+  houseSecretHex: string
+  roll: number | null
+}
+
+export function v4Play(
+  tier: number,
+  playerPubkey: string,
+  playerHash: string,
+  playerPayoutAddress: string,
+  playerChangeAddress: string,
+  odds?: { oddsN: number; oddsTarget: number; oddsLo?: number },
+): Promise<V4PlayResponse> {
+  return request('/api/v4/play', {
+    method: 'POST',
+    body: JSON.stringify({
+      tier, playerPubkey, playerHash, playerPayoutAddress, playerChangeAddress,
+      oddsN: odds?.oddsN, oddsTarget: odds?.oddsTarget, oddsLo: odds?.oddsLo,
+    }),
+  })
+}
+
+export function v4Cofund(gameId: string, arkTx: string, checkpoints: string[]): Promise<V4CofundResponse> {
+  return request(`/api/v4/game/${gameId}/cofund`, {
+    method: 'POST',
+    body: JSON.stringify({ arkTx, checkpoints }),
+  })
+}
+
+export function v4CofundFinalize(gameId: string, playerCheckpoint: string): Promise<V4CofundFinalizeResponse> {
+  return request(`/api/v4/game/${gameId}/cofund-finalize`, {
+    method: 'POST',
+    body: JSON.stringify({ playerCheckpoint }),
+  })
+}
+
+export function v4Reveal(gameId: string, playerSecretHex: string): Promise<V4RevealResponse> {
+  return request(`/api/v4/game/${gameId}/reveal`, {
+    method: 'POST',
+    body: JSON.stringify({ playerSecretHex }),
+  })
+}
+
 /** /api/game/:id/details — full game state (txids, params, preimages).
  *  The server gates on the playerPubkey query param matching the game's
  *  recorded pubkey, so this only returns data to the owning player.

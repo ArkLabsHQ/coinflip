@@ -63,6 +63,35 @@
             </div>
           </div>
 
+          <!-- v0.4 — JOINT pot: both co-fund one VTXO atomically -->
+          <div v-else-if="evolution === 'v4'" class="pp">
+            <div class="pp-cols">
+              <div class="pp-col">
+                <div class="pp-box you"><span class="pp-name">YOU</span><span class="pp-meta">digit + salt commit</span></div>
+              </div>
+              <div class="pp-col">
+                <div class="pp-box house" :class="{ ghost: scenario === 'nofund' }">
+                  <span class="pp-name">HOUSE</span>
+                  <span class="pp-meta">{{ scenario === 'nofund' ? 'no-show' : 'digit + salt commit' }}</span>
+                </div>
+              </div>
+            </div>
+            <span class="pp-merge">↓ atomic co-fund · 1 tx ↓</span>
+            <div class="pp-box escrow shared" :class="scenario === 'nofund' ? 'empty' : 'filled'">
+              <span class="pp-name">joint pot</span>
+              <span class="pp-meta">{{ scenario === 'nofund' ? 'co-fund never lands' : 'both stakes · one VTXO' }}</span>
+            </div>
+            <div class="pp-trigger">
+              {{ scenario === 'nofund' ? 'co-fund aborts atomically' : outcome.trigger }}
+              <span v-if="scenario === 'happy'" class="pp-trigger-sub mono">payTo(winner, pot) · 1 settle tx</span>
+            </div>
+            <span class="pp-merge">↓ settle · 1 tx ↓</span>
+            <div class="pp-outcome" :class="scenario === 'nofund' ? 'refund' : outcome.kind">
+              <span class="pp-out-title">{{ scenario === 'nofund' ? 'Nothing at risk' : outcome.title }}</span>
+              <span class="pp-out-detail">{{ scenario === 'nofund' ? 'atomic co-fund — both sign or it never lands' : outcome.detail }}</span>
+            </div>
+          </div>
+
           <!-- v0.2 / v0.3 — PER-PARTY escrow -->
           <div v-else class="pp">
             <div class="pp-cols">
@@ -96,7 +125,11 @@
             </div>
           </div>
 
-          <p class="scenario-note">{{ outcome.note }}</p>
+          <p v-if="!(evolution === 'v4' && scenario === 'nofund')" class="scenario-note">{{ outcome.note }}</p>
+          <p v-if="evolution === 'v4' && scenario === 'nofund'" class="scenario-note">
+            v0.4: the co-fund is a single atomic tx — if the house never signs, it simply never lands, so
+            neither stake is ever committed. Nothing to refund, nothing to strand.
+          </p>
           <p v-if="evolution === 'v1' && scenario === 'nofund'" class="scenario-warn">
             ⚠ v0.1 limitation: a no-show on the shared escrow could strand your stake until either side cooperated.
             Per-party escrows in v0.2/v0.3 fix this — each side reclaims its OWN stake unilaterally after the timeout.
@@ -108,9 +141,11 @@
       <section class="hiw-section">
         <h2>Design evolution</h2>
         <p class="section-intro">
-          The contract has gone through three published designs. <strong>v0.3</strong> is what's shipping now —
-          all detailed sections below describe it. The earlier variants are kept here for reference: each one
-          fixes a real flaw in the previous one.
+          The contract has gone through three shipped designs, with a fourth proven server-side.
+          <strong>v0.3</strong> is what this client plays today — all detailed sections below describe it.
+          <strong>v0.4</strong> (the joint pot) is the next step: protocol + server are done and proven on
+          regtest, web-client wiring is in progress. The earlier variants are kept here for reference — each
+          one fixes a real flaw in the previous.
         </p>
         <div class="variant-tabs evolution-tabs" role="tablist" aria-label="Design evolution">
           <button v-for="e in EVOLUTION" :key="e.id" type="button" role="tab"
@@ -135,7 +170,7 @@
               </ul>
             </div>
             <div class="evolution-pane">
-              <h4 class="evolution-h">Why we moved on</h4>
+              <h4 class="evolution-h">{{ EVOLUTION_BY[evolution].whyTitle || 'Why we moved on' }}</h4>
               <ul>
                 <li v-for="(b, i) in EVOLUTION_BY[evolution].why" :key="`why-${i}`">{{ b }}</li>
               </ul>
@@ -345,11 +380,12 @@ const condVariant = ref<'coin' | 'odds'>('coin')
 // — the failure modes that motivated v2, and the script-cleanups that
 // motivated v3. v0.3 is the design every other section on this page
 // describes in detail.
-type Evolution = 'v1' | 'v2' | 'v3'
+type Evolution = 'v1' | 'v2' | 'v3' | 'v4'
 const EVOLUTION: { id: Evolution; tab: string }[] = [
   { id: 'v1', tab: 'v0.1 — setup/final (original)' },
   { id: 'v2', tab: 'v0.2 — per-party covenant' },
   { id: 'v3', tab: 'v0.3 — Arkade-Script + packets ★' },
+  { id: 'v4', tab: 'v0.4 — joint pot (next)' },
 ]
 interface EvolutionCard {
   version: string
@@ -358,6 +394,9 @@ interface EvolutionCard {
   summary: string
   how: string[]
   why: string[]
+  /** Header for the right pane — defaults to "Why we moved on"; the newest
+   *  variant overrides it (nothing's superseded it yet). */
+  whyTitle?: string
 }
 const EVOLUTION_BY: Record<Evolution, EvolutionCard> = {
   v1: {
@@ -409,6 +448,24 @@ const EVOLUTION_BY: Record<Evolution, EvolutionCard> = {
       'Why this is the keeper: emulator-evaluated predicate makes the win condition trivial to extend (new game shapes are arkade-script edits, no tapscript rework).',
       'Typed packets give the client a fixed-length wire shape and remove the secret-length-as-data trick.',
       'The btcd-compatible taptree fix has been upstreamed into the official @arkade-os/ts-sdk so every consumer of the SDK gets correct tap-keys for any leaf count.',
+    ],
+  },
+  v4: {
+    version: 'v0.4',
+    title: 'Joint pot — atomic co-fund, 2 on-chain txs',
+    badge: { label: 'next · server proven', cls: 'badge-prev' },
+    summary:
+      "Collapses the two per-party escrows into ONE joint-pot VTXO funded by a single atomic two-party co-fund, then settled by paying the whole pot to the winner — 2 on-chain txs (co-fund + settle) instead of v0.3's three, with the same commit–reveal fairness and emulator covenant. Protocol library + house server are complete and proven on regtest; web-client wiring is in progress.",
+    how: [
+      'One co-fund tx spends BOTH stake VTXOs (player + house) into a single joint pot — a 2-round signing handshake the API orchestrates, where each party signs only its OWN input + checkpoint (proven feasible on regtest; v0.3 deliberately avoided this).',
+      'The pot is an 8-leaf taptree whose win leaves pay the WHOLE pot to the winner via `payTo(winner, pot)` on the one VTXO — vs v0.3\'s two-escrow `atomicSweep`. Same arkade-script win-predicate + `OP_INSPECTPACKET` reveals.',
+      'Settle is one input → one output: the winner\'s win-covenant leaf + the emulator, off a single player reveal. The /api/v4 endpoints (play → cofund → cofund-finalize → reveal) drive the whole flow.',
+    ],
+    whyTitle: 'What it improves',
+    why: [
+      'Fewer on-chain txs (2 vs 3) and fewer round-trips → faster settlement and lower fees.',
+      'One joint pot, not two escrows: the winner sweeps a single VTXO, and the API funnels every arkd submit — which sidesteps a checkpoint-signature race we found under concurrent load.',
+      'A pre-signed cooperative refund plus CSV unilateral-exit mirrors keep it non-custodial; the house stays a counterparty (not a permissionless taker).',
     ],
   },
 }

@@ -386,4 +386,67 @@ describe('v4 server: handleV4Play', () => {
     expect(['player', 'house']).toContain(revealRes.winner)
     console.log(`[v4-multi] ${k} player inputs + ${res.houseInputs.length} house input(s) → pot ${finRes.cofundTxid} → ${revealRes.winner} settled ${revealRes.settleTxid}`)
   }, 300_000)
+
+  it('plays a FULL game over the real /api/v4 HTTP routes (play→cofund→finalize→reveal)', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+
+    // This drives the exact HTTP calls the client's api.ts wrappers make — the
+    // closest play-test to the browser flow without the Vue layer (the signing
+    // uses the same SDK identity as the client).
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await Wallet.create({
+      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+      settlementConfig: false,
+    })
+    await faucet(await playerW.getBoardingAddress(), 0.001)
+    await waitForBoarding(playerW, BET)
+    await settleWithRetry(playerW)
+    await waitForSettled(playerW, BET)
+
+    const salt = crypto.getRandomValues(new Uint8Array(16))
+    const playerReveal = packets.encodeReveal(0, salt)
+    const playerHash = createHash('sha256').update(playerReveal).digest('hex')
+    const addr = await playerW.getAddress()
+
+    // 1. POST /api/v4/play
+    const play = (await request(app).post('/api/v4/play').send({
+      tier: BET, playerPubkey: hex.encode(toXOnly(await playerId.compressedPublicKey())),
+      playerHash, playerPayoutAddress: addr, playerChangeAddress: addr,
+    }).expect(200)).body
+
+    // 2. Client builds + signs the co-fund from the HTTP response.
+    const pv = (await playerW.getVtxos())[0]
+    const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+    const cf = buildCofundFromPlay({
+      play, playerInputs: [toInput(pv)],
+      playerChangePkScript: ArkAddress.decode(addr).pkScript, betAmount: BET, serverUnroll,
+    })
+    const arkTxSigned = await playerId.sign(cf.arkTx, [0])
+
+    // 3. POST /api/v4/game/:id/cofund
+    const cofund = (await request(app).post(`/api/v4/game/${play.gameId}/cofund`).send({
+      arkTx: base64.encode(arkTxSigned.toPSBT()),
+      checkpoints: cf.checkpoints.map((c: Transaction) => base64.encode(c.toPSBT())),
+    }).expect(200)).body
+
+    // 4. Sign the returned player checkpoints, POST /api/v4/game/:id/cofund-finalize
+    const signedCps = await Promise.all(cofund.playerCheckpoints.map(async (b64: string) => {
+      const cp = Transaction.fromPSBT(base64.decode(b64))
+      let s = cp
+      try { s = await playerId.sign(cp, Array.from({ length: cp.inputsLength }, (_, i) => i)) }
+      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+      return base64.encode(s.toPSBT())
+    }))
+    const fin = (await request(app).post(`/api/v4/game/${play.gameId}/cofund-finalize`)
+      .send({ playerCheckpoints: signedCps }).expect(200)).body
+    expect(fin.potOutpoint.value).toBe(2 * BET)
+
+    // 5. POST /api/v4/game/:id/reveal
+    const reveal = (await request(app).post(`/api/v4/game/${play.gameId}/reveal`)
+      .send({ playerSecretHex: hex.encode(playerReveal) }).expect(200)).body
+    expect(['player', 'house']).toContain(reveal.winner)
+    expect(reveal.payout).toBe(2 * BET)
+    console.log('[v4-http] full game over HTTP →', reveal.winner, 'settled', reveal.settleTxid)
+  }, 240_000)
 })

@@ -89,8 +89,8 @@ export function createV4Routes(deps: AppDeps): Router {
   router.post('/api/v4/game/:id/cofund-finalize', async (req: Request, res: Response) => {
     try {
       const body = req.body as V4CofundFinalizeRequest
-      if (!body.playerCheckpoint) {
-        res.status(400).json({ error: 'Missing required field: playerCheckpoint' })
+      if (!Array.isArray(body.playerCheckpoints) || body.playerCheckpoints.length === 0) {
+        res.status(400).json({ error: 'Missing required field: playerCheckpoints' })
         return
       }
       res.json(await handleV4CofundFinalize(String(req.params.id), body, deps))

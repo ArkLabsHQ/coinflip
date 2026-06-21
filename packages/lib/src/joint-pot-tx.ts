@@ -63,18 +63,24 @@ export function jointPotCofundOutputs(args: {
 }
 
 /**
- * Build the atomic co-fund: ONE offchain tx spending the player's stake input
- * (vin 0) and the house's stake input (vin 1) into the joint-pot output (vout 0)
- * plus changes. Each party then signs ONLY its own input + checkpoint; arkd
- * cosigns. (Proven feasible by v4-cofund-probe.)
+ * Build the atomic co-fund: ONE offchain tx spending ARBITRARY player stake
+ * inputs followed by ARBITRARY house stake inputs into the joint-pot output
+ * (vout 0) plus changes. Each party signs ONLY its own inputs + checkpoints;
+ * arkd cosigns. (Two-party atomic co-fund proven by v4-cofund-probe.)
+ *
+ * Ordering is load-bearing: the player's inputs occupy vins `[0, k)` and the
+ * house's the LAST `m` vins `[k, k+m)`. The handshake uses that — the server
+ * signs the trailing `m` inputs/checkpoints, the client the leading `k`.
  */
 export function buildJointPotCofundTx(
-  playerInput: ArkTxInput,
-  houseInput: ArkTxInput,
+  playerInputs: ArkTxInput[],
+  houseInputs: ArkTxInput[],
   outputs: PotOutput[],
   serverUnroll: CSVMultisigTapscript.Type,
 ): BuiltJointPotTx {
-  return buildOffchainTx([playerInput, houseInput], outputs, serverUnroll)
+  if (playerInputs.length === 0) throw new Error('buildJointPotCofundTx: at least one player input required')
+  if (houseInputs.length === 0) throw new Error('buildJointPotCofundTx: at least one house input required')
+  return buildOffchainTx([...playerInputs, ...houseInputs], outputs, serverUnroll)
 }
 
 /**
@@ -167,40 +173,52 @@ export function deserializeTapLeaf(s: SerializedTapLeaf): TapLeafScript {
   ]
 }
 
+/** A house stake input as serialized in the /play response (outpoint + the
+ *  forfeit leaf + tapTree the client needs to spend it). */
+export interface SerializedHouseInput {
+  txid: string
+  vout: number
+  value: number
+  leaf: SerializedTapLeaf
+  tapTree: string
+}
+
 /** The subset of a /play response that buildCofundFromPlay reads. */
 export interface PlayResponseForCofund {
   potAddress: string
   pot: number
   houseStake: number
-  houseVtxo: { txid: string; vout: number; value: number }
-  houseLeaf: SerializedTapLeaf
-  houseTapTree: string
+  /** The house's reserved stake inputs (one or many) — rebuilt into the co-fund. */
+  houseInputs: SerializedHouseInput[]
   covenant: { housePayoutPkScript: string }
 }
 
 /**
- * Assemble the (unsigned) co-fund from a /play response + the player's own stake
- * input — the client primitive. The player input is the client's enriched VTXO;
- * the house input is rebuilt from the serialized leaf + tapTree (no server-side
- * VTXO access). The caller then signs vin 0 and drives the /cofund handshake.
+ * Assemble the (unsigned) co-fund from a /play response + the player's OWN stake
+ * inputs — the client primitive. The player inputs are the client's enriched
+ * VTXOs (one or many, summing to ≥ tier); the house inputs are rebuilt from the
+ * serialized leaves + tapTrees (no server-side VTXO access). Both sides may
+ * contribute arbitrary inputs; change is computed from the per-side sums. The
+ * caller then signs its own input vins and drives the /cofund handshake.
  */
 export function buildCofundFromPlay(args: {
   play: PlayResponseForCofund
-  playerInput: ArkTxInput
+  playerInputs: ArkTxInput[]
   playerChangePkScript: Uint8Array
   betAmount: number
   serverUnroll: CSVMultisigTapscript.Type
 }): BuiltJointPotTx {
   const { play } = args
-  const houseInput: ArkTxInput = {
-    txid: play.houseVtxo.txid, vout: play.houseVtxo.vout, value: play.houseVtxo.value,
-    tapLeafScript: deserializeTapLeaf(play.houseLeaf),
-    tapTree: hex.decode(play.houseTapTree),
-  }
+  const houseInputs: ArkTxInput[] = play.houseInputs.map((h) => ({
+    txid: h.txid, vout: h.vout, value: h.value,
+    tapLeafScript: deserializeTapLeaf(h.leaf), tapTree: hex.decode(h.tapTree),
+  }))
+  const playerSum = args.playerInputs.reduce((s, i) => s + i.value, 0)
+  const houseSum = play.houseInputs.reduce((s, h) => s + h.value, 0)
   const outs = jointPotCofundOutputs({
     potPkScript: ArkAddress.decode(play.potAddress).pkScript, potAmount: BigInt(play.pot),
-    playerChangePkScript: args.playerChangePkScript, playerChange: BigInt(args.playerInput.value - args.betAmount),
-    houseChangePkScript: hex.decode(play.covenant.housePayoutPkScript), houseChange: BigInt(play.houseVtxo.value - play.houseStake),
+    playerChangePkScript: args.playerChangePkScript, playerChange: BigInt(playerSum - args.betAmount),
+    houseChangePkScript: hex.decode(play.covenant.housePayoutPkScript), houseChange: BigInt(houseSum - play.houseStake),
   })
-  return buildJointPotCofundTx(args.playerInput, houseInput, outs, args.serverUnroll)
+  return buildJointPotCofundTx(args.playerInputs, houseInputs, outs, args.serverUnroll)
 }

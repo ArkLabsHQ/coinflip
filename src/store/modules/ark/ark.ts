@@ -1206,12 +1206,13 @@ const ark: Module<ArkState, RootState> = {
     /**
      * Play one v0.4 JOINT-POT game end-to-end (opt-in: the server advertises
      * `protocolVersion: 'v4'` on /api/network). Two on-chain txs:
-     *   1. POST /api/v4/play — the house reserves a stake VTXO and returns the
-     *      joint-pot covenant params + its serialized stake input.
-     *   2. Build the atomic co-fund (player stake VTXO + house stake VTXO → one
-     *      joint pot) with the lib's `buildCofundFromPlay`; sign vin 0 and run the
-     *      2-round handshake — POST /cofund (server signs vin 1 + submits, returns
-     *      our checkpoint) → sign it → POST /cofund-finalize (creates the pot).
+     *   1. POST /api/v4/play — the house reserves stake VTXO(s) and returns the
+     *      joint-pot covenant params + its serialized stake inputs.
+     *   2. Build the atomic co-fund (the player's stake VTXOs + the house's, both
+     *      arbitrary in count, → one joint pot) with the lib's `buildCofundFromPlay`;
+     *      sign our leading input vins and run the 2-round handshake — POST /cofund
+     *      (server signs the trailing house vins + submits, returns our checkpoints)
+     *      → sign them → POST /cofund-finalize (creates the pot).
      *   3. POST /api/v4/reveal — the server settles the WHOLE pot to the winner.
      * Returns { winner, settleTxid, payout, roll, houseSecretHex }.
      *
@@ -1243,13 +1244,20 @@ const ark: Module<ArkState, RootState> = {
       const playerSecretHex = hex.encode(secretBytes)
       const playerHash = await createHash(secretBytes)
 
-      // The co-fund spends ONE player stake VTXO (vin 0). Pick the largest
-      // spendable; v0.4 needs a single VTXO ≥ tier (settle to consolidate if split).
-      const playerVtxo = (await wallet.getVtxos())
+      // The co-fund spends the player's OWN stake inputs (the leading vins). Pick
+      // enough spendable VTXOs (largest-first) to cover the tier — one or many.
+      const spendable = (await wallet.getVtxos())
         .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed')
-        .sort((a: ExtendedVirtualCoin, b: ExtendedVirtualCoin) => b.value - a.value)[0]
-      if (!playerVtxo || playerVtxo.value < tier) {
-        throw new Error(`v0.4 needs a single VTXO ≥ ${tier} sat for the co-fund — settle/consolidate your balance, then retry.`)
+        .sort((a: ExtendedVirtualCoin, b: ExtendedVirtualCoin) => b.value - a.value)
+      const playerVtxos: ExtendedVirtualCoin[] = []
+      let playerSum = 0
+      for (const v of spendable) {
+        if (playerSum >= tier) break
+        playerVtxos.push(v)
+        playerSum += v.value
+      }
+      if (playerSum < tier) {
+        throw new Error(`Insufficient spendable balance for a ${tier}-sat bet (have ${playerSum}) — top up or settle to consolidate, then retry.`)
       }
 
       // 1. /play — reserve the house stake + get the covenant params.
@@ -1258,33 +1266,38 @@ const ark: Module<ArkState, RootState> = {
         isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number, oddsLo: oddsLo ?? 0 } : undefined,
       )
 
-      // 2. Build the atomic co-fund (player input from our own VTXO; house input
+      // 2. Build the atomic co-fund (player inputs = our own VTXOs; house inputs
       // rebuilt from the /play response) and run the 2-round signing handshake.
-      const playerInput: ArkTxInput = {
-        txid: playerVtxo.txid, vout: playerVtxo.vout, value: playerVtxo.value,
-        tapLeafScript: playerVtxo.forfeitTapLeafScript, tapTree: playerVtxo.tapTree,
-      }
+      const playerInputs: ArkTxInput[] = playerVtxos.map((v) => ({
+        txid: v.txid, vout: v.vout, value: v.value,
+        tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree,
+      }))
       const cof = buildCofundFromPlay({
         play: playRes,
-        playerInput,
+        playerInputs,
         playerChangePkScript: ArkAddress.decode(playerAddress).pkScript,
         betAmount: tier,
         serverUnroll,
       })
-      const arkTxSigned = await identity.sign(cof.arkTx, [0])
+      // Sign our input vins — the LEADING k.
+      const k = playerInputs.length
+      const arkTxSigned = await identity.sign(cof.arkTx, Array.from({ length: k }, (_, i) => i))
       const cofundRes = await v4Cofund(
         playRes.gameId,
         base64.encode(arkTxSigned.toPSBT()),
         cof.checkpoints.map((c) => base64.encode(c.toPSBT())),
       )
-      const playerCp = Transaction.fromPSBT(base64.decode(cofundRes.playerCheckpoint))
-      let playerCpSigned = playerCp
-      try {
-        playerCpSigned = await identity.sign(playerCp, Array.from({ length: playerCp.inputsLength }, (_, i) => i))
-      } catch (e) {
-        if (!getErrorMessage(e).includes('No taproot scripts signed')) throw e
-      }
-      await v4CofundFinalize(playRes.gameId, base64.encode(playerCpSigned.toPSBT()))
+      // Sign each of our checkpoints (the server returns the leading k), then finalize.
+      const signedPlayerCheckpoints = await Promise.all(
+        cofundRes.playerCheckpoints.map(async (cpB64) => {
+          const cp = Transaction.fromPSBT(base64.decode(cpB64))
+          let s = cp
+          try { s = await identity.sign(cp, Array.from({ length: cp.inputsLength }, (_, i) => i)) }
+          catch (e) { if (!getErrorMessage(e).includes('No taproot scripts signed')) throw e }
+          return base64.encode(s.toPSBT())
+        }),
+      )
+      await v4CofundFinalize(playRes.gameId, signedPlayerCheckpoints)
 
       // 3. Reveal → the server settles the whole pot to the winner.
       return v4Reveal(playRes.gameId, playerSecretHex)

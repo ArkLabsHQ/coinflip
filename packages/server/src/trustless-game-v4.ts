@@ -18,7 +18,7 @@ import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, type Ex
 import {
   CoinflipJointPotScript, commitDigit, randomUniformInt,
   determineWinnerV3, computeRollV3, buildJointPotSettleTx, encodeSettleForEmulator,
-  serializeTapLeaf, type SerializedTapLeaf,
+  serializeTapLeaf, type SerializedTapLeaf, type SerializedHouseInput,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
@@ -91,12 +91,10 @@ export interface V4PlayResult {
   pot: number
   betAmount: number
   houseStake: number
-  /** The house's RESERVED stake input — vin 1 of the co-fund. */
-  houseVtxo: { txid: string; vout: number; value: number }
-  /** The house input's forfeit leaf + tapTree, so the client assembles vin 1
-   *  of the co-fund without any server-side VTXO access. */
-  houseLeaf: SerializedTapLeaf
-  houseTapTree: string
+  /** The house's RESERVED stake inputs (one or many, summing to ≥ houseStake) —
+   *  the TRAILING inputs of the co-fund. Each carries its forfeit leaf + tapTree
+   *  so the client assembles them with no server-side VTXO access. */
+  houseInputs: SerializedHouseInput[]
   housePubkey: string
   houseHash: string
   serverPubkey: string
@@ -120,12 +118,13 @@ export interface V4State {
   pot: number
   houseStake: number
   potAddress: string
-  /** The reserved house stake input. */
-  houseVtxo: { txid: string; vout: number; value: number }
+  /** The reserved house stake inputs (the trailing co-fund inputs). */
+  houseInputs: SerializedHouseInput[]
   covenant: V4CovenantParams
-  /** Set by /cofund: the submitted arkTx id + the house-signed checkpoint (vin 1), base64. */
+  /** Set by /cofund: the submitted arkTx id + the house-signed checkpoints (one
+   *  per house input, in vin order), base64. */
   cofundArkTxid?: string
-  houseSignedCheckpoint?: string
+  houseSignedCheckpoints?: string[]
   /** Set by /cofund-finalize: the on-chain co-fund txid (== the pot VTXO txid). */
   cofundTxid?: string
 }
@@ -202,29 +201,45 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
 
   const gameId = uuidv4()
 
-  // Reserve a SPECIFIC house stake VTXO (vin 1 of the co-fund). Unlike v3's
-  // liability-only reservation, v4 pins the exact outpoint the co-fund spends.
-  let houseVtxo: { txid: string; vout: number; value: number } | null = null
-  let houseLeaf: SerializedTapLeaf | null = null
-  let houseTapTree = ''
+  // Reserve enough SPECIFIC house stake VTXOs to cover houseStake (one or many).
+  // Unlike v3's liability-only reservation, v4 pins the exact outpoints the
+  // co-fund spends. Greedy largest-first keeps the input count small; the house
+  // change (Hsum − houseStake) returns to the house in the co-fund.
+  let houseInputs: SerializedHouseInput[] = []
   await selectionMutex.runExclusive(async () => {
-    let vtxos = await houseVtxoCache.get(deps)
-    let candidate = vtxos.find((v) => settledOrPre(v) && v.value >= houseStake && !reservations.isReserved(outpointKey(v.txid, v.vout)))
-    if (!candidate) {
-      vtxos = await houseVtxoCache.refresh(deps)
-      candidate = vtxos.find((v) => settledOrPre(v) && v.value >= houseStake && !reservations.isReserved(outpointKey(v.txid, v.vout)))
+    const choose = (vtxos: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] | null => {
+      const free = vtxos
+        .filter((v) => settledOrPre(v) && !reservations.isReserved(outpointKey(v.txid, v.vout)))
+        .sort((a, b) => b.value - a.value)
+      const picked: ExtendedVirtualCoin[] = []
+      let sum = 0
+      for (const v of free) {
+        if (sum >= houseStake) break
+        picked.push(v)
+        sum += v.value
+      }
+      return sum >= houseStake ? picked : null
     }
-    if (!candidate) {
-      const max = vtxos.filter(settledOrPre).reduce((m, v) => Math.max(m, v.value), 0)
-      if (max < houseStake) throw new BetExceedsCapacityError(`Bet exceeds house capacity: needs a ${houseStake}-sat VTXO, largest free is ${max}.`)
-      throw new HouseBusyError('House is busy (no free stake VTXO). Try again shortly.')
+    // Always select from a FRESH fetch: v4 pins exact outpoints, so a stale cache
+    // (e.g. a VTXO another game just co-funded) would hand the client an
+    // already-spent input → VTXO_ALREADY_SPENT at submit. (v3 reserves liability,
+    // not outpoints, so it tolerates staleness; v4 cannot.)
+    const vtxos = await houseVtxoCache.refresh(deps)
+    const picked = choose(vtxos)
+    if (!picked) {
+      const freeTotal = vtxos
+        .filter((v) => settledOrPre(v) && !reservations.isReserved(outpointKey(v.txid, v.vout)))
+        .reduce((s, v) => s + v.value, 0)
+      if (freeTotal < houseStake) throw new BetExceedsCapacityError(`Bet exceeds house capacity: needs ${houseStake} sat, free house balance is ${freeTotal}.`)
+      throw new HouseBusyError('House is busy (insufficient free stake VTXOs). Try again shortly.')
     }
-    houseVtxo = { txid: candidate.txid, vout: candidate.vout, value: candidate.value }
-    houseLeaf = serializeTapLeaf(candidate.forfeitTapLeafScript)
-    houseTapTree = hex.encode(candidate.tapTree)
-    reservations.reserve(gameId, [outpointKey(candidate.txid, candidate.vout)], houseStake)
+    houseInputs = picked.map((v) => ({
+      txid: v.txid, vout: v.vout, value: v.value,
+      leaf: serializeTapLeaf(v.forfeitTapLeafScript), tapTree: hex.encode(v.tapTree),
+    }))
+    reservations.reserve(gameId, picked.map((v) => outpointKey(v.txid, v.vout)), houseStake)
   })
-  if (!houseVtxo || !houseLeaf) throw new HouseBusyError('House is busy. Try again shortly.')
+  if (houseInputs.length === 0) throw new HouseBusyError('House is busy. Try again shortly.')
 
   const covenant: V4CovenantParams = {
     creatorPubkey: hex.encode(housePubkey),
@@ -242,7 +257,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   const state: V4State = {
     protocolVersion: 'v4', finalExpiration, setupExpiration,
     oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
-    exitDelay, pot, houseStake, potAddress, houseVtxo, covenant,
+    exitDelay, pot, houseStake, potAddress, houseInputs, covenant,
   }
   try {
     await deps.repos.games.save({
@@ -262,7 +277,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
 
   return {
     gameId, potAddress, networkHrp, pot, betAmount: req.tier, houseStake,
-    houseVtxo, houseLeaf, houseTapTree, housePubkey: hex.encode(housePubkey), houseHash,
+    houseInputs, housePubkey: hex.encode(housePubkey), houseHash,
     serverPubkey: hex.encode(serverPubkey), emulatorPubkey: hex.encode(emulator.signerPubkey),
     finalExpiration, oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
     covenant,
@@ -300,49 +315,83 @@ export interface V4CofundRequest {
 }
 export interface V4CofundResult {
   arkTxid: string
-  /** The player's checkpoint (vin 0) for the client to sign, base64 PSBT. */
-  playerCheckpoint: string
+  /** The player's checkpoints (the LEADING k inputs) for the client to sign, base64. */
+  playerCheckpoints: string[]
 }
 
 /**
  * POST /api/v4/game/:id/cofund — the client has signed the co-fund arkTx's
- * player input (vin 0). The server signs the house input (vin 1), submits the
- * tx, signs the house checkpoint (vin 1), and returns the player checkpoint
- * (vin 0) for the client to sign in the finalize step.
+ * player inputs (the leading k vins). The server validates the tx, signs the
+ * house inputs (the trailing m vins), submits, signs the house checkpoints, and
+ * returns the player checkpoints for the client to sign in the finalize step.
  */
 export async function handleV4Cofund(gameId: string, req: V4CofundRequest, deps: AppDeps): Promise<V4CofundResult> {
   const { state, status } = await loadV4Game(deps, gameId)
   if (status !== 'pending') throw new Error('Game is not pending')
   if (state.cofundArkTxid) throw new Error('Co-fund already submitted')
-  if (req.checkpoints.length !== 2) throw new Error(`Co-fund must have exactly 2 checkpoints (got ${req.checkpoints.length})`)
 
+  const m = state.houseInputs.length
   const arkTx = Transaction.fromPSBT(base64.decode(req.arkTx))
-  // Guard: output 0 must be the agreed pot (exact amount to the covenant script).
+  const total = arkTx.inputsLength
+  const k = total - m // player inputs occupy the leading k vins, house the trailing m
+  if (k < 1) throw new Error(`Co-fund must include at least one player input (got ${total} inputs for ${m} house inputs)`)
+  if (req.checkpoints.length !== total) throw new Error(`Co-fund must have ${total} checkpoints (got ${req.checkpoints.length})`)
+
+  // Guard 1: output 0 is the agreed pot — exact amount to the covenant script.
   const potOut = arkTx.getOutput(0)
   const potPkScript = ArkAddress.decode(state.potAddress).pkScript
   if (!potOut || potOut.amount !== BigInt(state.pot) || !potOut.script || hex.encode(potOut.script) !== hex.encode(potPkScript)) {
     throw new Error('Co-fund output 0 does not match the agreed pot (amount or script mismatch)')
   }
+  // Guard 2: the house contributes EXACTLY houseStake (no more). Its reserved
+  // inputs sum to Hsum and its change returns to housePayoutPkScript, so
+  // Hsum − houseChange must equal houseStake (±dust, since sub-dust change is
+  // dropped). Protects the house from a client-crafted co-fund that overdraws it.
+  const dust = Number(deps.arkInfo.dust ?? 546n)
+  const Hsum = state.houseInputs.reduce((s, h) => s + h.value, 0)
+  let houseChange = 0
+  for (let o = 1; o < arkTx.outputsLength; o++) {
+    const out = arkTx.getOutput(o)
+    if (out?.script && hex.encode(out.script) === state.covenant.housePayoutPkScript) houseChange += Number(out.amount)
+  }
+  const houseContribution = Hsum - houseChange
+  if (houseContribution < state.houseStake || houseContribution > state.houseStake + dust) {
+    throw new Error(`Co-fund house contribution ${houseContribution} outside [${state.houseStake}, ${state.houseStake + dust}] — refusing to sign`)
+  }
 
-  // Sign the house input (vin 1), then submit (serialized) + sign the house checkpoint (vin 1).
-  const signed = await deps.identity.sign(arkTx, [1])
+  // Sign the house input vins (trailing m), submit (serialized), sign the house
+  // checkpoints (trailing m), return the player checkpoints (leading k).
+  const houseVins = Array.from({ length: m }, (_, i) => k + i)
+  const signed = await deps.identity.sign(arkTx, houseVins)
   const { arkTxid, signedCheckpointTxs } = await withArkSubmit(() =>
     deps.wallet.arkProvider.submitTx(base64.encode(signed.toPSBT()), req.checkpoints),
   )
-  if (signedCheckpointTxs.length !== 2) throw new Error(`Expected 2 checkpoints back, got ${signedCheckpointTxs.length}`)
-  const cp1 = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[1]))
-  const cp1Signed = await deps.identity.sign(cp1, Array.from({ length: cp1.inputsLength }, (_, i) => i))
+  if (signedCheckpointTxs.length !== total) throw new Error(`Expected ${total} checkpoints back, got ${signedCheckpointTxs.length}`)
+  const houseSignedCheckpoints: string[] = []
+  for (let i = 0; i < m; i++) {
+    const cp = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[k + i]))
+    let cpSigned = cp
+    try {
+      cpSigned = await deps.identity.sign(cp, Array.from({ length: cp.inputsLength }, (_, j) => j))
+    } catch (e) {
+      // "No taproot scripts signed" = arkd already completed this checkpoint, so
+      // there's nothing for the house to add — use it as-is (a genuinely missing
+      // signature fails loudly later at finalizeTx, not here).
+      if (!String(e instanceof Error ? e.message : e).includes('No taproot scripts signed')) throw e
+    }
+    houseSignedCheckpoints.push(base64.encode(cpSigned.toPSBT()))
+  }
 
   state.cofundArkTxid = arkTxid
-  state.houseSignedCheckpoint = base64.encode(cp1Signed.toPSBT())
+  state.houseSignedCheckpoints = houseSignedCheckpoints
   await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
 
-  return { arkTxid, playerCheckpoint: signedCheckpointTxs[0] }
+  return { arkTxid, playerCheckpoints: signedCheckpointTxs.slice(0, k) }
 }
 
 export interface V4CofundFinalizeRequest {
-  /** The player's checkpoint (vin 0), now player-signed, base64 PSBT. */
-  playerCheckpoint: string
+  /** The player's checkpoints (the leading k inputs), now player-signed, base64. */
+  playerCheckpoints: string[]
 }
 export interface V4CofundFinalizeResult {
   cofundTxid: string
@@ -350,18 +399,18 @@ export interface V4CofundFinalizeResult {
 }
 
 /**
- * POST /api/v4/game/:id/cofund-finalize — the client has signed its checkpoint
- * (vin 0). The server finalizes the co-fund (player checkpoint + the house
- * checkpoint it signed at /cofund), creating the joint-pot VTXO.
+ * POST /api/v4/game/:id/cofund-finalize — the client has signed its checkpoints
+ * (the leading k inputs). The server finalizes the co-fund (player checkpoints +
+ * the house checkpoints it signed at /cofund), creating the joint-pot VTXO.
  */
 export async function handleV4CofundFinalize(gameId: string, req: V4CofundFinalizeRequest, deps: AppDeps): Promise<V4CofundFinalizeResult> {
   const { state } = await loadV4Game(deps, gameId)
-  if (!state.cofundArkTxid || !state.houseSignedCheckpoint) throw new Error('Co-fund not submitted yet (call /cofund first)')
+  if (!state.cofundArkTxid || !state.houseSignedCheckpoints) throw new Error('Co-fund not submitted yet (call /cofund first)')
   if (state.cofundTxid) throw new Error('Co-fund already finalized')
 
-  // finalizeTx takes the checkpoints in input order: [vin0 (player), vin1 (house)].
+  // finalizeTx takes checkpoints in vin order: [player (leading k), house (trailing m)].
   await withArkSubmit(() =>
-    deps.wallet.arkProvider.finalizeTx(state.cofundArkTxid!, [req.playerCheckpoint, state.houseSignedCheckpoint!]),
+    deps.wallet.arkProvider.finalizeTx(state.cofundArkTxid!, [...req.playerCheckpoints, ...state.houseSignedCheckpoints!]),
   )
   state.cofundTxid = state.cofundArkTxid
   await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })

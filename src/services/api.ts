@@ -198,6 +198,13 @@ export interface V4SerializedTapLeaf {
   controlBlock: { version: number; internalKey: string; merklePath: string[] }
   script: string
 }
+export interface V4HouseInput {
+  txid: string
+  vout: number
+  value: number
+  leaf: V4SerializedTapLeaf
+  tapTree: string
+}
 export interface V4CovenantParams {
   creatorPubkey: string; playerPubkey: string; serverPubkey: string
   creatorHash: string; playerHash: string
@@ -214,9 +221,7 @@ export interface V4PlayResponse {
   pot: number
   betAmount: number
   houseStake: number
-  houseVtxo: { txid: string; vout: number; value: number }
-  houseLeaf: V4SerializedTapLeaf
-  houseTapTree: string
+  houseInputs: V4HouseInput[]
   housePubkey: string
   houseHash: string
   serverPubkey: string
@@ -225,7 +230,7 @@ export interface V4PlayResponse {
   oddsN: number; oddsTarget: number; oddsLo: number
   covenant: V4CovenantParams
 }
-export interface V4CofundResponse { arkTxid: string; playerCheckpoint: string }
+export interface V4CofundResponse { arkTxid: string; playerCheckpoints: string[] }
 export interface V4CofundFinalizeResponse {
   cofundTxid: string
   potOutpoint: { txid: string; vout: number; value: number }
@@ -262,10 +267,10 @@ export function v4Cofund(gameId: string, arkTx: string, checkpoints: string[]): 
   })
 }
 
-export function v4CofundFinalize(gameId: string, playerCheckpoint: string): Promise<V4CofundFinalizeResponse> {
+export function v4CofundFinalize(gameId: string, playerCheckpoints: string[]): Promise<V4CofundFinalizeResponse> {
   return request(`/api/v4/game/${gameId}/cofund-finalize`, {
     method: 'POST',
-    body: JSON.stringify({ playerCheckpoint }),
+    body: JSON.stringify({ playerCheckpoints }),
   })
 }
 

@@ -17,7 +17,7 @@ import { createHash } from 'crypto'
 import { base64, hex } from '@scure/base'
 import {
   SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository,
-  decodeTapscript, CSVMultisigTapscript, RestIndexerProvider, Transaction, ArkAddress, type ArkTxInput,
+  decodeTapscript, CSVMultisigTapscript, RestIndexerProvider, Transaction, ArkAddress, buildOffchainTx, type ArkTxInput,
 } from '@arkade-os/sdk'
 import { CoinflipJointPotScript, buildCofundFromPlay } from 'arkade-coinflip'
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -26,6 +26,28 @@ import { faucet, settleWithRetry } from './helpers'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const toInput = (v: any): ArkTxInput => ({ txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree })
+
+/** Split a wallet's largest VTXO into `count` ~equal pieces (sums exactly, no
+ *  fee gap) so a co-fund can be forced to use multiple player inputs. */
+async function splitEqual(w: Wallet, id: SingleKey, count: number): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const big = (await w.getVtxos()).sort((a: any, b: any) => b.value - a.value)[0]
+  const piece = Math.floor(big.value / count)
+  const selfPk = ArkAddress.decode(await w.getAddress()).pkScript
+  const unroll = decodeTapscript(hex.decode((await w.arkProvider.getInfo()).checkpointTapscript)) as CSVMultisigTapscript.Type
+  const outs = Array.from({ length: count }, (_, i) => ({ script: selfPk, amount: BigInt(i === 0 ? big.value - piece * (count - 1) : piece) }))
+  const { arkTx, checkpoints } = buildOffchainTx([toInput(big)], outs, unroll)
+  const signed = await id.sign(arkTx, [0])
+  const { arkTxid, signedCheckpointTxs } = await w.arkProvider.submitTx(base64.encode(signed.toPSBT()), checkpoints.map((c) => base64.encode(c.toPSBT())))
+  const finals: string[] = []
+  for (const c of signedCheckpointTxs) {
+    const tx = Transaction.fromPSBT(base64.decode(c))
+    let s = tx
+    try { s = await id.sign(tx, Array.from({ length: tx.inputsLength }, (_, i) => i)) } catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+    finals.push(base64.encode(s.toPSBT()))
+  }
+  await w.arkProvider.finalizeTx(arkTxid, finals)
+}
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
@@ -51,6 +73,13 @@ let arkAvailable = false
 beforeAll(async () => {
   try { arkAvailable = (await fetch(`${ARK_SERVER_URL}/v1/info`, { signal: AbortSignal.timeout(5000) })).ok } catch { arkAvailable = false }
 }, 10_000)
+
+// Spending freshly-built PRECONFIRMED VTXOs in the co-fund hits a known ~13%
+// transient arkd race (characterized in v4-scale.test.ts; the scale harness
+// handles it with retry-fresh-inputs). Each test here uses fresh identities, so
+// a bounded retry — a fully fresh attempt — clears the transient. This is the
+// real arkd behaviour, not a logic flake: every test passes in isolation.
+jest.retryTimes(2, { logErrorsBeforeRetry: true })
 
 describe('v4 server: handleV4Play', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -118,8 +147,10 @@ describe('v4 server: handleV4Play', () => {
     expect(res.pot).toBe(2 * BET)
     expect(res.betAmount).toBe(BET)
     expect(res.houseStake).toBe(BET) // coin: house stakes the tier
-    expect(res.houseVtxo.value).toBeGreaterThanOrEqual(BET)
-    expect(typeof res.houseVtxo.txid).toBe('string')
+    expect(Array.isArray(res.houseInputs)).toBe(true)
+    expect(res.houseInputs.length).toBeGreaterThanOrEqual(1)
+    expect(res.houseInputs.reduce((s: number, h: { value: number }) => s + h.value, 0)).toBeGreaterThanOrEqual(BET)
+    expect(typeof res.houseInputs[0].txid).toBe('string')
     expect(res.potAddress.startsWith(res.networkHrp)).toBe(true)
 
     // Headline: re-derive the covenant client-side → byte-identical pot address.
@@ -171,7 +202,7 @@ describe('v4 server: handleV4Play', () => {
     expect(typeof res.body.potAddress).toBe('string')
     expect(res.body.potAddress.startsWith(res.body.networkHrp)).toBe(true)
     expect(res.body.covenant).toBeDefined()
-    expect(res.body.houseVtxo.value).toBeGreaterThanOrEqual(BET)
+    expect(res.body.houseInputs.length).toBeGreaterThanOrEqual(1)
   }, 60_000)
 
   it('co-funds via the 2-round handshake, then reveal settles the pot to the winner', async () => {
@@ -201,35 +232,38 @@ describe('v4 server: handleV4Play', () => {
     }, deps)
 
     // Client builds the co-fund entirely from public data via the lib primitive:
-    // player input = the client's own funded VTXO; house input rebuilt from the
-    // /play response (houseLeaf + houseTapTree). serverUnroll = arkd's public info.
+    // player inputs = the client's own funded VTXO(s); house inputs rebuilt from
+    // the /play response (houseInputs). serverUnroll = arkd's public info.
     const pv = (await playerW.getVtxos())[0]
     const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
     const cf = buildCofundFromPlay({
       play: res,
-      playerInput: toInput(pv),
+      playerInputs: [toInput(pv)],
       playerChangePkScript: ArkAddress.decode(await playerW.getAddress()).pkScript,
       betAmount: BET,
       serverUnroll,
     })
     const arkTxPlayerSigned = await playerId.sign(cf.arkTx, [0])
 
-    // Round 1: /cofund — server signs house input + checkpoint, returns the player checkpoint.
+    // Round 1: /cofund — server signs the house inputs + checkpoints, returns ours.
     const cofundRes = await server.handleV4Cofund(res.gameId, {
       arkTx: base64.encode(arkTxPlayerSigned.toPSBT()),
       checkpoints: cf.checkpoints.map((c: Transaction) => base64.encode(c.toPSBT())),
     }, deps)
     expect(typeof cofundRes.arkTxid).toBe('string')
 
-    // Client signs its checkpoint (vin 0).
-    const playerCp = Transaction.fromPSBT(base64.decode(cofundRes.playerCheckpoint))
-    let playerCpSigned = playerCp
-    try { playerCpSigned = await playerId.sign(playerCp, Array.from({ length: playerCp.inputsLength }, (_, i) => i)) }
-    catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+    // Client signs its checkpoints (the leading k).
+    const signedPlayerCheckpoints = await Promise.all(cofundRes.playerCheckpoints.map(async (b64: string) => {
+      const cp = Transaction.fromPSBT(base64.decode(b64))
+      let s = cp
+      try { s = await playerId.sign(cp, Array.from({ length: cp.inputsLength }, (_, i) => i)) }
+      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+      return base64.encode(s.toPSBT())
+    }))
 
     // Round 2: /cofund-finalize — server finalizes → pot VTXO created.
     const finRes = await server.handleV4CofundFinalize(res.gameId, {
-      playerCheckpoint: base64.encode(playerCpSigned.toPSBT()),
+      playerCheckpoints: signedPlayerCheckpoints,
     }, deps)
     expect(finRes.cofundTxid).toBe(cofundRes.arkTxid)
     expect(finRes.potOutpoint.value).toBe(2 * BET)
@@ -265,5 +299,91 @@ describe('v4 server: handleV4Play', () => {
     }
     expect(settled).toBe(true)
     console.log('[v4-reveal] winner', revealRes.winner, '→ settled', revealRes.settleTxid, '(', revealRes.payout, 'sats )')
+  }, 300_000)
+
+  it('co-funds from MULTIPLE player inputs (no single VTXO ≥ tier) → settles', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+
+    // Fund a player, then split into sub-tier pieces so the co-fund MUST use 2+.
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await Wallet.create({
+      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+      settlementConfig: false,
+    })
+    await faucet(await playerW.getBoardingAddress(), 0.0001) // 10_000 sats
+    await waitForBoarding(playerW, 8000)
+    await settleWithRetry(playerW)
+    await waitForSettled(playerW, 8000)
+    await splitEqual(playerW, playerId, 12) // ~825-sat pieces, each < BET (1000)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let pieces: any[] = []
+    for (let i = 0; i < 30; i++) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      pieces = (await playerW.getVtxos()).filter((v: any) => v.value < BET)
+      if (pieces.length >= 2) break
+      await sleep(1000)
+    }
+    expect(pieces.length).toBeGreaterThanOrEqual(2)
+
+    const salt = crypto.getRandomValues(new Uint8Array(16))
+    const playerReveal = packets.encodeReveal(0, salt)
+    const playerHash = createHash('sha256').update(playerReveal).digest('hex')
+    const addr = await playerW.getAddress()
+    const res = await server.handleV4Play({
+      tier: BET, playerPubkey: hex.encode(toXOnly(await playerId.compressedPublicKey())),
+      playerHash, playerPayoutAddress: addr, playerChangeAddress: addr,
+    }, deps)
+
+    // Pick sub-tier VTXOs largest-first until ≥ tier — guaranteed ≥ 2 here.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const picked: any[] = []
+    let sum = 0
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const v of pieces.sort((a: any, b: any) => b.value - a.value)) {
+      if (sum >= BET) break
+      picked.push(v); sum += v.value
+    }
+    expect(picked.length).toBeGreaterThanOrEqual(2) // FORCED multi player-input
+
+    const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+    const cf = buildCofundFromPlay({
+      play: res, playerInputs: picked.map(toInput),
+      playerChangePkScript: ArkAddress.decode(addr).pkScript, betAmount: BET, serverUnroll,
+    })
+    const k = picked.length
+    expect(cf.arkTx.inputsLength).toBe(k + res.houseInputs.length)
+
+    const arkTxSigned = await playerId.sign(cf.arkTx, Array.from({ length: k }, (_, i) => i))
+    const cofundRes = await server.handleV4Cofund(res.gameId, {
+      arkTx: base64.encode(arkTxSigned.toPSBT()),
+      checkpoints: cf.checkpoints.map((c: Transaction) => base64.encode(c.toPSBT())),
+    }, deps)
+    expect(cofundRes.playerCheckpoints.length).toBe(k) // the server returned k player checkpoints
+
+    const signedCps = await Promise.all(cofundRes.playerCheckpoints.map(async (b64: string) => {
+      const cp = Transaction.fromPSBT(base64.decode(b64))
+      let s = cp
+      try { s = await playerId.sign(cp, Array.from({ length: cp.inputsLength }, (_, i) => i)) }
+      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+      return base64.encode(s.toPSBT())
+    }))
+    const finRes = await server.handleV4CofundFinalize(res.gameId, { playerCheckpoints: signedCps }, deps)
+    expect(finRes.potOutpoint.value).toBe(2 * BET)
+
+    // Pot landed on-chain + reveal settles it.
+    const indexer2 = new RestIndexerProvider(ARK_SERVER_URL)
+    const potPk = hex.encode(ArkAddress.decode(res.potAddress).pkScript)
+    let found = false
+    for (let i = 0; i < 20 && !found; i++) {
+      const { vtxos } = await indexer2.getVtxos({ scripts: [potPk] })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (vtxos.some((x: any) => x.txid === finRes.cofundTxid && x.value === 2 * BET)) found = true
+      else await sleep(1000)
+    }
+    expect(found).toBe(true)
+    const revealRes = await server.handleV4Reveal(res.gameId, { playerSecretHex: hex.encode(playerReveal) }, deps)
+    expect(['player', 'house']).toContain(revealRes.winner)
+    console.log(`[v4-multi] ${k} player inputs + ${res.houseInputs.length} house input(s) → pot ${finRes.cofundTxid} → ${revealRes.winner} settled ${revealRes.settleTxid}`)
   }, 300_000)
 })

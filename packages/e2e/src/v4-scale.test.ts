@@ -175,7 +175,7 @@ describe('v4 scale: many concurrent joint-pot games', () => {
     let cofundMs = 0
     const cofundTxid = await withArkLock(async () => {
       const s = Date.now()
-      const cf = buildJointPotCofundTx(toInput(pv), toInput(hv), cofundOuts, unroll)
+      const cf = buildJointPotCofundTx([toInput(pv)], [toInput(hv)], cofundOuts, unroll)
       const txid = await submitMultisig(cf.arkTx, cf.checkpoints, [{ id: playerId, vin: 0 }, { id: houseId, vin: 1 }])
       cofundMs = Date.now() - s
       return txid

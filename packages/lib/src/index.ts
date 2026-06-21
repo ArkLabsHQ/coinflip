@@ -137,6 +137,7 @@ export {
   type BuiltJointPotTx,
   type Outpoint,
   type SerializedTapLeaf,
+  type SerializedHouseInput,
   type PlayResponseForCofund,
 } from './joint-pot-tx'
 

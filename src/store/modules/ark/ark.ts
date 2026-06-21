@@ -22,9 +22,11 @@ import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
   forfeit as apiForfeit, getGame as apiGetGame,
   v4Play, v4Cofund, v4CofundFinalize, v4Reveal,
-  type Outpoint, type ForfeitResponse,
+  type Outpoint, type ForfeitResponse, type V4CovenantParams,
 } from '@/services/api'
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
+import { resolveV4ForfeitStash, type V4PotOutpoint } from './v4ForfeitStash'
+import { putV4Forfeit, deleteV4Forfeit } from './v4ForfeitStashStore'
 import { locateEscrowVtxo } from './locateEscrow'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
@@ -455,6 +457,52 @@ async function stashForfeitRecovery(
     await updateRefundStash(gameId, decision.patch)
   } else {
     console.warn(`[trustless] forfeit not stashed (${decision.reason})`)
+  }
+}
+
+/**
+ * v0.4 analogue of `stashForfeitRecovery`. After the joint pot is co-funded,
+ * persist everything the client needs to reclaim it via the `playerForfeit`
+ * leaf should the server never settle. Unlike v3 there is no `/forfeit` probe:
+ * the claim is CLIENT-built from the covenant params, so all we need is the pot
+ * outpoint + covenant + a reachable emulator. Best-effort — NEVER throws, so a
+ * stash failure can't disturb the reveal/settle path that follows.
+ */
+async function stashV4ForfeitRecovery(args: {
+  gameId: string
+  tier: number
+  potOutpoint: V4PotOutpoint
+  covenant: V4CovenantParams
+  expectedPayoutPkScriptHex: string
+  playerSecretHex: string
+}): Promise<void> {
+  let emulatorUrl: string | undefined
+  try {
+    const net = await getNetwork()
+    emulatorUrl = net.emulator?.url
+  } catch (e) {
+    console.warn('[v4] could not reach /api/network for forfeit stash (continuing):', getErrorMessage(e))
+  }
+  const decision = resolveV4ForfeitStash({
+    emulatorUrl,
+    potOutpoint: args.potOutpoint,
+    covenant: args.covenant,
+    expectedPayoutPkScriptHex: args.expectedPayoutPkScriptHex,
+    playerSecretHex: args.playerSecretHex,
+  })
+  if (decision.kind === 'stash') {
+    try {
+      await putV4Forfeit({
+        ...decision.patch,
+        gameId: args.gameId,
+        tier: args.tier,
+        createdAt: Math.floor(Date.now() / 1000),
+      })
+    } catch (e) {
+      console.warn('[v4] forfeit stash write failed (continuing):', getErrorMessage(e))
+    }
+  } else {
+    console.warn(`[v4] forfeit not stashed (${decision.reason})`)
   }
 }
 
@@ -1297,10 +1345,26 @@ const ark: Module<ArkState, RootState> = {
           return base64.encode(s.toPSBT())
         }),
       )
-      await v4CofundFinalize(playRes.gameId, signedPlayerCheckpoints)
+      const finRes = await v4CofundFinalize(playRes.gameId, signedPlayerCheckpoints)
 
-      // 3. Reveal → the server settles the whole pot to the winner.
-      return v4Reveal(playRes.gameId, playerSecretHex)
+      // Stash the forfeit recovery BEFORE revealing. If the server stalls on the
+      // settle, this is the player's claim to the WHOLE pot once the CLTV (the
+      // game's finalExpiration) matures — player + arkd + emulator, no operator.
+      await stashV4ForfeitRecovery({
+        gameId: playRes.gameId,
+        tier,
+        potOutpoint: finRes.potOutpoint,
+        covenant: playRes.covenant,
+        expectedPayoutPkScriptHex: hex.encode(ArkAddress.decode(playerAddress).pkScript),
+        playerSecretHex,
+      })
+
+      // 3. Reveal → the server settles the whole pot to the winner. On success
+      // the pot is spent, so the recovery stash is moot; clear it best-effort
+      // (the auto-claim poll GCs it anyway if this misses).
+      const result = await v4Reveal(playRes.gameId, playerSecretHex)
+      await deleteV4Forfeit(playRes.gameId).catch(() => { /* leave for poll GC */ })
+      return result
     },
 
     /**

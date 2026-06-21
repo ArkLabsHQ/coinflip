@@ -25,6 +25,7 @@ import { contractHandlers } from '@arkade-os/sdk'
 import { registerCoinflipContracts } from 'arkade-coinflip'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
+import { createV4Routes } from './v4-routes.js'
 import { createAdminRoutes } from './admin/routes.js'
 import type { AppDeps } from './deps.js'
 
@@ -73,6 +74,7 @@ export {
 } from './trustless-game-v4.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'
+export { createV4Routes } from './v4-routes.js'
 export { createAdminRoutes } from './admin/routes.js'
 export type { AppDeps } from './deps.js'
 
@@ -166,6 +168,7 @@ async function main() {
   })
 
   publicApp.use(createPublicRoutes(deps))
+  publicApp.use(createV4Routes(deps))
 
   // Single-image mode: when CLIENT_DIR is set (the bundled image), the public
   // port also serves the built Vue client + an SPA fallback, so the player gets

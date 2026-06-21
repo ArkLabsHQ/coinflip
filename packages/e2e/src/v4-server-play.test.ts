@@ -8,6 +8,8 @@
  * params and confirms the pot address is byte-identical — i.e. the client and
  * server agree on the covenant, which is what makes the later co-fund spendable.
  */
+import express from 'express'
+import request from 'supertest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -56,6 +58,7 @@ describe('v4 server: handleV4Play', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let deps: any
   let dataDir: string
+  let app: express.Express
 
   beforeAll(async () => {
     if (!arkAvailable) return
@@ -76,6 +79,10 @@ describe('v4 server: handleV4Play', () => {
     // Fragment into a small pool — v4 spends a WHOLE house VTXO per game, so each
     // game needs its own free stake input (one big VTXO would go "house busy").
     await server.ensureHouseVtxoPool(deps, { targetCount: 6, pieceSize: BET * 5 })
+
+    app = express()
+    app.use(express.json())
+    app.use(server.createV4Routes(deps))
   }, 180_000)
 
   afterAll(() => {
@@ -139,6 +146,33 @@ describe('v4 server: handleV4Play', () => {
 
     console.log('[v4-play] gameId', res.gameId, '→ pot', res.potAddress, '(', res.pot, 'sats )')
   }, 120_000)
+
+  it('POST /api/v4/play via the route layer (express wiring + validation)', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await Wallet.create({
+      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+      settlementConfig: false,
+    })
+    const playerHash = createHash('sha256').update(packets.encodeReveal(0, crypto.getRandomValues(new Uint8Array(16)))).digest('hex')
+    const addr = await playerW.getAddress()
+
+    // Missing required fields → 400.
+    await request(app).post('/api/v4/play').send({ tier: BET }).expect(400)
+
+    // Full play → 200 with covenant params.
+    const res = await request(app).post('/api/v4/play').send({
+      tier: BET,
+      playerPubkey: hex.encode(toXOnly(await playerId.compressedPublicKey())),
+      playerHash, playerPayoutAddress: addr, playerChangeAddress: addr,
+    }).expect(200)
+    expect(res.body.pot).toBe(2 * BET)
+    expect(typeof res.body.potAddress).toBe('string')
+    expect(res.body.potAddress.startsWith(res.body.networkHrp)).toBe(true)
+    expect(res.body.covenant).toBeDefined()
+    expect(res.body.houseVtxo.value).toBeGreaterThanOrEqual(BET)
+  }, 60_000)
 
   it('co-funds via the 2-round handshake, then reveal settles the pot to the winner', async () => {
     if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }

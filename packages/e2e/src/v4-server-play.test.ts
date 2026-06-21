@@ -19,7 +19,7 @@ import {
   SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository,
   decodeTapscript, CSVMultisigTapscript, RestIndexerProvider, Transaction, ArkAddress, type ArkTxInput,
 } from '@arkade-os/sdk'
-import { CoinflipJointPotScript, buildJointPotCofundTx, jointPotCofundOutputs } from 'arkade-coinflip'
+import { CoinflipJointPotScript, buildCofundFromPlay } from 'arkade-coinflip'
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { packets } = require('@arklabshq/contract-workflows-prototype')
 import { faucet, settleWithRetry } from './helpers'
@@ -200,27 +200,18 @@ describe('v4 server: handleV4Play', () => {
       playerChangeAddress: await playerW.getAddress(),
     }, deps)
 
-    // Client builds the co-fund entirely from public data — no server-side VTXO
-    // access. Player input: the client's own funded VTXO. House input: assembled
-    // from the /play response (houseLeaf + houseTapTree). House change → the
-    // house payout pkScript (also from /play). serverUnroll = arkd's public info.
+    // Client builds the co-fund entirely from public data via the lib primitive:
+    // player input = the client's own funded VTXO; house input rebuilt from the
+    // /play response (houseLeaf + houseTapTree). serverUnroll = arkd's public info.
     const pv = (await playerW.getVtxos())[0]
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const deserializeLeaf = (s: any): ArkTxInput['tapLeafScript'] => [
-      { version: s.controlBlock.version, internalKey: hex.decode(s.controlBlock.internalKey), merklePath: s.controlBlock.merklePath.map((m: string) => hex.decode(m)) },
-      hex.decode(s.script),
-    ]
-    const houseInput: ArkTxInput = {
-      txid: res.houseVtxo.txid, vout: res.houseVtxo.vout, value: res.houseVtxo.value,
-      tapLeafScript: deserializeLeaf(res.houseLeaf), tapTree: hex.decode(res.houseTapTree),
-    }
     const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
-    const cofundOuts = jointPotCofundOutputs({
-      potPkScript: ArkAddress.decode(res.potAddress).pkScript, potAmount: BigInt(res.pot),
-      playerChangePkScript: ArkAddress.decode(await playerW.getAddress()).pkScript, playerChange: BigInt(pv.value - BET),
-      houseChangePkScript: hex.decode(res.covenant.housePayoutPkScript), houseChange: BigInt(res.houseVtxo.value - res.houseStake),
+    const cf = buildCofundFromPlay({
+      play: res,
+      playerInput: toInput(pv),
+      playerChangePkScript: ArkAddress.decode(await playerW.getAddress()).pkScript,
+      betAmount: BET,
+      serverUnroll,
     })
-    const cf = buildJointPotCofundTx(toInput(pv), houseInput, cofundOuts, serverUnroll)
     const arkTxPlayerSigned = await playerId.sign(cf.arkTx, [0])
 
     // Round 1: /cofund — server signs house input + checkpoint, returns the player checkpoint.

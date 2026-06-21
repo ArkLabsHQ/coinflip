@@ -10,12 +10,14 @@
  * Proven on the live regtest stack by v4-game-probe.test.ts and v4-scale.test.ts.
  */
 
-import { base64 } from '@scure/base'
+import { base64, hex } from '@scure/base'
 import {
   buildOffchainTx,
   CSVMultisigTapscript,
   Transaction,
+  ArkAddress,
   type ArkTxInput,
+  type TapLeafScript,
 } from '@arkade-os/sdk'
 import { emulator, packets } from '@arklabshq/contract-workflows-prototype'
 import { CoinflipJointPotScript } from './joint-pot'
@@ -131,4 +133,74 @@ export function encodeSettleForEmulator(built: BuiltJointPotTx): { arkTx: string
     arkTx: base64.encode(built.arkTx.toPSBT()),
     checkpointTxs: built.checkpoints.map((c) => base64.encode(c.toPSBT())),
   }
+}
+
+// ── Client co-fund primitives (shared by the server /play + the client) ──────
+
+/** A TapLeafScript serialized for HTTP transport (all bytes → hex). */
+export interface SerializedTapLeaf {
+  controlBlock: { version: number; internalKey: string; merklePath: string[] }
+  script: string
+}
+
+/** Serialize a VTXO's tapleaf so it can ride a JSON response. */
+export function serializeTapLeaf(tl: TapLeafScript): SerializedTapLeaf {
+  return {
+    controlBlock: {
+      version: tl[0].version,
+      internalKey: hex.encode(tl[0].internalKey),
+      merklePath: tl[0].merklePath.map((m) => hex.encode(m)),
+    },
+    script: hex.encode(tl[1]),
+  }
+}
+
+/** Rebuild a tapleaf from its serialized form (inverse of serializeTapLeaf). */
+export function deserializeTapLeaf(s: SerializedTapLeaf): TapLeafScript {
+  return [
+    {
+      version: s.controlBlock.version,
+      internalKey: hex.decode(s.controlBlock.internalKey),
+      merklePath: s.controlBlock.merklePath.map((m) => hex.decode(m)),
+    },
+    hex.decode(s.script),
+  ]
+}
+
+/** The subset of a /play response that buildCofundFromPlay reads. */
+export interface PlayResponseForCofund {
+  potAddress: string
+  pot: number
+  houseStake: number
+  houseVtxo: { txid: string; vout: number; value: number }
+  houseLeaf: SerializedTapLeaf
+  houseTapTree: string
+  covenant: { housePayoutPkScript: string }
+}
+
+/**
+ * Assemble the (unsigned) co-fund from a /play response + the player's own stake
+ * input — the client primitive. The player input is the client's enriched VTXO;
+ * the house input is rebuilt from the serialized leaf + tapTree (no server-side
+ * VTXO access). The caller then signs vin 0 and drives the /cofund handshake.
+ */
+export function buildCofundFromPlay(args: {
+  play: PlayResponseForCofund
+  playerInput: ArkTxInput
+  playerChangePkScript: Uint8Array
+  betAmount: number
+  serverUnroll: CSVMultisigTapscript.Type
+}): BuiltJointPotTx {
+  const { play } = args
+  const houseInput: ArkTxInput = {
+    txid: play.houseVtxo.txid, vout: play.houseVtxo.vout, value: play.houseVtxo.value,
+    tapLeafScript: deserializeTapLeaf(play.houseLeaf),
+    tapTree: hex.decode(play.houseTapTree),
+  }
+  const outs = jointPotCofundOutputs({
+    potPkScript: ArkAddress.decode(play.potAddress).pkScript, potAmount: BigInt(play.pot),
+    playerChangePkScript: args.playerChangePkScript, playerChange: BigInt(args.playerInput.value - args.betAmount),
+    houseChangePkScript: hex.decode(play.covenant.housePayoutPkScript), houseChange: BigInt(play.houseVtxo.value - play.houseStake),
+  })
+  return buildJointPotCofundTx(args.playerInput, houseInput, outs, args.serverUnroll)
 }

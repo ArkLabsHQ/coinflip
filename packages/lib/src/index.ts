@@ -131,8 +131,13 @@ export {
   buildJointPotSettleTx,
   jointPotCofundOutputs,
   encodeSettleForEmulator,
+  serializeTapLeaf,
+  deserializeTapLeaf,
+  buildCofundFromPlay,
   type BuiltJointPotTx,
   type Outpoint,
+  type SerializedTapLeaf,
+  type PlayResponseForCofund,
 } from './joint-pot-tx'
 
 // v0.3 transaction-building helpers — see transactions-v3.ts module header.

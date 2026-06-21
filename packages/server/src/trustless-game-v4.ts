@@ -15,10 +15,11 @@
  */
 
 import { base64, hex } from '@scure/base'
-import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, type ExtendedVirtualCoin, type TapLeafScript } from '@arkade-os/sdk'
+import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import {
   CoinflipJointPotScript, commitDigit, randomUniformInt,
   determineWinnerV3, computeRollV3, buildJointPotSettleTx, encodeSettleForEmulator,
+  serializeTapLeaf, type SerializedTapLeaf,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
@@ -37,22 +38,6 @@ async function getTiers(deps: AppDeps): Promise<number[]> {
 }
 async function getOddsEdgeBps(deps: AppDeps): Promise<number> {
   return parseInt((await deps.repos.config.get('variable_odds_edge_bps')) || '300', 10)
-}
-
-/** A TapLeafScript serialized for HTTP transport (all bytes → hex). */
-export interface SerializedTapLeaf {
-  controlBlock: { version: number; internalKey: string; merklePath: string[] }
-  script: string
-}
-function serializeTapLeaf(tl: TapLeafScript): SerializedTapLeaf {
-  return {
-    controlBlock: {
-      version: tl[0].version,
-      internalKey: hex.encode(tl[0].internalKey),
-      merklePath: tl[0].merklePath.map((m) => hex.encode(m)),
-    },
-    script: hex.encode(tl[1]),
-  }
 }
 
 export interface V4PlayRequest {

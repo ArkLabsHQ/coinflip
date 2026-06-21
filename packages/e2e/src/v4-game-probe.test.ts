@@ -9,13 +9,13 @@
  */
 import { base64, hex } from '@scure/base'
 import { createHash } from 'crypto'
-import { CoinflipJointPotScript, determineWinnerV3 } from 'arkade-coinflip'
+import { CoinflipJointPotScript, determineWinnerV3, buildJointPotSettleTx, encodeSettleForEmulator } from 'arkade-coinflip'
 import {
   Wallet, SingleKey, RestArkProvider, RestIndexerProvider, InMemoryWalletRepository,
   InMemoryContractRepository, decodeTapscript, buildOffchainTx, CSVMultisigTapscript,
   Transaction, ArkAddress, type ArkInfo, type ArkProvider, type ArkTxInput,
 } from '@arkade-os/sdk'
-import { emulator, packets } from '@arklabshq/contract-workflows-prototype'
+import { packets } from '@arklabshq/contract-workflows-prototype'
 import { faucet } from './helpers'
 
 const ARK = process.env.ARK_SERVER_URL || 'http://localhost:7070'
@@ -138,22 +138,19 @@ describe('v4 spike: full joint-pot game settles end-to-end', () => {
     await arkProvider.finalizeTx(cofundTxid, cofundFinals)
     console.log('[v4-game] joint pot co-funded:', cofundTxid, '(2000 sats)')
 
-    // ── Settle: spend the pot via playerWin leaf, full pot → player ──
-    const leaf = pot.playerWinCovenant()
-    const arkadeScript = pot.playerWinFullArkadeScript
-    const settleInput: ArkTxInput = { txid: cofundTxid, vout: 0, value: 2 * BET, tapLeafScript: leaf, tapTree: pot.encode() }
-    const settle = buildOffchainTx([settleInput], [{ script: playerPayout, amount: BigInt(2 * BET) }], serverUnroll)
-    const cp = settle.checkpoints[0], cpIn = cp.getInput(0)
-    if (cpIn?.witnessUtxo) cp.updateInput(0, { witnessUtxo: { script: pot.pkScript, amount: cpIn.witnessUtxo.amount } })
-    // payTo covenant inspects output 0 → witness [encodeIndex(0)].
-    emulator.addPacket(settle.arkTx, [{ vin: 0, script: arkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) }])
-    packets.addRevealPacket(settle.arkTx, packets.REVEAL_PLAYER_PACKET_TYPE, playerRevealBytes)
-    packets.addRevealPacket(settle.arkTx, packets.REVEAL_CREATOR_PACKET_TYPE, creatorRevealBytes)
-
-    const body = JSON.stringify({
-      arkTx: base64.encode(settle.arkTx.toPSBT()),
-      checkpointTxs: settle.checkpoints.map((c) => base64.encode(c.toPSBT())),
+    // ── Settle: spend the pot via the winner's win leaf, full pot → winner ──
+    // (uses the shared lib builder — same logic the server/client will call).
+    const settle = buildJointPotSettleTx({
+      pot,
+      cofund: { txid: cofundTxid, vout: 0, value: 2 * BET },
+      winner,
+      winnerPayoutPkScript: winner === 'player' ? playerPayout : housePayout,
+      potAmount: BigInt(2 * BET),
+      playerRevealBytes,
+      creatorRevealBytes,
+      serverUnroll,
     })
+    const body = JSON.stringify(encodeSettleForEmulator(settle))
     let settleTxid = ''
     for (let attempt = 0; attempt < 10; attempt++) {
       const resp = await fetch(`${EMU}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(25_000) })

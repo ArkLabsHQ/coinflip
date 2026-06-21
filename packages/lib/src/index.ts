@@ -125,6 +125,16 @@ export {
   type CoinflipJointPotOptions,
 } from './joint-pot'
 
+// v0.4 joint-pot tx builders (co-fund + settle) — see joint-pot-tx.ts header.
+export {
+  buildJointPotCofundTx,
+  buildJointPotSettleTx,
+  jointPotCofundOutputs,
+  encodeSettleForEmulator,
+  type BuiltJointPotTx,
+  type Outpoint,
+} from './joint-pot-tx'
+
 // v0.3 transaction-building helpers — see transactions-v3.ts module header.
 export {
   getPlayerEscrowScriptV3,

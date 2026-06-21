@@ -140,7 +140,7 @@ describe('v4 server: handleV4Play', () => {
     console.log('[v4-play] gameId', res.gameId, '→ pot', res.potAddress, '(', res.pot, 'sats )')
   }, 120_000)
 
-  it('co-funds the joint pot via the 2-round handshake → pot VTXO lands', async () => {
+  it('co-funds via the 2-round handshake, then reveal settles the pot to the winner', async () => {
     if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
 
     // Fund a player (provides the player stake input).
@@ -212,5 +212,24 @@ describe('v4 server: handleV4Play', () => {
     }
     expect(found).toBe(true)
     console.log('[v4-cofund] pot VTXO live:', finRes.cofundTxid, ':0 =', finRes.potOutpoint.value, 'sats')
-  }, 240_000)
+
+    // ── Reveal → settle the whole pot to the winner ──
+    const revealRes = await server.handleV4Reveal(res.gameId, { playerSecretHex: hex.encode(playerReveal) }, deps)
+    expect(['player', 'house']).toContain(revealRes.winner)
+    expect(typeof revealRes.settleTxid).toBe('string')
+    expect(revealRes.payout).toBe(2 * BET)
+
+    // The pot is swept to the winner's payout address.
+    const winnerAddr = revealRes.winner === 'player' ? await playerW.getAddress() : await deps.wallet.getAddress()
+    const winnerPk = hex.encode(ArkAddress.decode(winnerAddr).pkScript)
+    let settled = false
+    for (let i = 0; i < 20 && !settled; i++) {
+      const { vtxos } = await indexer.getVtxos({ scripts: [winnerPk] })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (vtxos.some((x: any) => x.txid === revealRes.settleTxid && x.value === 2 * BET)) settled = true
+      else await sleep(1000)
+    }
+    expect(settled).toBe(true)
+    console.log('[v4-reveal] winner', revealRes.winner, '→ settled', revealRes.settleTxid, '(', revealRes.payout, 'sats )')
+  }, 300_000)
 })

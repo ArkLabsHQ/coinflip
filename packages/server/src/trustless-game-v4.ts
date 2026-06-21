@@ -15,8 +15,11 @@
  */
 
 import { base64, hex } from '@scure/base'
-import { ArkAddress, Transaction, type ExtendedVirtualCoin } from '@arkade-os/sdk'
-import { CoinflipJointPotScript, commitDigit, randomUniformInt } from 'arkade-coinflip'
+import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import {
+  CoinflipJointPotScript, commitDigit, randomUniformInt,
+  determineWinnerV3, computeRollV3, buildJointPotSettleTx, encodeSettleForEmulator,
+} from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
@@ -346,4 +349,106 @@ export async function handleV4CofundFinalize(gameId: string, req: V4CofundFinali
   await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
 
   return { cofundTxid: state.cofundArkTxid, potOutpoint: { txid: state.cofundArkTxid, vout: 0, value: state.pot } }
+}
+
+// ── Reveal + settle (endpoint 4) ─────────────────────────────────────────────
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/** Reconstruct the joint-pot covenant from the persisted (hex) params. */
+function rebuildCovenant(cv: V4CovenantParams): CoinflipJointPotScript {
+  return new CoinflipJointPotScript({
+    creatorPubkey: hex.decode(cv.creatorPubkey),
+    playerPubkey: hex.decode(cv.playerPubkey),
+    serverPubkey: hex.decode(cv.serverPubkey),
+    creatorHash: hex.decode(cv.creatorHash),
+    playerHash: hex.decode(cv.playerHash),
+    finalExpiration: BigInt(cv.finalExpiration),
+    exitDelay: BigInt(cv.exitDelay),
+    oddsN: cv.oddsN, oddsTarget: cv.oddsTarget, oddsLo: cv.oddsLo,
+    emulatorPubkey: hex.decode(cv.emulatorPubkey),
+    playerPayoutPkScript: hex.decode(cv.playerPayoutPkScript),
+    housePayoutPkScript: hex.decode(cv.housePayoutPkScript),
+    playerStake: BigInt(cv.playerStake), houseStake: BigInt(cv.houseStake),
+  })
+}
+
+export interface V4RevealRequest {
+  /** The player's reveal bytes (`[digit] || salt`, = packets.encodeReveal), hex. */
+  playerSecretHex: string
+}
+export interface V4RevealResult {
+  winner: 'player' | 'house'
+  settleTxid: string
+  payout: number
+  /** Now-public house reveal. */
+  houseSecretHex: string
+  /** Rolled value (digitC + digitP) mod n, or null on a cheat-penalty. */
+  roll: number | null
+}
+
+/**
+ * POST /api/v4/game/:id/reveal — the player reveals its secret. The server
+ * determines the winner from both reveals, settles the WHOLE pot to the winner
+ * via the win-covenant leaf (lib buildJointPotSettleTx → emulator /v1/tx), and
+ * marks the game resolved.
+ */
+export async function handleV4Reveal(gameId: string, req: V4RevealRequest, deps: AppDeps): Promise<V4RevealResult> {
+  const game = await deps.repos.games.get(gameId)
+  if (!game) throw new Error('Game not found')
+  const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
+  if (state.protocolVersion !== 'v4') throw new Error('Not a v4 game')
+  if (!state.cofundTxid) throw new Error('Pot not co-funded yet (finalize the co-fund first)')
+  if (game.status === 'resolved') throw new Error('Game already resolved')
+
+  const playerSecret = hex.decode(req.playerSecretHex)
+  if (hashSecret(playerSecret) !== game.player_hash) {
+    throw new Error('Player secret does not match the committed hash')
+  }
+  const houseSecret = hex.decode(game.house_secret_hex)
+
+  // First byte of each reveal is the digit (packets.encodeReveal: `[digit] || salt`).
+  const creatorReveal = { digit: houseSecret[0], salt: houseSecret.slice(1) }
+  const playerReveal = { digit: playerSecret[0], salt: playerSecret.slice(1) }
+  const outcome = determineWinnerV3(creatorReveal, playerReveal, state.oddsN, state.oddsTarget, state.oddsLo)
+  const roll = computeRollV3(creatorReveal, playerReveal, state.oddsN)
+
+  const pot = rebuildCovenant(state.covenant)
+  const winnerPayoutPkScript = hex.decode(outcome === 'player' ? state.covenant.playerPayoutPkScript : state.covenant.housePayoutPkScript)
+  const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+  const settle = buildJointPotSettleTx({
+    pot, cofund: { txid: state.cofundTxid, vout: 0, value: state.pot },
+    winner: outcome, winnerPayoutPkScript, potAmount: BigInt(state.pot),
+    playerRevealBytes: playerSecret, creatorRevealBytes: houseSecret, serverUnroll,
+  })
+
+  const cfg = await loadEmulatorConfig()
+  if (!cfg) throw new Error('Emulator not configured')
+  const body = JSON.stringify(encodeSettleForEmulator(settle))
+  // The emulator forwards the finalized settle to arkd, so each POST is an arkd
+  // submit — serialize it (backoff outside the lock), retry transient lag.
+  const postOnce = async (): Promise<{ ok: true; txid: string } | { ok: false; status: number; text: string }> => {
+    const r = await fetch(`${cfg.url}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(25_000) })
+    if (r.ok) return { ok: true, txid: Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id }
+    return { ok: false, status: r.status, text: await r.text() }
+  }
+  let settleTxid = ''
+  for (let a = 0; a < 10; a++) {
+    const res = await withArkSubmit(postOnce)
+    if (res.ok) { settleTxid = res.txid; break }
+    const transient = res.status >= 500 && /not found|VTXO_NOT_FOUND|failed to process/i.test(res.text)
+    if (!transient || a === 9) throw new Error(`Emulator rejected settle: ${res.status} ${res.text}`)
+    await sleep(500 + a * 500)
+  }
+
+  const winner: 'player' | 'house' = outcome === 'player' ? 'player' : 'house'
+  reservations.release(gameId)
+  await deps.repos.games.update(gameId, {
+    status: 'resolved',
+    winner,
+    payoutAmount: state.pot,
+    playerSecretHex: req.playerSecretHex,
+  })
+
+  return { winner, settleTxid, payout: state.pot, houseSecretHex: game.house_secret_hex, roll }
 }

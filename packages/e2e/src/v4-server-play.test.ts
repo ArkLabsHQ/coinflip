@@ -201,6 +201,10 @@ describe('v4 server: handleV4Play', () => {
     }, deps)
 
     // Client builds the co-fund: player input (funded) + the reserved house input.
+    // NOTE: this gets the enriched house VTXO via deps (a test shortcut). The real
+    // client must obtain the house input another way — see the v4-spike-findings
+    // doc "client house-input" follow-up (the DefaultVtxo reconstruction needs the
+    // wallet's exact seconds-based exit timelock, not arkInfo.unilateralExitDelay).
     const pv = (await playerW.getVtxos())[0]
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const hv = (await deps.wallet.getVtxos()).find((v: any) => v.txid === res.houseVtxo.txid && v.vout === res.houseVtxo.vout)

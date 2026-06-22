@@ -26,7 +26,7 @@ import {
   type Outpoint, type ForfeitResponse, type V4CovenantParams,
 } from '@/services/api'
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
-import { resolveV4ForfeitStash, hasClaimableV4Forfeit, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
+import { resolveV4ForfeitStash, hasClaimableV4Forfeit, v4ClaimStage, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
 import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits } from './v4ForfeitStashStore'
 import { locateEscrowVtxo } from './locateEscrow'
 import { createHash } from '@/utils/crypto'
@@ -1740,18 +1740,11 @@ const ark: Module<ArkState, RootState> = {
             continue
           }
         } catch { /* server unreachable — fall through to the CLTV-gated claim */ }
-        // Two-stage timing. STAGE 1 (playerReveal) must fire BEFORE the house's
-        // refund (cancelDelay) so it pre-empts the split-back and we can later sweep
-        // the WHOLE pot (not just our stake back); STAGE 2 (playerTakeAll) needs the
-        // CLTV at finalExpiration. claimV4Forfeit picks the stage from the stash.
-        if (!v4.stageTwoOutpoint) {
-          // Give the house most of the pre-cancelDelay window to settle the happy
-          // path (which clears the stash), then contest before the refund fires.
-          const lead = Math.max(60, Math.floor((v4.covenant.finalExpiration - v4.covenant.cancelDelay) / 2))
-          if (chainTime === null || chainTime < v4.covenant.cancelDelay - lead) continue
-        } else if (!isCltvMatured(chainTime, v4.forfeitClaimableAt)) {
-          continue
-        }
+        // Two-stage timing (pure + unit-tested as v4ClaimStage): STAGE 1 fires
+        // BEFORE cancelDelay (pre-empting the refund so we can sweep the WHOLE pot,
+        // not just our stake), STAGE 2 at finalExpiration. claimV4Forfeit picks the
+        // matching stage from the stash's stageTwoOutpoint.
+        if (v4ClaimStage(v4, chainTime) === 'wait') continue
         try {
           await dispatch('claimV4Forfeit', { gameId: v4.gameId, mode: 'auto' })
         } catch (e) {

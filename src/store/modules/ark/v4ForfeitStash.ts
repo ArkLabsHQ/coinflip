@@ -142,3 +142,27 @@ export function hasClaimableV4Forfeit(stash: Partial<StashedV4Forfeit>): stash i
     stash.forfeitClaimableAt !== undefined
   )
 }
+
+export type V4ClaimStage = 'stage1' | 'stage2' | 'wait'
+
+/**
+ * Which staged-forfeit step the auto-claim should fire for this stash at the given
+ * CHAIN time (the CLTV/refund timelines are chain-time, not wall-clock).
+ *
+ * - `stage1` (publish the secret, pot -> StageTwo): fired once the house has had
+ *   most of the pre-`cancelDelay` window to settle the happy path, but BEFORE
+ *   `cancelDelay` so it pre-empts the refund split-back and we can later sweep the
+ *   WHOLE pot. Safe to fire on a stall because a rational house only stalls a game
+ *   it lost, and the server stage-2 poll settles the rare losing-player edge.
+ * - `stage2` (`playerTakeAll`): fired once chain time reaches `finalExpiration`.
+ * - `wait`: not time yet (or chain time unknown).
+ */
+export function v4ClaimStage(stash: StashedV4Forfeit, chainTime: number | null): V4ClaimStage {
+  if (chainTime === null) return 'wait'
+  if (!stash.stageTwoOutpoint) {
+    const { cancelDelay, finalExpiration } = stash.covenant
+    const lead = Math.max(60, Math.floor((finalExpiration - cancelDelay) / 2))
+    return chainTime >= cancelDelay - lead ? 'stage1' : 'wait'
+  }
+  return chainTime >= stash.forfeitClaimableAt ? 'stage2' : 'wait'
+}

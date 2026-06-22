@@ -622,7 +622,12 @@ async function chainTipTime(): Promise<number | null> {
   try {
     const tip = await sdkWallet.onchainProvider.getChainTip()
     return tip.time
-  } catch {
+  } catch (e) {
+    // A persistent failure here strands every claim button on "Checking chain
+    // time…" — isCltvMatured(null, …) is always false, so a matured, claimable
+    // pot stays unreachable in the UI. Surface it rather than swallowing; the
+    // claim is still valid and proceeds once the read recovers.
+    console.warn('[ark] chain-tip read failed; claim-readiness gating is stalled until it recovers:', getErrorMessage(e))
     return null
   }
 }

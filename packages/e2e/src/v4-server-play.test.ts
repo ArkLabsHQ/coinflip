@@ -19,7 +19,7 @@ import {
   SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository,
   decodeTapscript, CSVMultisigTapscript, RestIndexerProvider, Transaction, ArkAddress, buildOffchainTx, type ArkTxInput,
 } from '@arkade-os/sdk'
-import { CoinflipJointPotScript, buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx } from 'arkade-coinflip'
+import { CoinflipJointPotScript, buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx, determineWinnerV3 } from 'arkade-coinflip'
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { packets } = require('@arklabshq/contract-workflows-prototype')
 import { faucet, settleWithRetry, setChainTime, resetChainTime } from './helpers'
@@ -650,5 +650,118 @@ describe('v4 server: handleV4Play', () => {
     expect(claimTxid).toBeTruthy()
     expect(await vtxoLanded(playerPkScript, claimTxid)).toBe(true)
     console.log('[v4-forfeit] server stalled → player swept the whole pot via staged forfeit:', claimTxid)
+  }, 300_000)
+
+  it('server stage-2 poll settles a CONTESTED game to the winner (player revealed on-chain, NO /reveal)', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await Wallet.create({
+      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+      settlementConfig: false,
+    })
+    await faucet(await playerW.getBoardingAddress(), 0.001)
+    await waitForBoarding(playerW, BET)
+    await settleWithRetry(playerW)
+    await waitForSettled(playerW, BET)
+
+    const salt = crypto.getRandomValues(new Uint8Array(16))
+    const playerReveal = packets.encodeReveal(0, salt)
+    const playerHash = createHash('sha256').update(playerReveal).digest('hex')
+    const addr = await playerW.getAddress()
+
+    // Default finalExpiration — the houseSettle leaf has NO timelock, so the poll
+    // settles the instant it detects the StageTwo VTXO (no chain advance needed).
+    const res = await server.handleV4Play({
+      tier: BET, playerPubkey: hex.encode(toXOnly(await playerId.compressedPublicKey())),
+      playerHash, playerPayoutAddress: addr, playerChangeAddress: addr,
+    }, deps)
+
+    const pv = (await playerW.getVtxos())[0]
+    const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+    const cf = buildCofundFromPlay({
+      play: res, playerInputs: [toInput(pv)],
+      playerChangePkScript: ArkAddress.decode(addr).pkScript, betAmount: BET, serverUnroll,
+    })
+    const arkTxSigned = await playerId.sign(cf.arkTx, [0])
+    const cofundRes = await server.handleV4Cofund(res.gameId, {
+      arkTx: base64.encode(arkTxSigned.toPSBT()),
+      checkpoints: cf.checkpoints.map((c: Transaction) => base64.encode(c.toPSBT())),
+    }, deps)
+    const signedCps = await Promise.all(cofundRes.playerCheckpoints.map(async (b64: string) => {
+      const cp = Transaction.fromPSBT(base64.decode(b64))
+      let s = cp
+      try { s = await playerId.sign(cp, Array.from({ length: cp.inputsLength }, (_, i) => i)) }
+      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+      return base64.encode(s.toPSBT())
+    }))
+    const finRes = await server.handleV4CofundFinalize(res.gameId, { playerCheckpoints: signedCps }, deps)
+    expect(finRes.potOutpoint.value).toBe(2 * BET)
+
+    const cv = res.covenant
+    const pot = new CoinflipJointPotScript({
+      creatorPubkey: hex.decode(cv.creatorPubkey), playerPubkey: hex.decode(cv.playerPubkey),
+      serverPubkey: hex.decode(cv.serverPubkey), creatorHash: hex.decode(cv.creatorHash),
+      playerHash: hex.decode(cv.playerHash), finalExpiration: BigInt(cv.finalExpiration), cancelDelay: BigInt(cv.cancelDelay),
+      exitDelay: BigInt(cv.exitDelay), oddsN: cv.oddsN, oddsTarget: cv.oddsTarget, oddsLo: cv.oddsLo,
+      emulatorPubkey: hex.decode(cv.emulatorPubkey), playerPayoutPkScript: hex.decode(cv.playerPayoutPkScript),
+      housePayoutPkScript: hex.decode(cv.housePayoutPkScript), playerStake: BigInt(cv.playerStake), houseStake: BigInt(cv.houseStake),
+    })
+    const playerPkScript = ArkAddress.decode(addr).pkScript
+    const indexer = new RestIndexerProvider(ARK_SERVER_URL)
+    const signAndPostEmu = async (built: { arkTx: Transaction; checkpoints: Transaction[] }, label: string): Promise<string> => {
+      const s = await playerId.sign(built.arkTx, [0])
+      const cps = await Promise.all(built.checkpoints.map(async (c) => {
+        let x = c
+        try { x = await playerId.sign(c, Array.from({ length: c.inputsLength }, (_, i) => i)) }
+        catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+        return base64.encode(x.toPSBT())
+      }))
+      const body = JSON.stringify({ arkTx: base64.encode(s.toPSBT()), checkpointTxs: cps })
+      for (let a = 0; a < 12; a++) {
+        const r = await fetch(`${EMULATOR_URL}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(30_000) })
+        if (r.ok) return Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id
+        const text = await r.text()
+        if (!(r.status >= 500 && /not found|VTXO_NOT_FOUND|failed to process/i.test(text)) || a === 11) throw new Error(`${label} rejected: ${r.status} ${text}`)
+        await sleep(700 + a * 700)
+      }
+      throw new Error(`${label}: retries exhausted`)
+    }
+    const vtxoAt = async (pkScript: Uint8Array, txid: string): Promise<boolean> => {
+      const pk = hex.encode(pkScript)
+      for (let i = 0; i < 20; i++) {
+        const { vtxos } = await indexer.getVtxos({ scripts: [pk] })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (vtxos.some((x: any) => x.txid === txid && x.value === 2 * BET)) return true
+        await sleep(1000)
+      }
+      return false
+    }
+
+    // Stage 1: the player publishes the secret on-chain but does NOT /reveal to the
+    // server (the malicious-loser / house-was-down path — the house must EXTRACT the
+    // secret from the chain to settle, which is the defence against takeAll theft).
+    const reveal = buildPlayerRevealTx({ pot, cofund: finRes.potOutpoint, playerRevealBytes: playerReveal, serverUnroll })
+    const stageTwoTxid = await signAndPostEmu(reveal, 'playerReveal')
+    expect(await vtxoAt(pot.stageTwo.pkScript, stageTwoTxid)).toBe(true)
+    console.log('[v4-stage2-poll] stage 1 (no /reveal): pot -> StageTwo', stageTwoTxid)
+
+    // The server's stage-2 poll detects the reveal and settles to the ACTUAL winner,
+    // extracting the player's secret from the chain. Pre-empts the player's takeAll.
+    const settled = await server.reconcileV4StageTwo(deps)
+    expect(settled.length).toBeGreaterThanOrEqual(1)
+
+    const game = await deps.repos.games.get(res.gameId)
+    expect(game.status).toBe('resolved')
+    // Independently recompute the winner from both secrets; assert the poll paid them.
+    const houseSecret = hex.decode(game.house_secret_hex)
+    const outcome = determineWinnerV3({ digit: houseSecret[0], salt: houseSecret.slice(1) }, { digit: playerReveal[0], salt: playerReveal.slice(1) }, 2, 1, 0)
+    expect(game.winner).toBe(outcome === 'player' ? 'player' : 'house')
+    const winnerPk = outcome === 'player' ? playerPkScript : hex.decode(cv.housePayoutPkScript)
+    let paid = false
+    for (const t of settled) { if (await vtxoAt(winnerPk, t)) { paid = true; break } }
+    expect(paid).toBe(true)
+    console.log('[v4-stage2-poll] server settled contested game to', outcome)
   }, 300_000)
 })

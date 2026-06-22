@@ -14,15 +14,16 @@
  */
 
 import { base64, hex } from '@scure/base'
-import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, RestIndexerProvider, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import {
   CoinflipJointPotScript, commitDigit, randomUniformInt,
-  determineWinnerV3, computeRollV3, buildJointPotSettleTx, buildJointPotRefundTx, encodeSettleForEmulator,
-  serializeTapLeaf, type SerializedTapLeaf, type SerializedHouseInput,
+  determineWinnerV3, computeRollV3, buildJointPotSettleTx, buildStageTwoSettleTx, buildJointPotRefundTx,
+  encodeSettleForEmulator, getConditionWitness,
+  serializeTapLeaf, type SerializedTapLeaf, type SerializedHouseInput, type BuiltJointPotTx,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
-import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
+import { hashSecret, networkHrpFromArkInfo, ARK_SERVER_URL } from './house-wallet.js'
 import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyError, BetExceedsCapacityError, KeyedMutex } from './vtxo-pool.js'
 import { loadEmulatorConfig } from './emulator.js'
 import { computeHouseStake } from './trustless-game.js'
@@ -662,9 +663,152 @@ export async function reconcileV4Refunds(deps: AppDeps): Promise<string[]> {
   return refundTxids
 }
 
-/** Periodic v4 refund reconcile (mirrors startEscrowRecoveryTimer's cadence). */
+/**
+ * Submit a built (covenant-only) joint-pot tx to the emulator (it co-signs +
+ * forwards to arkd). Serialized via withArkSubmit + transient-retry, exactly like
+ * the inline settle/refund posts. Returns the on-chain txid.
+ */
+async function submitBuiltToEmulator(built: BuiltJointPotTx, label: string): Promise<string> {
+  const cfg = await loadEmulatorConfig()
+  if (!cfg) throw new Error('Emulator not configured')
+  const body = JSON.stringify(encodeSettleForEmulator(built))
+  const postOnce = async (): Promise<{ ok: true; txid: string } | { ok: false; status: number; text: string }> => {
+    const r = await fetch(`${cfg.url}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(25_000) })
+    if (r.ok) return { ok: true, txid: Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id }
+    return { ok: false, status: r.status, text: await r.text() }
+  }
+  for (let a = 0; a < 10; a++) {
+    const res = await withArkSubmit(postOnce)
+    if (res.ok) return res.txid
+    const transient = res.status >= 500 && /not found|VTXO_NOT_FOUND|failed to process/i.test(res.text)
+    if (!transient || a === 9) throw new Error(`Emulator rejected ${label}: ${res.status} ${res.text}`)
+    await sleep(500 + a * 500)
+  }
+  throw new Error(`Emulator ${label}: retries exhausted`)
+}
+
+/**
+ * Extract the player's secret from the on-chain stage-1 reveal — the house's
+ * defence when it never received /reveal (a losing player who skips it then sweeps
+ * via takeAll). The preimage rides in the ConditionWitness PSBT field of one of
+ * the StageTwo VTXO's ancestry txs; scan for the 17-byte element whose SHA256
+ * equals the committed player hash. Returns undefined if not yet recoverable.
+ */
+async function extractPlayerSecretFromChain(indexer: RestIndexerProvider, stageTwoTxid: string, playerHashHex: string): Promise<Uint8Array | undefined> {
+  const txids: string[] = [stageTwoTxid]
+  try {
+    const chain = await indexer.getVtxoChain({ txid: stageTwoTxid, vout: 0 })
+    for (const c of chain.chain) if (!txids.includes(c.txid)) txids.push(c.txid)
+  } catch { /* fall back to the StageTwo tx alone */ }
+  for (const t of txids) {
+    let raws: string[]
+    try { raws = (await indexer.getVirtualTxs([t])).txs } catch { continue }
+    for (const raw of raws) {
+      let psbt: Transaction
+      try { psbt = Transaction.fromPSBT(base64.decode(raw)) } catch { continue }
+      for (let i = 0; i < psbt.inputsLength; i++) {
+        const cw = getConditionWitness(psbt, i)
+        if (cw) for (const el of cw) if (el.length === 17 && hashSecret(el) === playerHashHex) return el
+      }
+    }
+  }
+  return undefined
+}
+
+/**
+ * Settle a CONTESTED game's StageTwo to the actual winner — the house's stage-2
+ * response when a player revealed on-chain (pot -> StageTwo). The emulator
+ * recomputes the winner from BOTH secrets, so the house can't cheat; settling
+ * before finalExpiration pre-empts the player's takeAll. REQUIRED for fund-safety:
+ * without it, a losing player who reveals on-chain would sweep the whole pot via
+ * takeAll once finalExpiration passes.
+ */
+export async function settleV4StageTwo(gameId: string, deps: AppDeps): Promise<{ settleTxid: string; winner: 'player' | 'house' }> {
+  const game = await deps.repos.games.get(gameId)
+  if (!game) throw new Error('Game not found')
+  const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
+  if (state.protocolVersion !== 'v4') throw new Error('Not a v4 game')
+  if (!state.cofundTxid) throw new Error('Pot not co-funded')
+  if (game.status === 'resolved') throw new Error('Game already resolved')
+
+  const pot = rebuildCovenant(state.covenant)
+  const indexer = new RestIndexerProvider(ARK_SERVER_URL)
+  const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(pot.stageTwo.pkScript)] })
+  const hit = vtxos.find((v) => v.value === state.pot)
+  if (!hit) throw new Error('No StageTwo VTXO — stage 1 not revealed, nothing to settle')
+  const stageTwoOutpoint = { txid: hit.txid, vout: hit.vout, value: hit.value }
+
+  // The player's secret: stored if /reveal reached us (fast path), else extracted
+  // from the on-chain stage-1 reveal (the house may never have received /reveal).
+  let playerSecret = game.player_secret_hex ? hex.decode(game.player_secret_hex) : undefined
+  if (!playerSecret) playerSecret = await extractPlayerSecretFromChain(indexer, hit.txid, game.player_hash)
+  if (!playerSecret) throw new Error('Cannot settle StageTwo: player secret not yet recoverable from the chain')
+  const houseSecret = hex.decode(game.house_secret_hex)
+
+  const creatorReveal = { digit: houseSecret[0], salt: houseSecret.slice(1) }
+  const playerReveal = { digit: playerSecret[0], salt: playerSecret.slice(1) }
+  const outcome = determineWinnerV3(creatorReveal, playerReveal, state.oddsN, state.oddsTarget, state.oddsLo)
+  const winnerPayoutPkScript = hex.decode(outcome === 'player' ? state.covenant.playerPayoutPkScript : state.covenant.housePayoutPkScript)
+  const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+
+  const settle = buildStageTwoSettleTx({
+    stageTwo: pot.stageTwo, stageTwoOutpoint,
+    winner: outcome, winnerPayoutPkScript, potAmount: BigInt(state.pot),
+    playerRevealBytes: playerSecret, creatorRevealBytes: houseSecret, serverUnroll,
+  })
+  const settleTxid = await submitBuiltToEmulator(settle, 'stage-2 settle')
+
+  const winner: 'player' | 'house' = outcome === 'player' ? 'player' : 'house'
+  reservations.release(gameId)
+  await deps.repos.games.update(gameId, {
+    status: 'resolved', winner, payoutAmount: state.pot, playerSecretHex: hex.encode(playerSecret),
+  })
+  return { settleTxid, winner }
+}
+
+/**
+ * Failsafe reconcile — the house's AUTO stage-2 response. For every co-funded v4
+ * game whose pot has been spent into its StageTwo covenant (a player revealed
+ * on-chain), settle StageTwo to the actual winner. Runs BEFORE reconcileV4Refunds
+ * each tick (a revealed pot can't be refunded). Best-effort per game. Returns the
+ * settle txids broadcast this pass.
+ */
+export async function reconcileV4StageTwo(deps: AppDeps): Promise<string[]> {
+  const pending = await deps.repos.games.list({ status: 'pending', limit: 500 })
+  const cofunded = pending.filter((g) => g.player_choice === 'trustless-v4' && g.house_vtxos_json)
+  const indexer = new RestIndexerProvider(ARK_SERVER_URL)
+  const settleTxids: string[] = []
+  for (const game of cofunded) {
+    let state: V4State
+    try { state = JSON.parse(game.house_vtxos_json as string) as V4State } catch { continue }
+    if (state.protocolVersion !== 'v4' || !state.cofundTxid) continue
+    try {
+      const pot = rebuildCovenant(state.covenant)
+      const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(pot.stageTwo.pkScript)] })
+      if (!vtxos.some((v) => v.value === state.pot)) continue // not revealed → nothing to settle
+      const { settleTxid, winner } = await settleV4StageTwo(game.id, deps)
+      console.log(`[v4-stage2] settled contested game ${game.id} to ${winner} → ${settleTxid}`)
+      settleTxids.push(settleTxid)
+    } catch (e) {
+      console.error(`[v4-stage2] reconcile failed for ${game.id}:`, e instanceof Error ? e.message : e)
+    }
+  }
+  return settleTxids
+}
+
+/**
+ * Periodic v4 reconcile (mirrors startEscrowRecoveryTimer's cadence). Each tick:
+ * (1) settle CONTESTED games (pot revealed into StageTwo) to the winner, then
+ * (2) refund never-revealed games past cancelDelay. Order matters — a revealed pot
+ * can't be refunded, so stage-2 settle runs first.
+ */
 export function startV4RefundTimer(deps: AppDeps, intervalMs = 120_000): NodeJS.Timeout {
   const tick = async () => {
+    const settled = await reconcileV4StageTwo(deps).catch((e) => {
+      console.error('[v4-stage2] tick failed:', e instanceof Error ? e.message : e)
+      return [] as string[]
+    })
+    if (settled.length > 0) console.log(`[v4-stage2] settled ${settled.length} contested game(s)`)
     const txids = await reconcileV4Refunds(deps).catch((e) => {
       console.error('[v4-refund] tick failed:', e instanceof Error ? e.message : e)
       return [] as string[]

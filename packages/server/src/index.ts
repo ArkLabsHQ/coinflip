@@ -64,6 +64,8 @@ export {
   handleV4Reveal,
   broadcastV4Refund,
   reconcileV4Refunds,
+  settleV4StageTwo,
+  reconcileV4StageTwo,
   newGameProtocolVersion,
   type V4PlayRequest,
   type V4PlayResult,

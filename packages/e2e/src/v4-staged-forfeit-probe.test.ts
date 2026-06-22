@@ -5,7 +5,7 @@
  *   Stage 1: playerReveal — spend the pot via the ConditionMultisig leaf
  *            (publishing the player's secret), pot -> StageTwo covenant, via emulator.
  *   Stage 2a: houseSettle — the house settles StageTwo to the actual winner, via emulator.
- *   Stage 2b: playerTakeAll — after settleWindow (CSV), the player sweeps StageTwo, via emulator.
+ *   Stage 2b: playerTakeAll — after finalExpiration (CLTV), the player sweeps StageTwo, via emulator.
  *
  * This is the empirical gate (Phase 1 taught us arkd/emulator behaviour can't be
  * assumed): if the emulator accepts the playerReveal + settles StageTwo and the
@@ -31,7 +31,6 @@ const EMU = process.env.EMULATOR_URL || 'http://localhost:7073'
 const HRP = 'rark'
 const BET = 1000
 const FUND_BTC = 0.001
-const SETTLE_WINDOW = 512n // CSV seconds (minimum 512-multiple)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const sha = (b: Uint8Array) => new Uint8Array(createHash('sha256').update(b).digest())
 const toXOnly = (p: Uint8Array) => (p.length === 33 ? p.slice(1) : p)
@@ -107,6 +106,7 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
     pot: CoinflipJointPotScript; cofundTxid: string; playerId: SingleKey
     playerPayout: Uint8Array; housePayout: Uint8Array
     playerRevealBytes: Uint8Array; creatorRevealBytes: Uint8Array; winner: 'player' | 'creator'
+    finalExpiration: number
   }> {
     const playerId = SingleKey.fromRandomBytes()
     const houseId = SingleKey.fromRandomBytes()
@@ -127,7 +127,7 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
     const pot = new CoinflipJointPotScript({
       creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey: serverPub,
       creatorHash: sha(creatorRevealBytes), playerHash: sha(playerRevealBytes),
-      finalExpiration: BigInt(now + 3600), cancelDelay: BigInt(now + 1800), exitDelay: 86_528n, settleWindow: SETTLE_WINDOW,
+      finalExpiration: BigInt(now + 3600), cancelDelay: BigInt(now + 1800), exitDelay: 86_528n,
       oddsN: 2, oddsTarget: 1, oddsLo: 0, emulatorPubkey: emuPubkey,
       playerPayoutPkScript: playerPayout, housePayoutPkScript: housePayout,
       playerStake: BigInt(BET), houseStake: BigInt(BET),
@@ -155,7 +155,7 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
       finals.push(base64.encode(s.toPSBT()))
     }
     await arkProvider.finalizeTx(cofundTxid, finals)
-    return { pot, cofundTxid, playerId, playerPayout, housePayout, playerRevealBytes, creatorRevealBytes, winner }
+    return { pot, cofundTxid, playerId, playerPayout, housePayout, playerRevealBytes, creatorRevealBytes, winner, finalExpiration: now + 3600 }
   }
 
   // Stage 1: player publishes the secret, pot -> StageTwo. Returns the StageTwo txid.
@@ -212,15 +212,15 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
     expect(await vtxoLanded(g.winner === 'player' ? g.playerPayout : g.housePayout, settleTxid, 2 * BET)).toBe(true)
   }, 300_000)
 
-  it('stage 1 reveal -> stage 2 PLAYER TAKE-ALL after settleWindow', async () => {
+  it('stage 1 reveal -> stage 2 PLAYER TAKE-ALL after finalExpiration', async () => {
     if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
     const g = await cofundPot()
     const stageTwoTxid = await stageOneReveal(g)
     console.log('[v4-staged] stage 1: pot -> StageTwo', stageTwoTxid)
     expect(await vtxoLanded(g.pot.stageTwo.pkScript, stageTwoTxid, 2 * BET)).toBe(true)
 
-    // The house stalls; past settleWindow the player sweeps the whole pot.
-    await setChainTime(Math.floor(Date.now() / 1000) + Number(SETTLE_WINDOW) + 120, 14)
+    // The house stalls; past finalExpiration (the CLTV) the player sweeps the whole pot.
+    await setChainTime(g.finalExpiration + 120, 14)
     const takeAll = buildStageTwoTakeAllTx({
       stageTwo: g.pot.stageTwo, stageTwoOutpoint: { txid: stageTwoTxid, vout: 0, value: 2 * BET },
       playerPayoutPkScript: g.playerPayout, potAmount: BigInt(2 * BET), serverUnroll,

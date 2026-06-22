@@ -5,9 +5,11 @@
  * Two outcomes:
  *   - houseSettle — the house settles to the ACTUAL winner (the emulator computes
  *     it from both now-on-chain reveals, so the house cannot cheat). No delay.
- *   - playerTakeAll — after `settleWindow` (a CSV), the player sweeps the WHOLE
+ *   - playerTakeAll — after `finalExpiration` (a CLTV), the player sweeps the WHOLE
  *     pot. This is the credible threat that forces the house to settle honestly:
  *     a winning player gets paid (or sweeps); a stalling house loses everything.
+ *     (Absolute, not relative: arkd rejects CSV/relative timelocks for offchain
+ *     collaborative spends — only CLTV/absolute clears the emulator → arkd path.)
  *
  * Reuses CoinflipJointPotScript's win-predicate + emulator-tweak + btcd-taptree
  * machinery verbatim — this is a strict subset of the pot covenant (the two
@@ -16,13 +18,13 @@
  * 3-leaf taptree:
  *   0. playerWinCovenant  — Multisig[server, emu(predicateP + payTo(player, pot))]
  *   1. creatorWinCovenant — Multisig[server, emu(predicateC + payTo(house, pot))]
- *   2. playerTakeAll      — CSVMultisig[player, server, emu(payTo(player, pot))] @ settleWindow
+ *   2. playerTakeAll      — CLTVMultisig[player, server, emu(payTo(player, pot))] @ finalExpiration
  */
 
 import { OP, p2tr, TAPROOT_UNSPENDABLE_KEY } from '@scure/btc-signer'
 import { hex } from '@scure/base'
 import { assembleBtcdTaprootTree } from './btcd-taproot-tree'
-import { VtxoScript, CSVMultisigTapscript, MultisigTapscript, TapLeafScript, arkade } from '@arkade-os/sdk'
+import { VtxoScript, CLTVMultisigTapscript, MultisigTapscript, TapLeafScript, arkade } from '@arkade-os/sdk'
 import { buildForfeitArkadeScript } from './arkade-forfeit'
 import { buildVariableOddsWinPredicate } from './arkade-win'
 
@@ -32,9 +34,12 @@ export interface StageTwoOptions {
   serverPubkey: Uint8Array
   creatorHash: Uint8Array
   playerHash: Uint8Array
-  /** CSV (seconds) — the house's budget to settle this contest before the player
-   *  can sweep the whole pot. Must comfortably exceed the house's settle latency. */
-  settleWindow: bigint
+  /** Absolute timelock (the pot's finalExpiration). Until it, the house can settle
+   *  this contest to the actual winner; after it, the player sweeps the whole pot.
+   *  Absolute (CLTV), not relative (CSV): arkd rejects relative timelocks for
+   *  offchain spends. The house's settle budget is finalExpiration minus the
+   *  on-chain reveal time (≥ ~half the game window, since reveal races cancelDelay). */
+  finalExpiration: bigint
   oddsN: number
   oddsTarget: number
   oddsLo: number
@@ -57,7 +62,7 @@ export class StageTwoScript extends VtxoScript {
   constructor(readonly options: StageTwoOptions) {
     const {
       creatorPubkey, playerPubkey, serverPubkey,
-      creatorHash, playerHash, settleWindow,
+      creatorHash, playerHash, finalExpiration,
       oddsN, oddsTarget, oddsLo,
       emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake,
     } = options
@@ -82,8 +87,8 @@ export class StageTwoScript extends VtxoScript {
     const creatorWinCovenantScript = MultisigTapscript.encode({
       pubkeys: [serverPubkey, tweakedEmuKey(creatorWinFullArkadeScript)],
     }).script
-    const playerTakeAllScript = CSVMultisigTapscript.encode({
-      timelock: { value: settleWindow, type: 'seconds' },
+    const playerTakeAllScript = CLTVMultisigTapscript.encode({
+      absoluteTimelock: finalExpiration,
       pubkeys: [playerPubkey, serverPubkey, tweakedEmuKey(takeAllArkadeScript)],
     }).script
 

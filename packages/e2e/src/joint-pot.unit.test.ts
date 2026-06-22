@@ -37,13 +37,13 @@ describe('CoinflipJointPotScript', () => {
   it('exposes all 8 leaves via findLeaf', () => {
     const s = build()
     const leaves = [
-      s.playerWinCovenant(), s.creatorWinCovenant(), s.playerForfeit(), s.cooperativeSpend(),
+      s.playerWinCovenant(), s.creatorWinCovenant(), s.playerReveal(), s.cooperativeSpend(),
       s.playerWinExit(), s.creatorWinExit(), s.playerForfeitExit(), s.cooperativeSpendExit(),
     ]
     for (const leaf of leaves) expect(leaf).toBeDefined()
     // All 8 leaf script-hexes are distinct.
     const hexes = [
-      s.playerWinCovenantScriptHex, s.creatorWinCovenantScriptHex, s.playerForfeitScriptHex,
+      s.playerWinCovenantScriptHex, s.creatorWinCovenantScriptHex, s.playerRevealScriptHex,
       s.cooperativeSpendScriptHex, s.playerWinExitScriptHex, s.creatorWinExitScriptHex,
       s.playerForfeitExitScriptHex, s.cooperativeSpendExitScriptHex,
     ]

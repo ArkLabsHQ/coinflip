@@ -155,7 +155,7 @@ function patchCheckpointPrevout(built: BuiltJointPotTx, pkScript: Uint8Array): v
  * + SHA256(playerSecret)) into the StageTwo CONTEST covenant — publishing the
  * player's secret on-chain (the condition witness). No timelock, so the client
  * fires this before cancelDelay to pre-empt the refund. From StageTwo the house
- * settles to the actual winner, or (after settleWindow) the player sweeps all.
+ * settles to the actual winner, or (after finalExpiration) the player sweeps all.
  */
 export function buildPlayerRevealTx(args: {
   pot: CoinflipJointPotScript
@@ -223,11 +223,11 @@ export function buildStageTwoSettleTx(args: {
 }
 
 /**
- * Build the StageTwo TAKE-ALL (Phase 2 stage 2 fallback) — after settleWindow,
+ * Build the StageTwo TAKE-ALL (Phase 2 stage 2 fallback) — after finalExpiration,
  * the player sweeps the WHOLE pot via the `playerTakeAll` leaf. This is the
  * credible threat that forces the house to settle honestly: a stalling house
- * loses everything. Spends StageTwo via CSVMultisig[player, server, emu(payTo
- * player)] @ settleWindow into payTo(player, pot).
+ * loses everything. Spends StageTwo via CLTVMultisig[player, server, emu(payTo
+ * player)] @ finalExpiration into payTo(player, pot).
  */
 export function buildStageTwoTakeAllTx(args: {
   stageTwo: StageTwoScript
@@ -244,6 +244,11 @@ export function buildStageTwoTakeAllTx(args: {
     txid: stageTwoOutpoint.txid, vout: stageTwoOutpoint.vout, value: stageTwoOutpoint.value,
     tapLeafScript: stageTwo.playerTakeAll(), tapTree: stageTwo.encode(),
   }
+  // playerTakeAll is a CLTV leaf (absolute @ finalExpiration), so buildOffchainTx
+  // derives the nLockTime + flips the input sequence on both the checkpoint and the
+  // arkTx automatically (buildVirtualTx handles CLTV leaves) — no manual sequence
+  // surgery. arkd accepts absolute timelocks for offchain spends; it rejects relative
+  // (CSV) ones, which is why this leaf is CLTV and not a settleWindow CSV.
   const built = buildOffchainTx([input], [{ script: args.playerPayoutPkScript, amount: args.potAmount }], args.serverUnroll)
   patchCheckpointPrevout(built, stageTwo.pkScript)
   emulator.addPacket(built.arkTx, [

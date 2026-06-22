@@ -46,8 +46,10 @@ export interface CoinflipJointPotOptions {
   serverPubkey: Uint8Array
   creatorHash: Uint8Array
   playerHash: Uint8Array
-  /** Vestigial since Phase 2 — no covenant leaf uses it now (the whole-pot forfeit
-   *  became the playerReveal -> StageTwo contest). Kept for server game-timing. */
+  /** Absolute expiry of the game, and the CLTV on the StageTwo playerTakeAll leaf:
+   *  after it, a player who revealed on-chain sweeps the whole pot if the house
+   *  stalled — so it doubles as the house's stage-2 settle deadline. (Absolute, not
+   *  a relative window: arkd rejects CSV/relative timelocks for offchain spends.) */
   finalExpiration: bigint
   /** CLTV on the cooperativeSpend (covenant-only refund) leaf, gating the split-back.
    *  > the normal settle time so a losing player can't refund-escape; the playerReveal
@@ -55,10 +57,6 @@ export interface CoinflipJointPotOptions {
    *  pre-empts the refund. */
   cancelDelay: bigint
   exitDelay: bigint
-  /** Phase 2: CSV window (seconds, 512-multiple) on the StageTwo playerTakeAll leaf —
-   *  the house's budget to settle a contested game after the player reveals on-chain,
-   *  before the player can sweep the whole pot. */
-  settleWindow: bigint
   oddsN: number
   oddsTarget: number
   oddsLo: number
@@ -96,7 +94,7 @@ export class CoinflipJointPotScript extends VtxoScript {
   constructor(readonly options: CoinflipJointPotOptions) {
     const {
       creatorPubkey, playerPubkey, serverPubkey,
-      creatorHash, playerHash, cancelDelay, exitDelay, settleWindow,
+      creatorHash, playerHash, cancelDelay, exitDelay, finalExpiration,
       oddsN, oddsTarget, oddsLo,
       emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake,
     } = options
@@ -124,10 +122,10 @@ export class CoinflipJointPotScript extends VtxoScript {
     // Phase 2 staged forfeit: the player's recovery no longer takes the whole pot
     // directly — it routes the pot into a StageTwo contest. playerReveal publishes
     // the player's secret on-chain and pays the pot to the StageTwo covenant, where
-    // the house can settle to the ACTUAL winner OR (after settleWindow) the player
+    // the house can settle to the ACTUAL winner OR (after finalExpiration) the player
     // sweeps everything — closing the "house stalls on a loss" gap.
     const stageTwo = new StageTwoScript({
-      creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, settleWindow,
+      creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration,
       oddsN, oddsTarget, oddsLo, emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake,
     })
     const revealArkadeScript = buildForfeitArkadeScript(stageTwo.pkScript, pot) // payTo(StageTwo, pot)

@@ -23,7 +23,7 @@ import {
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
 import { hashSecret, networkHrpFromArkInfo } from './house-wallet.js'
-import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyError, BetExceedsCapacityError } from './vtxo-pool.js'
+import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyError, BetExceedsCapacityError, KeyedMutex } from './vtxo-pool.js'
 import { loadEmulatorConfig } from './emulator.js'
 import { computeHouseStake } from './trustless-game.js'
 import type { AppDeps } from './deps.js'
@@ -304,6 +304,13 @@ function withArkSubmit<T>(fn: () => Promise<T>): Promise<T> {
   return run
 }
 
+// Per-game serialization for the multi-step read-check-act handlers. withArkSubmit
+// only serializes the submit call itself; these guard the whole handler so two
+// concurrent requests for the same game can't both pass the status/state check
+// and both proceed (double co-fund submit, double settle).
+const cofundLocks = new KeyedMutex()
+const revealLocks = new KeyedMutex()
+
 async function loadV4Game(deps: AppDeps, gameId: string): Promise<{ state: V4State; status: string }> {
   const game = await deps.repos.games.get(gameId)
   if (!game) throw new Error('Game not found')
@@ -331,6 +338,10 @@ export interface V4CofundResult {
  * returns the player checkpoints for the client to sign in the finalize step.
  */
 export async function handleV4Cofund(gameId: string, req: V4CofundRequest, deps: AppDeps): Promise<V4CofundResult> {
+  return cofundLocks.runExclusive(gameId, () => handleV4CofundInner(gameId, req, deps))
+}
+
+async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: AppDeps): Promise<V4CofundResult> {
   const { state, status } = await loadV4Game(deps, gameId)
   if (status !== 'pending') throw new Error('Game is not pending')
   if (state.cofundArkTxid) throw new Error('Co-fund already submitted')
@@ -466,6 +477,10 @@ export interface V4RevealResult {
  * marks the game resolved.
  */
 export async function handleV4Reveal(gameId: string, req: V4RevealRequest, deps: AppDeps): Promise<V4RevealResult> {
+  return revealLocks.runExclusive(gameId, () => handleV4RevealInner(gameId, req, deps))
+}
+
+async function handleV4RevealInner(gameId: string, req: V4RevealRequest, deps: AppDeps): Promise<V4RevealResult> {
   const game = await deps.repos.games.get(gameId)
   if (!game) throw new Error('Game not found')
   const state = JSON.parse(game.house_vtxos_json || '{}') as V4State

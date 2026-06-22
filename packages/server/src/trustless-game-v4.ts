@@ -125,6 +125,9 @@ export interface V4State {
    *  per house input, in vin order), base64. */
   cofundArkTxid?: string
   houseSignedCheckpoints?: string[]
+  /** Player input count (the leading k vins), set by /cofund so /cofund-finalize
+   *  can reject a wrong number of player checkpoints early. */
+  playerInputCount?: number
   /** Set by /cofund-finalize: the on-chain co-fund txid (== the pot VTXO txid). */
   cofundTxid?: string
 }
@@ -417,6 +420,7 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
 
   state.cofundArkTxid = arkTxid
   state.houseSignedCheckpoints = houseSignedCheckpoints
+  state.playerInputCount = k
   await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
 
   return { arkTxid, playerCheckpoints: signedCheckpointTxs.slice(0, k) }
@@ -440,6 +444,11 @@ export async function handleV4CofundFinalize(gameId: string, req: V4CofundFinali
   const { state } = await loadV4Game(deps, gameId)
   if (!state.cofundArkTxid || !state.houseSignedCheckpoints) throw new Error('Co-fund not submitted yet (call /cofund first)')
   if (state.cofundTxid) throw new Error('Co-fund already finalized')
+  // Reject a wrong number of player checkpoints early (forward-compat: skip for
+  // games co-funded before playerInputCount was persisted).
+  if (state.playerInputCount !== undefined && req.playerCheckpoints.length !== state.playerInputCount) {
+    throw new Error(`Expected ${state.playerInputCount} player checkpoints, got ${req.playerCheckpoints.length}`)
+  }
 
   // finalizeTx takes checkpoints in vin order: [player (leading k), house (trailing m)].
   await withArkSubmit(() =>

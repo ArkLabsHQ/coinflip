@@ -176,9 +176,10 @@ export function buildPlayerRevealTx(args: {
   emulator.addPacket(built.arkTx, [
     { vin: 0, script: pot.revealArkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
   ])
-  // Condition witness: the SHA256(playerSecret) preimage — publishes the secret so
-  // StageTwo's houseSettle can compute the winner.
-  addConditionWitness(built.arkTx, 0, [args.playerRevealBytes])
+  // Condition witness: the SHA256(playerSecret) preimage — published on the
+  // CHECKPOINT (which spends the pot via the ConditionMultisig leaf, where the
+  // condition is enforced), not the arkTx.
+  addConditionWitness(built.checkpoints[0], 0, [args.playerRevealBytes])
   return built
 }
 

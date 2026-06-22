@@ -159,19 +159,26 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
   }
 
   // Stage 1: player publishes the secret, pot -> StageTwo. Returns the StageTwo txid.
+  // Sign the player's slot (arkTx vin 0 + each checkpoint) on a covenant spend
+  // whose leaf includes the player, then POST to the emulator. Used for both
+  // playerReveal (stage 1) and playerTakeAll (stage 2b) — both [player, server, emu].
+  async function playerSignAndPost(playerId: SingleKey, built: { arkTx: Transaction; checkpoints: Transaction[] }, label: string): Promise<string> {
+    const arkTxSigned = await playerId.sign(built.arkTx, [0])
+    const cps = await Promise.all(built.checkpoints.map(async (c) => {
+      let s = c
+      try { s = await playerId.sign(c, Array.from({ length: c.inputsLength }, (_, k) => k)) }
+      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+      return s
+    }))
+    return postEmu({ arkTx: arkTxSigned, checkpoints: cps }, label)
+  }
+
   async function stageOneReveal(g: Awaited<ReturnType<typeof cofundPot>>): Promise<string> {
     const reveal = buildPlayerRevealTx({
       pot: g.pot, cofund: { txid: g.cofundTxid, vout: 0, value: 2 * BET },
       playerRevealBytes: g.playerRevealBytes, serverUnroll,
     })
-    const arkTxSigned = await g.playerId.sign(reveal.arkTx, [0])
-    const cps = await Promise.all(reveal.checkpoints.map(async (c) => {
-      let s = c
-      try { s = await g.playerId.sign(c, Array.from({ length: c.inputsLength }, (_, k) => k)) }
-      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
-      return s
-    }))
-    return postEmu({ arkTx: arkTxSigned, checkpoints: cps }, 'playerReveal')
+    return playerSignAndPost(g.playerId, reveal, 'playerReveal')
   }
 
   async function vtxoLanded(scriptPk: Uint8Array, txid: string, value: number): Promise<boolean> {
@@ -218,7 +225,7 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
       stageTwo: g.pot.stageTwo, stageTwoOutpoint: { txid: stageTwoTxid, vout: 0, value: 2 * BET },
       playerPayoutPkScript: g.playerPayout, potAmount: BigInt(2 * BET), serverUnroll,
     })
-    const takeAllTxid = await postEmu(takeAll, 'stageTwoTakeAll')
+    const takeAllTxid = await playerSignAndPost(g.playerId, takeAll, 'stageTwoTakeAll')
     console.log('[v4-staged] stage 2b: player swept the whole pot', takeAllTxid)
     expect(await vtxoLanded(g.playerPayout, takeAllTxid, 2 * BET)).toBe(true)
   }, 300_000)

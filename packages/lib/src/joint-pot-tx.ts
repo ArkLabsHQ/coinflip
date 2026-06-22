@@ -176,10 +176,13 @@ export function buildPlayerRevealTx(args: {
   emulator.addPacket(built.arkTx, [
     { vin: 0, script: pot.revealArkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
   ])
-  // Condition witness: the SHA256(playerSecret) preimage — published on the
-  // CHECKPOINT (which spends the pot via the ConditionMultisig leaf, where the
-  // condition is enforced), not the arkTx.
+  // Condition witness: the SHA256(playerSecret) preimage. Ark's checkpoint
+  // indirection carries the playerReveal leaf on BOTH the checkpoint (the actual
+  // pot spend) and the arkTx (the reference), so the condition must be satisfied
+  // on both or one side's SHA256 fails (empty-stack on the checkpoint, or an
+  // INVALID_SIGNATURE on the arkTx).
   addConditionWitness(built.checkpoints[0], 0, [args.playerRevealBytes])
+  addConditionWitness(built.arkTx, 0, [args.playerRevealBytes])
   return built
 }
 

@@ -101,8 +101,9 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
     throw new Error(`${label}: exhausted retries`)
   }
 
-  // Co-fund a fresh pot; player chosen to WIN (dP=dC=0 -> roll 0). Returns the pot + outpoint.
-  async function cofundPot(): Promise<{
+  // Co-fund a fresh pot. Player digit is 0; houseDigit picks the outcome —
+  // 0 -> roll 0 -> PLAYER wins; 1 -> roll 1 -> HOUSE (creator) wins. Returns pot + outpoint.
+  async function cofundPot(houseDigit = 0): Promise<{
     pot: CoinflipJointPotScript; cofundTxid: string; playerId: SingleKey
     playerPayout: Uint8Array; housePayout: Uint8Array
     playerRevealBytes: Uint8Array; creatorRevealBytes: Uint8Array; winner: 'player' | 'creator'
@@ -121,8 +122,8 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
     const saltP = crypto.getRandomValues(new Uint8Array(16))
     const saltC = crypto.getRandomValues(new Uint8Array(16))
     const playerRevealBytes = packets.encodeReveal(0, saltP)
-    const creatorRevealBytes = packets.encodeReveal(0, saltC)
-    const winner = determineWinnerV3({ digit: 0, salt: saltC }, { digit: 0, salt: saltP }, 2, 1, 0)
+    const creatorRevealBytes = packets.encodeReveal(houseDigit, saltC)
+    const winner = determineWinnerV3({ digit: houseDigit, salt: saltC }, { digit: 0, salt: saltP }, 2, 1, 0)
     const now = Math.floor(Date.now() / 1000)
     const pot = new CoinflipJointPotScript({
       creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey: serverPub,
@@ -210,6 +211,45 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
     const settleTxid = await postEmu(settle, 'stageTwoSettle')
     console.log('[v4-staged] stage 2a: house settled to', g.winner, settleTxid)
     expect(await vtxoLanded(g.winner === 'player' ? g.playerPayout : g.housePayout, settleTxid, 2 * BET)).toBe(true)
+  }, 300_000)
+
+  it('stage 2 HOUSE SETTLE pays the HOUSE when the player LOSES (theft-defence direction)', async () => {
+    if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
+    // houseDigit 1 + playerDigit 0 -> roll 1 -> HOUSE wins. A losing player who
+    // revealed on-chain must NOT get the pot: the house settles it to itself, and
+    // the emulator enforces the winner (the house can't pay itself if it lost).
+    const g = await cofundPot(1)
+    expect(g.winner).toBe('creator')
+    const stageTwoTxid = await stageOneReveal(g)
+    expect(await vtxoLanded(g.pot.stageTwo.pkScript, stageTwoTxid, 2 * BET)).toBe(true)
+    const settle = buildStageTwoSettleTx({
+      stageTwo: g.pot.stageTwo, stageTwoOutpoint: { txid: stageTwoTxid, vout: 0, value: 2 * BET },
+      winner: g.winner, winnerPayoutPkScript: g.housePayout,
+      potAmount: BigInt(2 * BET), playerRevealBytes: g.playerRevealBytes, creatorRevealBytes: g.creatorRevealBytes, serverUnroll,
+    })
+    const settleTxid = await postEmu(settle, 'stageTwoSettleHouse')
+    expect(await vtxoLanded(g.housePayout, settleTxid, 2 * BET)).toBe(true)
+    console.log('[v4-staged] HOUSE-WIN: house settled to itself, player pre-empted from takeAll', settleTxid)
+  }, 300_000)
+
+  it('stage 2 settle to the WRONG winner is REJECTED — the house cannot cheat', async () => {
+    if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
+    // The PLAYER wins (houseDigit 0). The house tries to settle to ITSELF via the
+    // creatorWin leaf anyway — the emulator runs the creator-win predicate against
+    // both on-chain secrets, it evaluates FALSE, and the settle is rejected.
+    const g = await cofundPot(0)
+    expect(g.winner).toBe('player')
+    const stageTwoTxid = await stageOneReveal(g)
+    expect(await vtxoLanded(g.pot.stageTwo.pkScript, stageTwoTxid, 2 * BET)).toBe(true)
+    const cheat = buildStageTwoSettleTx({
+      stageTwo: g.pot.stageTwo, stageTwoOutpoint: { txid: stageTwoTxid, vout: 0, value: 2 * BET },
+      winner: 'creator', winnerPayoutPkScript: g.housePayout, // wrong winner — house lost
+      potAmount: BigInt(2 * BET), playerRevealBytes: g.playerRevealBytes, creatorRevealBytes: g.creatorRevealBytes, serverUnroll,
+    })
+    const body = JSON.stringify(encodeSettleForEmulator(cheat))
+    const r = await fetch(`${EMU}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(30_000) })
+    expect(r.ok).toBe(false)
+    console.log('[v4-staged] CHEAT REJECTED: house cannot settle to itself when the player won — status', r.status)
   }, 300_000)
 
   it('stage 1 reveal -> stage 2 PLAYER TAKE-ALL after finalExpiration', async () => {

@@ -8,32 +8,32 @@
  * not deep in arkd as an opaque "failed to process". Mirrors v3's
  * buildForfeitClaimTransactionV3 potAmount validation.
  */
-import { buildJointPotForfeitClaim, buildJointPotSettleTx, buildJointPotRefundTx } from 'arkade-coinflip'
+import { buildStageTwoTakeAllTx, buildJointPotSettleTx, buildJointPotRefundTx } from 'arkade-coinflip'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 describe('joint-pot builder potAmount guards', () => {
   const cofund = { txid: '00'.repeat(32), vout: 0, value: 2000 }
 
-  const forfeit = (potAmount: bigint) =>
-    buildJointPotForfeitClaim({
-      pot: {} as any,
-      cofund,
+  const takeAll = (potAmount: bigint) =>
+    buildStageTwoTakeAllTx({
+      stageTwo: {} as any,
+      stageTwoOutpoint: cofund,
       playerPayoutPkScript: new Uint8Array(34),
       potAmount,
       serverUnroll: {} as any,
     })
 
-  it('buildJointPotForfeitClaim throws when potAmount != pot value', () => {
-    expect(() => forfeit(1999n)).toThrow(/potAmount/)
+  it('buildStageTwoTakeAllTx throws when potAmount != pot value', () => {
+    expect(() => takeAll(1999n)).toThrow(/potAmount/)
   })
 
-  it('buildJointPotForfeitClaim throws when potAmount <= 0', () => {
-    expect(() => forfeit(0n)).toThrow(/potAmount/)
+  it('buildStageTwoTakeAllTx throws when potAmount <= 0', () => {
+    expect(() => takeAll(0n)).toThrow(/potAmount/)
   })
 
-  it('buildJointPotForfeitClaim does NOT throw the guard when potAmount == pot value', () => {
-    // It will still throw later (dummy pot), but NOT the potAmount guard.
-    expect(() => forfeit(2000n)).not.toThrow(/potAmount/)
+  it('buildStageTwoTakeAllTx does NOT throw the guard when potAmount == pot value', () => {
+    // It will still throw later (dummy StageTwo), but NOT the potAmount guard.
+    expect(() => takeAll(2000n)).not.toThrow(/potAmount/)
   })
 
   const settle = (potAmount: bigint) =>

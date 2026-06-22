@@ -1,5 +1,5 @@
 <template>
-  <div v-if="bets.length" class="stalled">
+  <div v-if="bets.length || v4Bets.length" class="stalled">
     <div class="stalled-head">
       <span class="title">⚠ Reclaim stalled bets</span>
       <span class="sub">A game didn't resolve — reclaim your escrowed stake trustlessly. Auto-claims at expiry; manual buttons stay as a backup.</span>
@@ -49,6 +49,27 @@
         </button>
       </template>
     </div>
+
+    <!-- v0.4 joint-pot forfeits: the whole pot via the playerForfeit leaf. No
+         self-refund split — v4 funds a single joint pot, so it's pot-or-nothing. -->
+    <div v-for="b in v4Bets" :key="b.gameId" class="bet-row">
+      <div class="bet-info">
+        <span class="amount penalty-amount">Claim full pot — {{ b.potOutpoint.value.toLocaleString() }} sats (your stake + house)</span>
+        <span class="state" :class="{ ready: isV4Ready(b), auto: isV4AutoClaiming(b) }">{{ v4StatusLabel(b) }}</span>
+        <span class="penalty-note">{{ v4Note(b) }}</span>
+      </div>
+      <div class="bet-actions">
+        <button
+          class="claim-btn"
+          :disabled="!isV4Ready(b) || isV4Claiming(b)"
+          :title="isV4Ready(b) ? '' : v4StatusLabel(b)"
+          @click="claimV4(b.gameId)"
+        >
+          {{ v4BtnLabel(b) }}
+        </button>
+      </div>
+    </div>
+
     <p v-if="message" class="msg">{{ message }}</p>
   </div>
 </template>
@@ -58,6 +79,7 @@ import { defineComponent, ref, computed, onMounted, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import type { StashedRefund, ClaimingInfo } from '@/store/modules/ark/ark'
 import { hasStashedForfeit } from '@/store/modules/ark/forfeitStash'
+import type { StashedV4Forfeit } from '@/store/modules/ark/v4ForfeitStash'
 import { isCltvMatured } from '@/utils/cltv'
 
 export default defineComponent({
@@ -65,6 +87,7 @@ export default defineComponent({
   setup() {
     const store = useStore()
     const bets = ref<StashedRefund[]>([])
+    const v4Bets = ref<StashedV4Forfeit[]>([])
     const message = ref('')
     // Store-backed in-flight map — populated by BOTH the manual buttons
     // here and the background auto-claim poll in the ark store. Reading
@@ -88,6 +111,7 @@ export default defineComponent({
 
     async function refresh() {
       bets.value = await store.dispatch('ark/listStalledBets')
+      v4Bets.value = await store.dispatch('ark/listV4StalledBets')
     }
     async function refreshChainTime() {
       const t = await store.dispatch('ark/getChainTipTime')
@@ -175,6 +199,40 @@ export default defineComponent({
       }
     }
 
+    // ── v0.4 joint-pot forfeit row (whole pot, client-built claim) ──────────
+    const isV4Claiming = (b: StashedV4Forfeit) => !!claimingGames.value[b.gameId]
+    const isV4AutoClaiming = (b: StashedV4Forfeit) => claimingGames.value[b.gameId]?.mode === 'auto'
+    const isV4Ready = (b: StashedV4Forfeit) => isCltvMatured(chainTime.value, b.forfeitClaimableAt)
+
+    function v4StatusLabel(b: StashedV4Forfeit): string {
+      if (isV4AutoClaiming(b)) return 'Auto-claiming…'
+      if (chainTime.value === null) return 'Checking chain time…'
+      if (isV4Ready(b)) return 'Claimable now (joint pot)'
+      const mins = Math.ceil((b.forfeitClaimableAt - chainTime.value) / 60)
+      return `Claimable in ~${mins} min (chain time)`
+    }
+    function v4Note(b: StashedV4Forfeit): string {
+      return isV4Ready(b)
+        ? 'The server never settled. You take the whole pot via the joint-pot forfeit leaf.'
+        : 'Settling — the operator completes this automatically, usually within a minute. This is your trustless backup if it stalls.'
+    }
+    function v4BtnLabel(b: StashedV4Forfeit): string {
+      const info = claimingGames.value[b.gameId]
+      if (info) return info.mode === 'auto' ? 'Auto-claiming…' : 'Claiming…'
+      return 'Claim full pot'
+    }
+    async function claimV4(gameId: string) {
+      message.value = ''
+      try {
+        await store.dispatch('ark/claimV4Forfeit', { gameId, mode: 'manual' })
+        message.value = 'Full pot claimed via the joint-pot forfeit — funds returned to your wallet.'
+      } catch (e: unknown) {
+        message.value = e instanceof Error ? e.message : 'Forfeit failed'
+      } finally {
+        await refresh()
+      }
+    }
+
     let listTimer: number | undefined
     onMounted(() => {
       refresh()
@@ -185,7 +243,7 @@ export default defineComponent({
       // responsive: chain time gates EVERY claim button, so a slow poll strands
       // them on "Checking chain time…" (and a failed first read on a cold wallet
       // would otherwise take a full cycle to recover).
-      timer = window.setInterval(() => { if (bets.value.length) refreshChainTime() }, 5000)
+      timer = window.setInterval(() => { if (bets.value.length || v4Bets.value.length) refreshChainTime() }, 5000)
       // Re-read the stash list periodically so an auto-claim that
       // succeeded in the background removes its row without the user
       // having to refresh. Cheap (localStorage read) so 5s is fine.
@@ -202,6 +260,8 @@ export default defineComponent({
       isClaiming, isAutoClaiming,
       statusLabel, forfeitStatusLabel, forfeitNote, claimBtnLabel,
       reclaim, claimForfeit,
+      v4Bets, isV4Claiming, isV4AutoClaiming, isV4Ready,
+      v4StatusLabel, v4Note, v4BtnLabel, claimV4,
     }
   },
 })

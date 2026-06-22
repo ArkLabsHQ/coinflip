@@ -26,7 +26,7 @@ import {
   type Outpoint, type ForfeitResponse, type V4CovenantParams,
 } from '@/services/api'
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
-import { resolveV4ForfeitStash, hasClaimableV4Forfeit, type V4PotOutpoint } from './v4ForfeitStash'
+import { resolveV4ForfeitStash, hasClaimableV4Forfeit, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
 import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits } from './v4ForfeitStashStore'
 import { locateEscrowVtxo } from './locateEscrow'
 import { createHash } from '@/utils/crypto'
@@ -497,7 +497,7 @@ async function stashV4ForfeitRecovery(args: {
         ...decision.patch,
         gameId: args.gameId,
         tier: args.tier,
-        createdAt: Math.floor(Date.now() / 1000),
+        createdAt: Date.now(), // ms, matches the listStalledBets grace cutoff
       })
     } catch (e) {
       console.warn('[v4] forfeit stash write failed (continuing):', getErrorMessage(e))
@@ -1396,6 +1396,16 @@ const ark: Module<ArkState, RootState> = {
       const RECENT_GRACE_MS = 90_000
       const cutoff = Date.now() - RECENT_GRACE_MS
       return (await loadRefunds()).filter((b) => b.createdAt <= cutoff)
+    },
+
+    /**
+     * v0.4 joint-pot forfeits eligible for the recovery UI. Same 90 s grace as
+     * listStalledBets — on the happy path the stash exists only briefly (≈100 ms
+     * between co-fund and settle), so anything older is a genuine stall.
+     */
+    async listV4StalledBets(): Promise<StashedV4Forfeit[]> {
+      const cutoff = Date.now() - 90_000
+      return (await loadV4Forfeits()).filter((b) => b.createdAt <= cutoff)
     },
 
     /**

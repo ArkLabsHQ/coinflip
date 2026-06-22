@@ -34,8 +34,15 @@ export async function loadV4Forfeits(): Promise<StashedV4Forfeit[]> {
   const raw = await getAdapter().getItem(V4_STASH_KEY)
   try {
     const parsed = JSON.parse(raw || '[]')
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
+    if (Array.isArray(parsed)) return parsed
+    // A non-array hides EVERY v4 recovery record (no auto-claim, no UI). Surface
+    // it loudly rather than masquerading as "no stalled bets".
+    console.error('[v4] forfeit stash is not an array — recovery records hidden:', raw)
+    return []
+  } catch (e) {
+    // A corrupt blob hides ALL recovery records. Log loudly and do NOT overwrite
+    // the raw value, so a funded pot's covenant params remain recoverable.
+    console.error('[v4] forfeit stash blob is corrupt; recovery records hidden until repaired:', e)
     return []
   }
 }

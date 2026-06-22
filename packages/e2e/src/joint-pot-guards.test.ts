@@ -8,7 +8,7 @@
  * not deep in arkd as an opaque "failed to process". Mirrors v3's
  * buildForfeitClaimTransactionV3 potAmount validation.
  */
-import { buildJointPotForfeitClaim, buildJointPotSettleTx } from 'arkade-coinflip'
+import { buildJointPotForfeitClaim, buildJointPotSettleTx, buildJointPotRefundTx } from 'arkade-coinflip'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 describe('joint-pot builder potAmount guards', () => {
@@ -50,5 +50,31 @@ describe('joint-pot builder potAmount guards', () => {
 
   it('buildJointPotSettleTx throws when potAmount != pot value', () => {
     expect(() => settle(1n)).toThrow(/potAmount/)
+  })
+})
+
+describe('buildJointPotRefundTx stake guards', () => {
+  const refund = (playerStake: bigint, houseStake: bigint, value: number) =>
+    buildJointPotRefundTx({
+      pot: {} as any,
+      cofund: { txid: '00'.repeat(32), vout: 0, value },
+      playerStake,
+      houseStake,
+      playerPayoutPkScript: new Uint8Array(34),
+      housePayoutPkScript: new Uint8Array(34),
+      serverUnroll: {} as any,
+    })
+
+  it('throws when the two stakes do not sum to the pot value', () => {
+    expect(() => refund(1000n, 1000n, 1999)).toThrow(/must equal the pot value/)
+  })
+
+  it('throws when a stake is non-positive', () => {
+    expect(() => refund(0n, 2000n, 2000)).toThrow(/positive/)
+  })
+
+  it('does NOT throw the stake guards when stakes split the pot exactly', () => {
+    // Still throws later (dummy pot), but NOT the stake guards.
+    expect(() => refund(1000n, 1000n, 2000)).not.toThrow(/must equal|positive/)
   })
 })

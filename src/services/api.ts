@@ -208,7 +208,7 @@ export interface V4HouseInput {
 export interface V4CovenantParams {
   creatorPubkey: string; playerPubkey: string; serverPubkey: string
   creatorHash: string; playerHash: string
-  finalExpiration: number; exitDelay: number
+  finalExpiration: number; cancelDelay: number; exitDelay: number
   oddsN: number; oddsTarget: number; oddsLo: number
   emulatorPubkey: string
   playerPayoutPkScript: string; housePayoutPkScript: string

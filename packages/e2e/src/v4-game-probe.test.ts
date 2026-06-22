@@ -106,6 +106,7 @@ describe('v4 spike: full joint-pot game settles end-to-end', () => {
     const pot = new CoinflipJointPotScript({
       creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey: serverPub,
       creatorHash, playerHash, finalExpiration: BigInt(Math.floor(Date.now() / 1000) + 3600),
+      cancelDelay: BigInt(Math.floor(Date.now() / 1000) + 1800),
       exitDelay: 86_528n, oddsN: 2, oddsTarget: 1, oddsLo: 0,
       emulatorPubkey: emuPubkey, playerPayoutPkScript: playerPayout, housePayoutPkScript: housePayout,
       playerStake: BigInt(BET), houseStake: BigInt(BET),

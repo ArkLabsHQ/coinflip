@@ -107,7 +107,7 @@ describe('v4 server: handleV4Play', () => {
     await waitForSettled(deps.wallet, BET * 5)
     // Fragment into a small pool — v4 spends a WHOLE house VTXO per game, so each
     // game needs its own free stake input (one big VTXO would go "house busy").
-    await server.ensureHouseVtxoPool(deps, { targetCount: 6, pieceSize: BET * 5 })
+    await server.ensureHouseVtxoPool(deps, { targetCount: 8, pieceSize: BET * 5 })
 
     app = express()
     app.use(express.json())
@@ -164,7 +164,7 @@ describe('v4 server: handleV4Play', () => {
       serverPubkey: hex.decode(cv.serverPubkey),
       creatorHash: hex.decode(cv.creatorHash),
       playerHash: hex.decode(cv.playerHash),
-      finalExpiration: BigInt(cv.finalExpiration),
+      finalExpiration: BigInt(cv.finalExpiration), cancelDelay: BigInt(cv.cancelDelay),
       exitDelay: BigInt(cv.exitDelay),
       oddsN: cv.oddsN, oddsTarget: cv.oddsTarget, oddsLo: cv.oddsLo,
       emulatorPubkey: hex.decode(cv.emulatorPubkey),
@@ -453,6 +453,87 @@ describe('v4 server: handleV4Play', () => {
     console.log('[v4-http] full game over HTTP →', reveal.winner, 'settled', reveal.settleTxid)
   }, 240_000)
 
+  it('house RECLAIMS its stake via the covenant-only refund when the player never reveals', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+
+    // Co-fund a pot exactly like the happy path — but the player never reveals.
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await Wallet.create({
+      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+      settlementConfig: false,
+    })
+    await faucet(await playerW.getBoardingAddress(), 0.001)
+    await waitForBoarding(playerW, BET)
+    await settleWithRetry(playerW)
+    await waitForSettled(playerW, BET)
+
+    const salt = crypto.getRandomValues(new Uint8Array(16))
+    const playerHash = createHash('sha256').update(packets.encodeReveal(0, salt)).digest('hex')
+    const playerAddr = await playerW.getAddress()
+    const res = await server.handleV4Play({
+      tier: BET, playerPubkey: hex.encode(toXOnly(await playerId.compressedPublicKey())),
+      playerHash, playerPayoutAddress: playerAddr, playerChangeAddress: playerAddr,
+    }, deps)
+    const cv = res.covenant
+
+    const pv = (await playerW.getVtxos())[0]
+    const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+    const cf = buildCofundFromPlay({
+      play: res, playerInputs: [toInput(pv)],
+      playerChangePkScript: ArkAddress.decode(playerAddr).pkScript, betAmount: BET, serverUnroll,
+    })
+    const arkTxPlayerSigned = await playerId.sign(cf.arkTx, [0])
+    const cofundRes = await server.handleV4Cofund(res.gameId, {
+      arkTx: base64.encode(arkTxPlayerSigned.toPSBT()),
+      checkpoints: cf.checkpoints.map((c: Transaction) => base64.encode(c.toPSBT())),
+    }, deps)
+    const signedCps = await Promise.all(cofundRes.playerCheckpoints.map(async (b64: string) => {
+      const cp = Transaction.fromPSBT(base64.decode(b64))
+      let s = cp
+      try { s = await playerId.sign(cp, Array.from({ length: cp.inputsLength }, (_, i) => i)) }
+      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+      return base64.encode(s.toPSBT())
+    }))
+    const finRes = await server.handleV4CofundFinalize(res.gameId, { playerCheckpoints: signedCps }, deps)
+    expect(finRes.potOutpoint.value).toBe(2 * BET)
+
+    // The player NEVER reveals. Past cancelDelay the house's failsafe poll
+    // (reconcileV4Refunds — the same loop startV4RefundTimer fires) finds the
+    // stalled game and broadcasts the refund: a COVENANT-ONLY spend (no
+    // pre-signing) — the emulator enforces the exact split and co-signs, arkd
+    // co-signs the server slot after the CLTV. This claws the house stake back
+    // AND returns the player's, BEFORE the player's forfeit (finalExpiration >
+    // cancelDelay) opens. Advance the chain's MTP past cancelDelay first (arkd
+    // rejects the CLTV spend until then).
+    await setChainTime(cv.cancelDelay + 60, 14)
+    const refundTxids = await server.reconcileV4Refunds(deps)
+    expect(refundTxids.length).toBeGreaterThanOrEqual(1)
+    const refundTxid = refundTxids[0]
+
+    // Split-back: the player got back EXACTLY their stake (BET) — NOT the whole
+    // pot, so the forfeit grief is pre-empted — and the house got its stake back.
+    const indexer = new RestIndexerProvider(ARK_SERVER_URL)
+    const playerPk = hex.encode(ArkAddress.decode(playerAddr).pkScript)
+    const housePk = hex.encode(ArkAddress.decode(await deps.wallet.getAddress()).pkScript)
+    let playerBack = false
+    let houseBack = false
+    for (let i = 0; i < 20 && !(playerBack && houseBack); i++) {
+      const [pRes, hRes] = await Promise.all([
+        indexer.getVtxos({ scripts: [playerPk] }),
+        indexer.getVtxos({ scripts: [housePk] }),
+      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (pRes.vtxos.some((v: any) => v.txid === refundTxid && v.value === BET)) playerBack = true
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (hRes.vtxos.some((v: any) => v.txid === refundTxid && v.value === BET)) houseBack = true
+      if (!(playerBack && houseBack)) await sleep(1000)
+    }
+    expect(playerBack).toBe(true)
+    expect(houseBack).toBe(true)
+    console.log('[v4-refund] player never revealed → house split the pot back via the covenant-only refund:', refundTxid)
+  }, 300_000)
+
   it('player RECOVERS the whole pot via the forfeit leaf when the server never settles', async () => {
     if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
 
@@ -508,7 +589,7 @@ describe('v4 server: handleV4Play', () => {
     const pot = new CoinflipJointPotScript({
       creatorPubkey: hex.decode(cv.creatorPubkey), playerPubkey: hex.decode(cv.playerPubkey),
       serverPubkey: hex.decode(cv.serverPubkey), creatorHash: hex.decode(cv.creatorHash),
-      playerHash: hex.decode(cv.playerHash), finalExpiration: BigInt(cv.finalExpiration),
+      playerHash: hex.decode(cv.playerHash), finalExpiration: BigInt(cv.finalExpiration), cancelDelay: BigInt(cv.cancelDelay),
       exitDelay: BigInt(cv.exitDelay), oddsN: cv.oddsN, oddsTarget: cv.oddsTarget, oddsLo: cv.oddsLo,
       emulatorPubkey: hex.decode(cv.emulatorPubkey), playerPayoutPkScript: hex.decode(cv.playerPayoutPkScript),
       housePayoutPkScript: hex.decode(cv.housePayoutPkScript), playerStake: BigInt(cv.playerStake), houseStake: BigInt(cv.houseStake),

@@ -12,7 +12,7 @@
  *   0. playerWinCovenant   — Multisig[server, emu_tweaked(predicateP + payTo(player, pot))]
  *   1. creatorWinCovenant  — Multisig[server, emu_tweaked(predicateC + payTo(house, pot))]
  *   2. playerForfeit       — CLTVMultisig[player, server, emu_tweaked(payTo(player, pot))]
- *   3. cooperativeSpend    — Multisig[player, creator, server]  (the pre-signed refund-split spends this)
+ *   3. cooperativeSpend    — CLTVMultisig[server, emu(splitTo)] @ cancelDelay  (the covenant-only refund-split spends this)
  *   4. playerWinExit       — CSVMultisig[player, emu_tweaked(predicateP + payTo(player, pot))]
  *   5. creatorWinExit      — CSVMultisig[creator, emu_tweaked(predicateC + payTo(house, pot))]
  *   6. playerForfeitExit   — ConditionCSVMultisig[player, emu_tweaked(payTo(player, pot))] + SHA256(playerSecret)
@@ -35,7 +35,7 @@ import {
   TapLeafScript,
   arkade,
 } from '@arkade-os/sdk'
-import { buildForfeitArkadeScript } from './arkade-forfeit'
+import { buildForfeitArkadeScript, buildSplitArkadeScript } from './arkade-forfeit'
 import { buildVariableOddsWinPredicate } from './arkade-win'
 
 export interface CoinflipJointPotOptions {
@@ -45,6 +45,10 @@ export interface CoinflipJointPotOptions {
   creatorHash: Uint8Array
   playerHash: Uint8Array
   finalExpiration: bigint
+  /** CLTV on the cooperativeSpend (pre-signed refund) leaf. MUST be < finalExpiration
+   *  so the house can refund a never-revealed pot BEFORE the player's forfeit CLTV
+   *  opens — and > the normal settle time so a losing player can't refund-escape. */
+  cancelDelay: bigint
   exitDelay: bigint
   oddsN: number
   oddsTarget: number
@@ -74,11 +78,12 @@ export class CoinflipJointPotScript extends VtxoScript {
   readonly playerWinFullArkadeScript: Uint8Array
   readonly creatorWinFullArkadeScript: Uint8Array
   readonly forfeitArkadeScript: Uint8Array
+  readonly splitArkadeScript: Uint8Array
 
   constructor(readonly options: CoinflipJointPotOptions) {
     const {
       creatorPubkey, playerPubkey, serverPubkey,
-      creatorHash, playerHash, finalExpiration, exitDelay,
+      creatorHash, playerHash, finalExpiration, cancelDelay, exitDelay,
       oddsN, oddsTarget, oddsLo,
       emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake,
     } = options
@@ -98,6 +103,10 @@ export class CoinflipJointPotScript extends VtxoScript {
     const creatorWinFullArkadeScript = new Uint8Array([...creatorWinPredicate, OP.VERIFY, ...creatorPayoutCovenant])
     // Forfeit pays the whole pot to the player (predicate-free; covenant only).
     const forfeitArkadeScript = buildForfeitArkadeScript(playerPayoutPkScript, pot)
+    // Refund splits the pot back: playerStake → player, houseStake → house. The
+    // emulator enforces BOTH outputs, so the cooperative refund is covenant-only
+    // (no player/creator pre-sign needed — the covenant guarantees the split).
+    const splitArkadeScript = buildSplitArkadeScript(playerPayoutPkScript, playerStake, housePayoutPkScript, houseStake)
 
     const tweakedEmuKey = (script: Uint8Array) => arkade.computeArkadeScriptPublicKey(emulatorPubkey, script)
 
@@ -111,11 +120,16 @@ export class CoinflipJointPotScript extends VtxoScript {
       absoluteTimelock: finalExpiration,
       pubkeys: [playerPubkey, serverPubkey, tweakedEmuKey(forfeitArkadeScript)],
     }).script
-    // Cooperative split spender (the pre-signed refund signs this leaf). Includes
-    // serverPubkey because arkd requires the signer pubkey in every ForfeitClosure
-    // multisig; arkd's signature is automatic for valid spends.
-    const cooperativeSpendScript = MultisigTapscript.encode({
-      pubkeys: [playerPubkey, creatorPubkey, serverPubkey],
+    // Cooperative split spender — the COVENANT-ONLY refund spends this leaf. The
+    // emulator enforces the split (buildSplitArkadeScript), so it needs no
+    // player/creator pre-sign: like the settle/forfeit, only [server, emu] sign,
+    // and arkd + the emulator co-sign automatically for a valid (correctly-split)
+    // tx. CLTV-gated at cancelDelay so the refund cannot confirm until then — the
+    // normal settle finishes first (a losing player can't refund-escape), and the
+    // house can still refund a never-revealed pot before the player's forfeit opens.
+    const cooperativeSpendScript = CLTVMultisigTapscript.encode({
+      absoluteTimelock: cancelDelay,
+      pubkeys: [serverPubkey, tweakedEmuKey(splitArkadeScript)],
     }).script
 
     const playerWinExitScript = CSVMultisigTapscript.encode({
@@ -170,6 +184,7 @@ export class CoinflipJointPotScript extends VtxoScript {
     this.playerWinFullArkadeScript = playerWinFullArkadeScript
     this.creatorWinFullArkadeScript = creatorWinFullArkadeScript
     this.forfeitArkadeScript = forfeitArkadeScript
+    this.splitArkadeScript = splitArkadeScript
   }
 
   playerWinCovenant(): TapLeafScript { return this.findLeaf(this.playerWinCovenantScriptHex) }

@@ -17,7 +17,7 @@ import { base64, hex } from '@scure/base'
 import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import {
   CoinflipJointPotScript, commitDigit, randomUniformInt,
-  determineWinnerV3, computeRollV3, buildJointPotSettleTx, encodeSettleForEmulator,
+  determineWinnerV3, computeRollV3, buildJointPotSettleTx, buildJointPotRefundTx, encodeSettleForEmulator,
   serializeTapLeaf, type SerializedTapLeaf, type SerializedHouseInput,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
@@ -72,6 +72,7 @@ export interface V4CovenantParams {
   creatorHash: string
   playerHash: string
   finalExpiration: number
+  cancelDelay: number
   exitDelay: number
   oddsN: number
   oddsTarget: number
@@ -183,8 +184,12 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   // recovery e2e can use a short timelock; production default is 30 min. Guard
   // against a malformed env (Number('x') → NaN) silently breaking the window.
   const finalExpirationSecs = Number(process.env.V4_FINAL_EXPIRATION_SECS ?? 1800)
-  const finalExpiration =
-    now + (Number.isFinite(finalExpirationSecs) && finalExpirationSecs > 0 ? finalExpirationSecs : 1800)
+  const windowSecs = Number.isFinite(finalExpirationSecs) && finalExpirationSecs > 0 ? finalExpirationSecs : 1800
+  const finalExpiration = now + windowSecs
+  // Pre-signed refund CLTV: half the forfeit window. < finalExpiration (the house
+  // refunds a never-revealed pot before the player's forfeit opens) and well past
+  // the (seconds-fast) settle (a losing player can't refund-escape).
+  const cancelDelay = now + Math.max(1, Math.floor(windowSecs / 2))
   const setupExpiration = now + 600
 
   const housePubkey = toXOnly(await deps.identity.compressedPublicKey())
@@ -198,7 +203,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   const covenantScript = new CoinflipJointPotScript({
     creatorPubkey: housePubkey, playerPubkey, serverPubkey,
     creatorHash: houseHashBytes, playerHash: playerHashBytes,
-    finalExpiration: BigInt(finalExpiration), exitDelay: BigInt(exitDelay),
+    finalExpiration: BigInt(finalExpiration), cancelDelay: BigInt(cancelDelay), exitDelay: BigInt(exitDelay),
     oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
     emulatorPubkey: emulator.signerPubkey,
     playerPayoutPkScript, housePayoutPkScript,
@@ -255,7 +260,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     serverPubkey: hex.encode(serverPubkey),
     creatorHash: houseHash,
     playerHash: req.playerHash,
-    finalExpiration, exitDelay,
+    finalExpiration, cancelDelay, exitDelay,
     oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
     emulatorPubkey: hex.encode(emulator.signerPubkey),
     playerPayoutPkScript: hex.encode(playerPayoutPkScript),
@@ -473,6 +478,7 @@ function rebuildCovenant(cv: V4CovenantParams): CoinflipJointPotScript {
     creatorHash: hex.decode(cv.creatorHash),
     playerHash: hex.decode(cv.playerHash),
     finalExpiration: BigInt(cv.finalExpiration),
+    cancelDelay: BigInt(cv.cancelDelay),
     exitDelay: BigInt(cv.exitDelay),
     oddsN: cv.oddsN, oddsTarget: cv.oddsTarget, oddsLo: cv.oddsLo,
     emulatorPubkey: hex.decode(cv.emulatorPubkey),
@@ -564,4 +570,107 @@ async function handleV4RevealInner(gameId: string, req: V4RevealRequest, deps: A
   })
 
   return { winner, settleTxid, payout: state.pot, houseSecretHex: game.house_secret_hex, roll }
+}
+
+/**
+ * Broadcast the REFUND for a co-funded game whose player never revealed — the
+ * house's protection against the never-reveal griefing vector. Past cancelDelay
+ * (enforced by arkd/emulator via the cooperativeSpend CLTV) this splits the pot
+ * back: the player's stake to its payout, the house's to its payout — pre-empting
+ * the player's later forfeit (finalExpiration > cancelDelay).
+ *
+ * COVENANT-ONLY: the emulator enforces the exact split (the splitTo arkade
+ * script in buildJointPotRefundTx), so there is NO pre-signing — the house just
+ * builds the tx and POSTs it, exactly like the settle. Idempotency: throws if the
+ * pot was never co-funded or the game already settled.
+ */
+export async function broadcastV4Refund(gameId: string, deps: AppDeps): Promise<{ refundTxid: string }> {
+  const { state, status } = await loadV4Game(deps, gameId)
+  if (!state.cofundTxid) throw new Error('Cannot refund: pot not co-funded')
+  if (status === 'resolved') throw new Error('Cannot refund: game already resolved')
+
+  const pot = rebuildCovenant(state.covenant)
+  const serverUnroll = decodeTapscript(hex.decode(deps.arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+  const refund = buildJointPotRefundTx({
+    pot,
+    cofund: { txid: state.cofundTxid, vout: 0, value: state.pot },
+    playerStake: BigInt(state.covenant.playerStake),
+    houseStake: BigInt(state.covenant.houseStake),
+    playerPayoutPkScript: hex.decode(state.covenant.playerPayoutPkScript),
+    housePayoutPkScript: hex.decode(state.covenant.housePayoutPkScript),
+    serverUnroll,
+  })
+
+  const cfg = await loadEmulatorConfig()
+  if (!cfg) throw new Error('Emulator not configured')
+  const body = JSON.stringify(encodeSettleForEmulator(refund))
+  // The emulator co-signs the split covenant + forwards to arkd (each POST is an
+  // arkd submit) — serialize it, retry transient lag. arkd enforces the CLTV, so
+  // this only succeeds once the chain's MTP is past cancelDelay.
+  const postOnce = async (): Promise<{ ok: true; txid: string } | { ok: false; status: number; text: string }> => {
+    const r = await fetch(`${cfg.url}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(25_000) })
+    if (r.ok) return { ok: true, txid: Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id }
+    return { ok: false, status: r.status, text: await r.text() }
+  }
+  let refundTxid = ''
+  for (let a = 0; a < 10; a++) {
+    const res = await withArkSubmit(postOnce)
+    if (res.ok) { refundTxid = res.txid; break }
+    const transient = res.status >= 500 && /not found|VTXO_NOT_FOUND|failed to process/i.test(res.text)
+    if (!transient || a === 9) throw new Error(`Emulator rejected refund: ${res.status} ${res.text}`)
+    await sleep(500 + a * 500)
+  }
+
+  reservations.release(gameId)
+  await deps.repos.games.update(gameId, { status: 'resolved' })
+  return { refundTxid }
+}
+
+/**
+ * Failsafe reconcile — the house's AUTO-protection. For every co-funded v4 game
+ * that's still unresolved and whose cancelDelay has passed (the player never
+ * revealed), broadcast the refund to split the pot back — pre-empting the
+ * player's later forfeit. Best-effort per game (one failure can't block the
+ * rest). Returns the refund txids broadcast this pass.
+ */
+export async function reconcileV4Refunds(deps: AppDeps): Promise<string[]> {
+  // Gate on the CHAIN tip time, not Date.now() — the cooperativeSpend CLTV is
+  // enforced against the chain's median-time-past, so this matches what arkd will
+  // accept (and the regtest mock-time the recovery e2e advances). Same source as
+  // the v3 escrow recovery's CLTV gate.
+  const chainTime = (await deps.wallet.onchainProvider.getChainTip()).time
+  const pending = await deps.repos.games.list({ status: 'pending', limit: 500 })
+  const stalled = pending.filter((g) => g.player_choice === 'trustless-v4' && g.house_vtxos_json)
+  const refundTxids: string[] = []
+  for (const game of stalled) {
+    let state: V4State
+    try {
+      state = JSON.parse(game.house_vtxos_json as string) as V4State
+    } catch {
+      continue
+    }
+    if (state.protocolVersion !== 'v4' || !state.cofundTxid) continue // not co-funded → nothing to refund
+    if (chainTime <= state.covenant.cancelDelay) continue // CLTV not matured yet
+    try {
+      const { refundTxid } = await broadcastV4Refund(game.id, deps)
+      console.log(`[v4-refund] reconciled stalled game ${game.id} → split-back ${refundTxid}`)
+      refundTxids.push(refundTxid)
+    } catch (e) {
+      console.error(`[v4-refund] reconcile failed for ${game.id}:`, e instanceof Error ? e.message : e)
+    }
+  }
+  return refundTxids
+}
+
+/** Periodic v4 refund reconcile (mirrors startEscrowRecoveryTimer's cadence). */
+export function startV4RefundTimer(deps: AppDeps, intervalMs = 120_000): NodeJS.Timeout {
+  const tick = async () => {
+    const txids = await reconcileV4Refunds(deps).catch((e) => {
+      console.error('[v4-refund] tick failed:', e instanceof Error ? e.message : e)
+      return [] as string[]
+    })
+    if (txids.length > 0) console.log(`[v4-refund] reconciled ${txids.length} stalled game(s)`)
+  }
+  setTimeout(tick, 7_000)
+  return setInterval(tick, intervalMs)
 }

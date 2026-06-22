@@ -1597,6 +1597,7 @@ const ark: Module<ArkState, RootState> = {
           creatorHash: hex.decode(cv.creatorHash),
           playerHash: hex.decode(cv.playerHash),
           finalExpiration: BigInt(cv.finalExpiration),
+          cancelDelay: BigInt(cv.cancelDelay),
           exitDelay: BigInt(cv.exitDelay),
           oddsN: cv.oddsN,
           oddsTarget: cv.oddsTarget,

@@ -19,6 +19,7 @@ const covenant = (): V4CovenantParams => ({
   creatorHash: 'dd'.repeat(32),
   playerHash: 'ee'.repeat(32),
   finalExpiration: 1_900_000_000,
+  cancelDelay: 1_800_000_000,
   exitDelay: 86_400,
   oddsN: 2,
   oddsTarget: 1,

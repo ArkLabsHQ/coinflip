@@ -160,6 +160,7 @@ describe('v4 scale: many concurrent joint-pot games', () => {
     const potS = new CoinflipJointPotScript({
       creatorPubkey: housePub, playerPubkey: playerPub, serverPubkey: serverPub,
       creatorHash: sha(cReveal), playerHash: sha(pReveal), finalExpiration: BigInt(Math.floor(Date.now() / 1000) + 3600),
+      cancelDelay: BigInt(Math.floor(Date.now() / 1000) + 1800),
       exitDelay: 86_528n, oddsN: 2, oddsTarget: 1, oddsLo: 0, emulatorPubkey: emuPub,
       playerPayoutPkScript: ppk, housePayoutPkScript: hpk, playerStake: BigInt(BET), houseStake: BigInt(BET),
     })

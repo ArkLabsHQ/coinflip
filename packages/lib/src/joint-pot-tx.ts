@@ -182,6 +182,70 @@ export function buildJointPotForfeitClaim(args: {
   return built
 }
 
+/**
+ * Build the REFUND — the house's protection against a player who co-funds then
+ * never reveals. Spends the joint pot via the `cooperativeSpend` leaf
+ * (CLTVMultisig[server, emu(splitTo)] @ cancelDelay) into TWO outputs: the
+ * player's stake back to playerPayoutPkScript and the house's stake back to
+ * housePayoutPkScript.
+ *
+ * COVENANT-ONLY (like the settle/forfeit): the emulator enforces the exact split
+ * via the splitTo arkade script, so the refund needs NO player/creator pre-sign.
+ * The house builds it on demand and POSTs it to the emulator, which co-signs only
+ * a correctly-split tx; arkd co-signs the server slot after the CLTV.
+ *
+ * buildOffchainTx derives nLockTime = cancelDelay from the CLTV leaf, so the
+ * refund cannot confirm until then — the normal settle finishes first (a losing
+ * player can't refund-escape), yet the house can still refund a never-revealed
+ * pot before the player's forfeit (finalExpiration) opens.
+ */
+export function buildJointPotRefundTx(args: {
+  pot: CoinflipJointPotScript
+  cofund: Outpoint
+  playerStake: bigint
+  houseStake: bigint
+  playerPayoutPkScript: Uint8Array
+  housePayoutPkScript: Uint8Array
+  serverUnroll: CSVMultisigTapscript.Type
+}): BuiltJointPotTx {
+  const { pot, cofund } = args
+  if (args.playerStake <= 0n || args.houseStake <= 0n) {
+    throw new Error('buildJointPotRefundTx: both stakes must be positive')
+  }
+  if (args.playerStake + args.houseStake !== BigInt(cofund.value)) {
+    throw new Error(
+      `buildJointPotRefundTx: stakes (${args.playerStake} + ${args.houseStake}) must equal the pot value ${cofund.value}`,
+    )
+  }
+  const input: ArkTxInput = {
+    txid: cofund.txid, vout: cofund.vout, value: cofund.value,
+    tapLeafScript: pot.cooperativeSpend(), tapTree: pot.encode(),
+  }
+  const outputs: PotOutput[] = [
+    { script: args.playerPayoutPkScript, amount: args.playerStake },
+    { script: args.housePayoutPkScript, amount: args.houseStake },
+  ]
+  const built = buildOffchainTx([input], outputs, args.serverUnroll)
+
+  const cp = built.checkpoints[0]
+  const cpIn = cp.getInput(0)
+  if (cpIn?.witnessUtxo) {
+    cp.updateInput(0, { witnessUtxo: { script: pot.pkScript, amount: cpIn.witnessUtxo.amount } })
+  }
+  // Emulator packet: the splitTo covenant inspects output 0 (player stake) and
+  // output 1 (house stake). Witness = [playerOutIdx=0, houseOutIdx=1] (the house
+  // index is on top, checked first — see buildSplitArkadeScript).
+  emulator.addPacket(built.arkTx, [
+    {
+      vin: 0,
+      script: pot.splitArkadeScript,
+      witness: emulator.encodeWitness([emulator.encodeIndex(0), emulator.encodeIndex(1)]),
+    },
+  ])
+  return built
+}
+
+
 /** Serialize a built tx for an emulator `/v1/tx` POST body. */
 export function encodeSettleForEmulator(built: BuiltJointPotTx): { arkTx: string; checkpointTxs: string[] } {
   return {

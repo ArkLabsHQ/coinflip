@@ -26,6 +26,7 @@ import { registerCoinflipContracts } from 'arkade-coinflip'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
 import { createV4Routes } from './v4-routes.js'
+import { startV4RefundTimer } from './trustless-game-v4.js'
 import { createAdminRoutes } from './admin/routes.js'
 import type { AppDeps } from './deps.js'
 
@@ -61,6 +62,8 @@ export {
   handleV4Cofund,
   handleV4CofundFinalize,
   handleV4Reveal,
+  broadcastV4Refund,
+  reconcileV4Refunds,
   newGameProtocolVersion,
   type V4PlayRequest,
   type V4PlayResult,
@@ -150,6 +153,11 @@ async function main() {
   // Reclaim orphaned house escrows from stalled games once their refund CLTV
   // matures, so abandoned games don't slowly lock up house funds.
   startEscrowRecoveryTimer(deps)
+
+  // v4: refund (split the pot back) any co-funded joint-pot game whose player
+  // never revealed, once past cancelDelay — the house's protection against the
+  // never-reveal griefing vector, pre-empting the player's forfeit.
+  startV4RefundTimer(deps)
 
   // Subscribe to the ContractManager so a house escrow's `vtxo_spent` event
   // reconciles its game eagerly (the failsafe timer above still backstops it).

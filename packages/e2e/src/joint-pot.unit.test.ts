@@ -16,7 +16,7 @@ function build(): CoinflipJointPotScript {
   return new CoinflipJointPotScript({
     creatorPubkey: xonly(1), playerPubkey: xonly(2), serverPubkey: xonly(3),
     creatorHash: h(0xaa), playerHash: h(0xbb),
-    finalExpiration: 1_900_000_000n, exitDelay: 86_528n,
+    finalExpiration: 1_900_000_000n, cancelDelay: 1_800_000_000n, exitDelay: 86_528n,
     oddsN: 2, oddsTarget: 1, oddsLo: 0,
     emulatorPubkey: xonly(4),
     playerPayoutPkScript: p2tr(0x10), housePayoutPkScript: p2tr(0x20),
@@ -62,7 +62,7 @@ describe('CoinflipJointPotScript', () => {
     const other = new CoinflipJointPotScript({
       creatorPubkey: xonly(1), playerPubkey: xonly(2), serverPubkey: xonly(3),
       creatorHash: h(0xaa), playerHash: h(0xbb),
-      finalExpiration: 1_900_000_000n, exitDelay: 86_528n,
+      finalExpiration: 1_900_000_000n, cancelDelay: 1_800_000_000n, exitDelay: 86_528n,
       oddsN: 6, oddsTarget: 3, oddsLo: 0, // different odds
       emulatorPubkey: xonly(4),
       playerPayoutPkScript: p2tr(0x10), housePayoutPkScript: p2tr(0x20),

@@ -58,9 +58,12 @@ export interface StashedV4Forfeit {
   forfeitClaimableAt: number
   /** Emulator base URL the signed claim is POSTed to (`/v1/tx`). */
   forfeitEmulatorUrl: string
-  /** Player's game secret (hex) — not needed for the collaborative
-   *  playerForfeit leaf, but persisted for the unilateral playerForfeitExit
-   *  backstop (which satisfies the leaf's hash condition). */
+  /** Player's game secret (hex). NOT used by the current claim path — the
+   *  collaborative playerForfeit leaf is a bare payTo and reads no secret, and
+   *  v4 recovery presently REQUIRES a reachable emulator (there is no unilateral
+   *  client exit yet). Persisted only so a future on-chain `playerForfeitExit`
+   *  claim (player + emulator, after the CSV) could satisfy the leaf's
+   *  SHA256(secret) condition without re-deriving it. */
   playerSecretHex: string
   createdAt: number
 }

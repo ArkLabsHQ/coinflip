@@ -464,10 +464,14 @@ async function stashForfeitRecovery(
 /**
  * v0.4 analogue of `stashForfeitRecovery`. After the joint pot is co-funded,
  * persist everything the client needs to reclaim it via the `playerForfeit`
- * leaf should the server never settle. Unlike v3 there is no `/forfeit` probe:
- * the claim is CLIENT-built from the covenant params, so all we need is the pot
- * outpoint + covenant + a reachable emulator. Best-effort — NEVER throws, so a
- * stash failure can't disturb the reveal/settle path that follows.
+ * leaf should the server never settle. The claim is CLIENT-built from the
+ * covenant params, so all we need is the pot outpoint + covenant + the emulator
+ * URL — captured by the caller BEFORE the co-fund (playV4Game aborts pre-funding
+ * when it's absent). Crucially this does NOT re-fetch /api/network: that
+ * redundant fetch could fail transiently and, for v4 where the stash is the
+ * ONLY recovery (no v3-style self-refund), silently drop recovery for an
+ * already-funded pot. So a skip/write failure here is logged LOUDLY — but we
+ * still proceed to reveal, which on success makes the stash moot anyway.
  */
 async function stashV4ForfeitRecovery(args: {
   gameId: string
@@ -476,16 +480,10 @@ async function stashV4ForfeitRecovery(args: {
   covenant: V4CovenantParams
   expectedPayoutPkScriptHex: string
   playerSecretHex: string
+  emulatorUrl: string | undefined
 }): Promise<void> {
-  let emulatorUrl: string | undefined
-  try {
-    const net = await getNetwork()
-    emulatorUrl = net.emulator?.url
-  } catch (e) {
-    console.warn('[v4] could not reach /api/network for forfeit stash (continuing):', getErrorMessage(e))
-  }
   const decision = resolveV4ForfeitStash({
-    emulatorUrl,
+    emulatorUrl: args.emulatorUrl,
     potOutpoint: args.potOutpoint,
     covenant: args.covenant,
     expectedPayoutPkScriptHex: args.expectedPayoutPkScriptHex,
@@ -500,10 +498,10 @@ async function stashV4ForfeitRecovery(args: {
         createdAt: Date.now(), // ms, matches the listStalledBets grace cutoff
       })
     } catch (e) {
-      console.warn('[v4] forfeit stash write failed (continuing):', getErrorMessage(e))
+      console.error('[v4] CRITICAL: pot is funded but the recovery stash could not be written:', getErrorMessage(e))
     }
   } else {
-    console.warn(`[v4] forfeit not stashed (${decision.reason})`)
+    console.error(`[v4] CRITICAL: forfeit not stashed for a funded pot (${decision.reason})`)
   }
 }
 
@@ -1271,13 +1269,19 @@ const ark: Module<ArkState, RootState> = {
      */
     async playV4Game(
       { state, rootState },
-      { tier, side, oddsN, oddsTarget, oddsLo }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
+      { tier, side, oddsN, oddsTarget, oddsLo, emulatorUrl }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number; emulatorUrl?: string },
     ) {
       const { wallet, privateKey } = requireWalletAndKey(rootState)
       const playerPubkey = rootState.wallet.publicKey
       if (!playerPubkey) throw new Error('No wallet public key available')
       const playerAddress = state.arkAddress
       if (!playerAddress) throw new Error('No Ark address available — wallet still connecting?')
+      // v4 recovery (the playerForfeit claim) is submitted to the emulator, and
+      // for v4 the forfeit stash is the ONLY recovery. Refuse to fund a pot we
+      // couldn't recover: abort BEFORE any funds move if no emulator is known.
+      if (!emulatorUrl) {
+        throw new Error('v0.4 needs a reachable emulator for trustless recovery — aborting before any funds move.')
+      }
 
       const identity = SingleKey.fromHex(privateKey)
       const arkInfo = await wallet.arkProvider.getInfo()
@@ -1358,6 +1362,7 @@ const ark: Module<ArkState, RootState> = {
         covenant: playRes.covenant,
         expectedPayoutPkScriptHex: hex.encode(ArkAddress.decode(playerAddress).pkScript),
         playerSecretHex,
+        emulatorUrl, // captured before the co-fund (checked non-empty above)
       })
 
       // 3. Reveal → the server settles the whole pot to the winner. On success
@@ -1380,7 +1385,7 @@ const ark: Module<ArkState, RootState> = {
     ) {
       const net = await getNetwork()
       return net.protocolVersion === 'v4'
-        ? dispatch('playV4Game', payload)
+        ? dispatch('playV4Game', { ...payload, emulatorUrl: net.emulator?.url })
         : dispatch('playTrustlessGame', payload)
     },
 
@@ -1559,13 +1564,23 @@ const ark: Module<ArkState, RootState> = {
         throw new Error('A claim is already in progress for this game.')
       }
       const { wallet, privateKey } = requireWalletAndKey(rootState)
-      const stash = (await loadV4Forfeits()).find((s) => s.gameId === gameId)
-      if (!stash || !hasClaimableV4Forfeit(stash)) {
-        throw new Error('No v0.4 forfeit stashed for this game.')
-      }
-
+      // Set the in-flight flag BEFORE the stash read so the guard above is a
+      // true mutex — otherwise the 15 s auto-claim poll can slip a second
+      // submission in during the await below (manual-vs-auto double-submit).
       commit('SET_CLAIMING', { gameId, info: { kind: 'forfeit', mode } })
       try {
+        const stash = (await loadV4Forfeits()).find((s) => s.gameId === gameId)
+        if (!stash || !hasClaimableV4Forfeit(stash)) {
+          throw new Error('No v0.4 forfeit stashed for this game.')
+        }
+        // Re-assert the payout binding at claim time. IDB is not a trust
+        // boundary and the auto-claim poll fires this without user consent, so a
+        // tampered/corrupt stash must not sweep the pot to a foreign address.
+        if (!state.arkAddress) throw new Error('Wallet address unavailable for forfeit claim.')
+        const expectedPayout = hex.encode(ArkAddress.decode(state.arkAddress).pkScript)
+        if (stash.covenant.playerPayoutPkScript !== expectedPayout) {
+          throw new Error('v0.4 forfeit refused: the stashed pot does not pay this wallet (tampered or corrupt stash).')
+        }
         const identity = SingleKey.fromHex(privateKey)
         const arkInfo = await wallet.arkProvider.getInfo()
         const serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
@@ -1677,18 +1692,24 @@ const ark: Module<ArkState, RootState> = {
       for (const v4 of await loadV4Forfeits()) {
         if (state.claimingGames[v4.gameId]) continue
         if (!hasClaimableV4Forfeit(v4)) continue
+        // Positive GC ONLY: if the server settled this game normally, drop the
+        // stale stash. We must NOT infer "settled" from a claim-error string —
+        // a transient emulator rejection can carry "spent"/"not found" and would
+        // otherwise delete a still-claimable pot (lost recovery). The resolved
+        // check is the sole authority that removes a stash here.
+        try {
+          if ((await apiGetGame(v4.gameId)).status === 'resolved') {
+            await deleteV4Forfeit(v4.gameId)
+            continue
+          }
+        } catch { /* server unreachable — fall through to the CLTV-gated claim */ }
         if (!isCltvMatured(chainTime, v4.forfeitClaimableAt)) continue
         try {
           await dispatch('claimV4Forfeit', { gameId: v4.gameId, mode: 'auto' })
         } catch (e) {
-          const msg = getErrorMessage(e)
-          // Pot already spent ⇒ the server settled normally and the happy-path
-          // clear was missed; GC the stale stash so the poll stops retrying.
-          if (/already spent|spent|not found|missing/i.test(msg)) {
-            await deleteV4Forfeit(v4.gameId).catch(() => { /* next tick */ })
-          } else {
-            console.warn(`[auto-claim:v4] ${v4.gameId} failed:`, msg)
-          }
+          // Keep the stash on ANY claim error and retry next tick — erring
+          // toward keeping the recovery record is the only safe bias for a pot.
+          console.warn(`[auto-claim:v4] ${v4.gameId} failed (will retry):`, getErrorMessage(e))
         }
       }
     },

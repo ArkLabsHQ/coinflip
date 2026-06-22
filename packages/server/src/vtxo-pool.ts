@@ -532,6 +532,23 @@ export async function rebuildReservations(deps: AppDeps): Promise<number> {
       }
       reservations.reserve(g.id, [], liability)
       restored++
+    } else if (parsed && typeof parsed === 'object' && (parsed as { protocolVersion?: string }).protocolVersion === 'v4') {
+      // v0.4 joint pot. Pre-cofund: pin the EXACT house input outpoints so a
+      // post-restart /play can't re-pick a VTXO still committed to this pending
+      // game (without this, the v4 state matched no branch and was silently
+      // skipped → double-reservation → VTXO_ALREADY_SPENT). Post-cofund: the
+      // inputs are already spent into the pot, but the house stake stays live
+      // until the game resolves — reserve liability-only, as v3 does.
+      const v4 = parsed as {
+        houseInputs?: { txid: string; vout: number }[]
+        houseStake?: number
+        cofundArkTxid?: string
+      }
+      const outpoints = v4.cofundArkTxid
+        ? []
+        : (v4.houseInputs ?? []).map((h) => `${h.txid}:${h.vout}`)
+      reservations.reserve(g.id, outpoints, v4.houseStake ?? g.tier)
+      restored++
     }
   }
   if (restored > 0) console.log(`[house pool] rebuilt ${restored} reservation(s) from pending games`)

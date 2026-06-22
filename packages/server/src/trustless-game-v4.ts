@@ -734,8 +734,8 @@ export async function settleV4StageTwo(gameId: string, deps: AppDeps): Promise<{
   const pot = rebuildCovenant(state.covenant)
   const indexer = new RestIndexerProvider(ARK_SERVER_URL)
   const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(pot.stageTwo.pkScript)] })
-  const hit = vtxos.find((v) => v.value === state.pot)
-  if (!hit) throw new Error('No StageTwo VTXO — stage 1 not revealed, nothing to settle')
+  const hit = vtxos.find((v) => v.value === state.pot && !v.isSpent)
+  if (!hit) throw new Error('No spendable StageTwo VTXO — stage 1 not revealed, or the contest already concluded')
   const stageTwoOutpoint = { txid: hit.txid, vout: hit.vout, value: hit.value }
 
   // The player's secret: stored if /reveal reached us (fast path), else extracted
@@ -785,7 +785,17 @@ export async function reconcileV4StageTwo(deps: AppDeps): Promise<string[]> {
     try {
       const pot = rebuildCovenant(state.covenant)
       const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(pot.stageTwo.pkScript)] })
-      if (!vtxos.some((v) => v.value === state.pot)) continue // not revealed → nothing to settle
+      const live = vtxos.some((v) => v.value === state.pot && !v.isSpent)
+      if (!live) {
+        // A SPENT StageTwo means the contest already concluded (the player swept via
+        // takeAll, or a prior tick settled it) — mark resolved so we stop re-checking
+        // it every tick. No StageTwo at all → not revealed; leave it for the refund.
+        if (vtxos.some((v) => v.value === state.pot)) {
+          reservations.release(game.id)
+          await deps.repos.games.update(game.id, { status: 'resolved' })
+        }
+        continue
+      }
       const { settleTxid, winner } = await settleV4StageTwo(game.id, deps)
       console.log(`[v4-stage2] settled contested game ${game.id} to ${winner} → ${settleTxid}`)
       settleTxids.push(settleTxid)

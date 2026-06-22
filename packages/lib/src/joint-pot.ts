@@ -11,7 +11,7 @@
  * 8-leaf taptree:
  *   0. playerWinCovenant   — Multisig[server, emu_tweaked(predicateP + payTo(player, pot))]
  *   1. creatorWinCovenant  — Multisig[server, emu_tweaked(predicateC + payTo(house, pot))]
- *   2. playerForfeit       — CLTVMultisig[player, server, emu_tweaked(payTo(player, pot))]
+ *   2. playerReveal        — ConditionMultisig[player, server, emu(payTo(StageTwo, pot))] + SHA256(playerSecret)  (Phase 2 stage 1)
  *   3. cooperativeSpend    — CLTVMultisig[server, emu(splitTo)] @ cancelDelay  (the covenant-only refund-split spends this)
  *   4. playerWinExit       — CSVMultisig[player, emu_tweaked(predicateP + payTo(player, pot))]
  *   5. creatorWinExit      — CSVMultisig[creator, emu_tweaked(predicateC + payTo(house, pot))]
@@ -29,6 +29,7 @@ import { assembleBtcdTaprootTree } from './btcd-taproot-tree'
 import {
   VtxoScript,
   ConditionCSVMultisigTapscript,
+  ConditionMultisigTapscript,
   CLTVMultisigTapscript,
   CSVMultisigTapscript,
   MultisigTapscript,
@@ -37,6 +38,7 @@ import {
 } from '@arkade-os/sdk'
 import { buildForfeitArkadeScript, buildSplitArkadeScript } from './arkade-forfeit'
 import { buildVariableOddsWinPredicate } from './arkade-win'
+import { StageTwoScript } from './joint-pot-stage2'
 
 export interface CoinflipJointPotOptions {
   creatorPubkey: Uint8Array // house
@@ -44,12 +46,19 @@ export interface CoinflipJointPotOptions {
   serverPubkey: Uint8Array
   creatorHash: Uint8Array
   playerHash: Uint8Array
+  /** Vestigial since Phase 2 — no covenant leaf uses it now (the whole-pot forfeit
+   *  became the playerReveal -> StageTwo contest). Kept for server game-timing. */
   finalExpiration: bigint
-  /** CLTV on the cooperativeSpend (pre-signed refund) leaf. MUST be < finalExpiration
-   *  so the house can refund a never-revealed pot BEFORE the player's forfeit CLTV
-   *  opens — and > the normal settle time so a losing player can't refund-escape. */
+  /** CLTV on the cooperativeSpend (covenant-only refund) leaf, gating the split-back.
+   *  > the normal settle time so a losing player can't refund-escape; the playerReveal
+   *  (no timelock) races it, so a player revealing on-chain before cancelDelay
+   *  pre-empts the refund. */
   cancelDelay: bigint
   exitDelay: bigint
+  /** Phase 2: CSV window (seconds, 512-multiple) on the StageTwo playerTakeAll leaf —
+   *  the house's budget to settle a contested game after the player reveals on-chain,
+   *  before the player can sweep the whole pot. */
+  settleWindow: bigint
   oddsN: number
   oddsTarget: number
   oddsLo: number
@@ -68,7 +77,7 @@ function buildHashCheckScript(hash: Uint8Array): Uint8Array {
 export class CoinflipJointPotScript extends VtxoScript {
   readonly playerWinCovenantScriptHex: string
   readonly creatorWinCovenantScriptHex: string
-  readonly playerForfeitScriptHex: string
+  readonly playerRevealScriptHex: string
   readonly cooperativeSpendScriptHex: string
   readonly playerWinExitScriptHex: string
   readonly creatorWinExitScriptHex: string
@@ -79,11 +88,15 @@ export class CoinflipJointPotScript extends VtxoScript {
   readonly creatorWinFullArkadeScript: Uint8Array
   readonly forfeitArkadeScript: Uint8Array
   readonly splitArkadeScript: Uint8Array
+  /** payTo(StageTwo, pot) — the emulator packet for the playerReveal (stage 1). */
+  readonly revealArkadeScript: Uint8Array
+  /** The StageTwo contest covenant the playerReveal pays into (Phase 2). */
+  readonly stageTwo: StageTwoScript
 
   constructor(readonly options: CoinflipJointPotOptions) {
     const {
       creatorPubkey, playerPubkey, serverPubkey,
-      creatorHash, playerHash, finalExpiration, cancelDelay, exitDelay,
+      creatorHash, playerHash, cancelDelay, exitDelay, settleWindow,
       oddsN, oddsTarget, oddsLo,
       emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake,
     } = options
@@ -108,6 +121,17 @@ export class CoinflipJointPotScript extends VtxoScript {
     // (no player/creator pre-sign needed — the covenant guarantees the split).
     const splitArkadeScript = buildSplitArkadeScript(playerPayoutPkScript, playerStake, housePayoutPkScript, houseStake)
 
+    // Phase 2 staged forfeit: the player's recovery no longer takes the whole pot
+    // directly — it routes the pot into a StageTwo contest. playerReveal publishes
+    // the player's secret on-chain and pays the pot to the StageTwo covenant, where
+    // the house can settle to the ACTUAL winner OR (after settleWindow) the player
+    // sweeps everything — closing the "house stalls on a loss" gap.
+    const stageTwo = new StageTwoScript({
+      creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, settleWindow,
+      oddsN, oddsTarget, oddsLo, emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake,
+    })
+    const revealArkadeScript = buildForfeitArkadeScript(stageTwo.pkScript, pot) // payTo(StageTwo, pot)
+
     const tweakedEmuKey = (script: Uint8Array) => arkade.computeArkadeScriptPublicKey(emulatorPubkey, script)
 
     const playerWinCovenantScript = MultisigTapscript.encode({
@@ -116,9 +140,14 @@ export class CoinflipJointPotScript extends VtxoScript {
     const creatorWinCovenantScript = MultisigTapscript.encode({
       pubkeys: [serverPubkey, tweakedEmuKey(creatorWinFullArkadeScript)],
     }).script
-    const playerForfeitScript = CLTVMultisigTapscript.encode({
-      absoluteTimelock: finalExpiration,
-      pubkeys: [playerPubkey, serverPubkey, tweakedEmuKey(forfeitArkadeScript)],
+    // playerReveal (Phase 2 stage 1): the player publishes their secret (the SHA256
+    // condition) and the emulator enforces payTo(StageTwo, pot). No timelock — it's
+    // available immediately so the client can fire it before cancelDelay and pre-empt
+    // the refund. [player, server, emu] sign; the on-chain secret lets StageTwo
+    // settle to the actual winner.
+    const playerRevealScript = ConditionMultisigTapscript.encode({
+      conditionScript: buildHashCheckScript(playerHash),
+      pubkeys: [playerPubkey, serverPubkey, tweakedEmuKey(revealArkadeScript)],
     }).script
     // Cooperative split spender — the COVENANT-ONLY refund spends this leaf. The
     // emulator enforces the split (buildSplitArkadeScript), so it needs no
@@ -153,7 +182,7 @@ export class CoinflipJointPotScript extends VtxoScript {
     const scripts = [
       playerWinCovenantScript,   // 0
       creatorWinCovenantScript,  // 1
-      playerForfeitScript,       // 2
+      playerRevealScript,        // 2 (Phase 2: was playerForfeit)
       cooperativeSpendScript,    // 3
       playerWinExitScript,       // 4
       creatorWinExitScript,      // 5
@@ -175,7 +204,7 @@ export class CoinflipJointPotScript extends VtxoScript {
 
     this.playerWinCovenantScriptHex = hex.encode(playerWinCovenantScript)
     this.creatorWinCovenantScriptHex = hex.encode(creatorWinCovenantScript)
-    this.playerForfeitScriptHex = hex.encode(playerForfeitScript)
+    this.playerRevealScriptHex = hex.encode(playerRevealScript)
     this.cooperativeSpendScriptHex = hex.encode(cooperativeSpendScript)
     this.playerWinExitScriptHex = hex.encode(playerWinExitScript)
     this.creatorWinExitScriptHex = hex.encode(creatorWinExitScript)
@@ -185,11 +214,13 @@ export class CoinflipJointPotScript extends VtxoScript {
     this.creatorWinFullArkadeScript = creatorWinFullArkadeScript
     this.forfeitArkadeScript = forfeitArkadeScript
     this.splitArkadeScript = splitArkadeScript
+    this.revealArkadeScript = revealArkadeScript
+    this.stageTwo = stageTwo
   }
 
   playerWinCovenant(): TapLeafScript { return this.findLeaf(this.playerWinCovenantScriptHex) }
   creatorWinCovenant(): TapLeafScript { return this.findLeaf(this.creatorWinCovenantScriptHex) }
-  playerForfeit(): TapLeafScript { return this.findLeaf(this.playerForfeitScriptHex) }
+  playerReveal(): TapLeafScript { return this.findLeaf(this.playerRevealScriptHex) }
   cooperativeSpend(): TapLeafScript { return this.findLeaf(this.cooperativeSpendScriptHex) }
   playerWinExit(): TapLeafScript { return this.findLeaf(this.playerWinExitScriptHex) }
   creatorWinExit(): TapLeafScript { return this.findLeaf(this.creatorWinExitScriptHex) }

@@ -126,11 +126,19 @@ export {
   type CoinflipJointPotOptions,
 } from './joint-pot'
 
+// v0.4 Phase 2 staged-forfeit StageTwo taptree — see joint-pot-stage2.ts header.
+export {
+  StageTwoScript,
+  type StageTwoOptions,
+} from './joint-pot-stage2'
+
 // v0.4 joint-pot tx builders (co-fund + settle) — see joint-pot-tx.ts header.
 export {
   buildJointPotCofundTx,
   buildJointPotSettleTx,
-  buildJointPotForfeitClaim,
+  buildPlayerRevealTx,
+  buildStageTwoSettleTx,
+  buildStageTwoTakeAllTx,
   buildJointPotRefundTx,
   jointPotCofundOutputs,
   encodeSettleForEmulator,

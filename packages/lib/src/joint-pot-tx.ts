@@ -21,6 +21,8 @@ import {
 } from '@arkade-os/sdk'
 import { emulator, packets } from '@arklabshq/contract-workflows-prototype'
 import { CoinflipJointPotScript } from './joint-pot'
+import { StageTwoScript } from './joint-pot-stage2'
+import { addConditionWitness } from './transactions'
 
 /** A built (unsigned) offchain tx: the round tx + one checkpoint per input. */
 export interface BuiltJointPotTx {
@@ -137,47 +139,111 @@ export function buildJointPotSettleTx(args: {
   return built
 }
 
+/** Patch the checkpoint's prevout script to a covenant's btcd-correct pkScript. */
+function patchCheckpointPrevout(built: BuiltJointPotTx, pkScript: Uint8Array): void {
+  const cp = built.checkpoints[0]
+  const cpIn = cp.getInput(0)
+  if (cpIn?.witnessUtxo) {
+    cp.updateInput(0, { witnessUtxo: { script: pkScript, amount: cpIn.witnessUtxo.amount } })
+  }
+}
+
 /**
- * Build the player's FORFEIT claim — the recovery path when the pot is funded
- * but the server never settles. Spends the joint pot via the `playerForfeit`
- * leaf into payTo(player, pot): the player sweeps the WHOLE pot. That leaf is
- * CLTVMultisig[player, server, emu_tweaked(payTo(player,pot))], so the claim is
- * collaborative (player + server + emulator) and valid only after the game's
- * finalExpiration (the leaf's absolute timelock). The server signs its slot via
- * /api/v4/game/:id/forfeit; the player signs and POSTs to the emulator.
- *
- * No reveal packets: the covenant is a bare payTo (it reads no secrets). For a
- * server that's gone entirely, the unilateral `playerForfeitExit` leaf (player +
- * emulator, after the CSV exit delay, with the secret as a condition witness) is
- * the no-server backstop — a separate builder still to come.
+ * Build the player's REVEAL (Phase 2 staged-forfeit, stage 1) — the recovery
+ * path when the pot is funded but the server stalls. Spends the joint pot via the
+ * `playerReveal` leaf (ConditionMultisig[player, server, emu(payTo(StageTwo,pot))]
+ * + SHA256(playerSecret)) into the StageTwo CONTEST covenant — publishing the
+ * player's secret on-chain (the condition witness). No timelock, so the client
+ * fires this before cancelDelay to pre-empt the refund. From StageTwo the house
+ * settles to the actual winner, or (after settleWindow) the player sweeps all.
  */
-export function buildJointPotForfeitClaim(args: {
+export function buildPlayerRevealTx(args: {
   pot: CoinflipJointPotScript
   cofund: Outpoint
+  /** The player's reveal `[digit] || salt` — the SHA256 preimage published on-chain. */
+  playerRevealBytes: Uint8Array
+  serverUnroll: CSVMultisigTapscript.Type
+}): BuiltJointPotTx {
+  const { pot, cofund } = args
+  const input: ArkTxInput = {
+    txid: cofund.txid, vout: cofund.vout, value: cofund.value,
+    tapLeafScript: pot.playerReveal(), tapTree: pot.encode(),
+  }
+  // Output 0: the WHOLE pot to the StageTwo contest covenant (pinned by revealArkadeScript).
+  const built = buildOffchainTx([input], [{ script: pot.stageTwo.pkScript, amount: BigInt(cofund.value) }], args.serverUnroll)
+  patchCheckpointPrevout(built, pot.pkScript)
+  // Emulator packet: revealArkadeScript = payTo(StageTwo, pot), inspects output 0.
+  emulator.addPacket(built.arkTx, [
+    { vin: 0, script: pot.revealArkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
+  ])
+  // Condition witness: the SHA256(playerSecret) preimage — publishes the secret so
+  // StageTwo's houseSettle can compute the winner.
+  addConditionWitness(built.arkTx, 0, [args.playerRevealBytes])
+  return built
+}
+
+/**
+ * Build the StageTwo SETTLE (Phase 2 stage 2) — the house settles the contest to
+ * the ACTUAL winner, using both now-on-chain reveals. The emulator computes the
+ * winner (the win-predicate) and pays them, so the house cannot cheat. Mirrors
+ * buildJointPotSettleTx but on the StageTwo covenant/output.
+ */
+export function buildStageTwoSettleTx(args: {
+  stageTwo: StageTwoScript
+  stageTwoOutpoint: Outpoint
+  winner: 'player' | 'creator'
+  winnerPayoutPkScript: Uint8Array
+  potAmount: bigint
+  playerRevealBytes: Uint8Array
+  creatorRevealBytes: Uint8Array
+  serverUnroll: CSVMultisigTapscript.Type
+}): BuiltJointPotTx {
+  const { stageTwo, stageTwoOutpoint, winner, winnerPayoutPkScript, potAmount } = args
+  if (potAmount <= 0n || potAmount !== BigInt(stageTwoOutpoint.value)) {
+    throw new Error(`buildStageTwoSettleTx: potAmount ${potAmount} must equal the StageTwo value ${stageTwoOutpoint.value}`)
+  }
+  const leaf = winner === 'player' ? stageTwo.playerWinCovenant() : stageTwo.creatorWinCovenant()
+  const arkadeScript = winner === 'player' ? stageTwo.playerWinFullArkadeScript : stageTwo.creatorWinFullArkadeScript
+  const input: ArkTxInput = {
+    txid: stageTwoOutpoint.txid, vout: stageTwoOutpoint.vout, value: stageTwoOutpoint.value,
+    tapLeafScript: leaf, tapTree: stageTwo.encode(),
+  }
+  const built = buildOffchainTx([input], [{ script: winnerPayoutPkScript, amount: potAmount }], args.serverUnroll)
+  patchCheckpointPrevout(built, stageTwo.pkScript)
+  emulator.addPacket(built.arkTx, [
+    { vin: 0, script: arkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
+  ])
+  packets.addRevealPacket(built.arkTx, packets.REVEAL_PLAYER_PACKET_TYPE, args.playerRevealBytes)
+  packets.addRevealPacket(built.arkTx, packets.REVEAL_CREATOR_PACKET_TYPE, args.creatorRevealBytes)
+  return built
+}
+
+/**
+ * Build the StageTwo TAKE-ALL (Phase 2 stage 2 fallback) — after settleWindow,
+ * the player sweeps the WHOLE pot via the `playerTakeAll` leaf. This is the
+ * credible threat that forces the house to settle honestly: a stalling house
+ * loses everything. Spends StageTwo via CSVMultisig[player, server, emu(payTo
+ * player)] @ settleWindow into payTo(player, pot).
+ */
+export function buildStageTwoTakeAllTx(args: {
+  stageTwo: StageTwoScript
+  stageTwoOutpoint: Outpoint
   playerPayoutPkScript: Uint8Array
   potAmount: bigint
   serverUnroll: CSVMultisigTapscript.Type
 }): BuiltJointPotTx {
-  const { pot, cofund } = args
-  // The pot is 1-input→1-output with no ark-tx fee: the payout MUST equal the
-  // pot value. Fail loud + early on a mismatch (cofund.value is a number).
-  if (args.potAmount <= 0n || args.potAmount !== BigInt(cofund.value)) {
-    throw new Error(`buildJointPotForfeitClaim: potAmount ${args.potAmount} must equal the pot value ${cofund.value}`)
+  const { stageTwo, stageTwoOutpoint } = args
+  if (args.potAmount <= 0n || args.potAmount !== BigInt(stageTwoOutpoint.value)) {
+    throw new Error(`buildStageTwoTakeAllTx: potAmount ${args.potAmount} must equal the StageTwo value ${stageTwoOutpoint.value}`)
   }
   const input: ArkTxInput = {
-    txid: cofund.txid, vout: cofund.vout, value: cofund.value,
-    tapLeafScript: pot.playerForfeit(), tapTree: pot.encode(),
+    txid: stageTwoOutpoint.txid, vout: stageTwoOutpoint.vout, value: stageTwoOutpoint.value,
+    tapLeafScript: stageTwo.playerTakeAll(), tapTree: stageTwo.encode(),
   }
   const built = buildOffchainTx([input], [{ script: args.playerPayoutPkScript, amount: args.potAmount }], args.serverUnroll)
-
-  const cp = built.checkpoints[0]
-  const cpIn = cp.getInput(0)
-  if (cpIn?.witnessUtxo) {
-    cp.updateInput(0, { witnessUtxo: { script: pot.pkScript, amount: cpIn.witnessUtxo.amount } })
-  }
-  // Emulator packet: forfeitArkadeScript = payTo(player, pot), inspects output 0.
+  patchCheckpointPrevout(built, stageTwo.pkScript)
   emulator.addPacket(built.arkTx, [
-    { vin: 0, script: pot.forfeitArkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
+    { vin: 0, script: stageTwo.takeAllArkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
   ])
   return built
 }

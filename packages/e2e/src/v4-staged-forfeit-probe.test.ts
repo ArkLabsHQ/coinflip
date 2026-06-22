@@ -14,7 +14,7 @@
 import { base64, hex } from '@scure/base'
 import { createHash } from 'crypto'
 import {
-  CoinflipJointPotScript, determineWinnerV3,
+  CoinflipJointPotScript, determineWinnerV3, getConditionWitness,
   buildPlayerRevealTx, buildStageTwoSettleTx, buildStageTwoTakeAllTx, encodeSettleForEmulator,
 } from 'arkade-coinflip'
 import {
@@ -228,5 +228,60 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
     const takeAllTxid = await playerSignAndPost(g.playerId, takeAll, 'stageTwoTakeAll')
     console.log('[v4-staged] stage 2b: player swept the whole pot', takeAllTxid)
     expect(await vtxoLanded(g.playerPayout, takeAllTxid, 2 * BET)).toBe(true)
+  }, 300_000)
+
+  // The house's defense against a losing player who skips /reveal then sweeps via
+  // takeAll: extract the player's 17-byte secret from the on-chain stage-1 reveal.
+  // Scan the StageTwo VTXO's ancestry witnesses for the element whose SHA256
+  // matches the committed player hash.
+  async function extractPlayerSecret(txid: string, playerHashHex: string): Promise<Uint8Array | undefined> {
+    const indexer = new RestIndexerProvider(ARK)
+    const txids: string[] = [txid]
+    try {
+      const chain = await indexer.getVtxoChain({ txid, vout: 0 })
+      for (const c of chain.chain) if (!txids.includes(c.txid)) txids.push(c.txid)
+    } catch (e) { console.warn('[extract] getVtxoChain failed:', String(e).slice(0, 140)) }
+    console.log('[extract] candidate txids:', txids.length)
+    for (const t of txids) {
+      let raws: string[] = []
+      try { raws = (await indexer.getVirtualTxs([t])).txs } catch (e) { console.warn('[extract] getVirtualTxs failed:', String(e).slice(0, 140)); continue }
+      for (const raw of raws) {
+        console.log('[extract] tx', t.slice(0, 8), 'head:', raw.slice(0, 12), 'len', raw.length)
+        // PSBT path: the SHA256 preimage rides in the ConditionWitness PSBT field
+        // (set by addConditionWitness), not the finalScriptWitness.
+        try {
+          const psbt = Transaction.fromPSBT(base64.decode(raw))
+          for (let i = 0; i < psbt.inputsLength; i++) {
+            const cw = getConditionWitness(psbt, i)
+            if (cw?.length) console.log('[extract]   in', i, 'conditionWitness elems:', cw.map((e) => e.length).join(','))
+            if (cw) for (const el of cw) if (el.length === 17 && hex.encode(sha(el)) === playerHashHex) return el
+          }
+        } catch { /* not a psbt — fall through to raw */ }
+        // Raw/finalized path: scan the witness stack.
+        let tx: Transaction | undefined
+        for (const dec of [() => Transaction.fromPSBT(base64.decode(raw)), () => Transaction.fromRaw(hex.decode(raw))]) {
+          try { tx = dec(); break } catch { /* try next decoder */ }
+        }
+        if (!tx) { console.warn('[extract] could not decode tx'); continue }
+        for (let i = 0; i < tx.inputsLength; i++) {
+          const w = tx.getInput(i).finalScriptWitness
+          if (!w) continue
+          for (const el of w) if (el.length === 17 && hex.encode(sha(el)) === playerHashHex) return el
+        }
+      }
+    }
+    return undefined
+  }
+
+  it('stage 1 publishes the player secret on-chain — the house can extract it', async () => {
+    if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
+    const g = await cofundPot()
+    const stageTwoTxid = await stageOneReveal(g)
+    expect(await vtxoLanded(g.pot.stageTwo.pkScript, stageTwoTxid, 2 * BET)).toBe(true)
+
+    const playerHashHex = hex.encode(sha(g.playerRevealBytes))
+    const extracted = await extractPlayerSecret(stageTwoTxid, playerHashHex)
+    console.log('[extract] result:', extracted ? hex.encode(extracted) : 'NOT FOUND', '| expected:', hex.encode(g.playerRevealBytes))
+    expect(extracted && hex.encode(extracted)).toBe(hex.encode(g.playerRevealBytes))
   }, 300_000)
 })

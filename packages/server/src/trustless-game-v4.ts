@@ -353,6 +353,23 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   if (k < 1) throw new Error(`Co-fund must include at least one player input (got ${total} inputs for ${m} house inputs)`)
   if (req.checkpoints.length !== total) throw new Error(`Co-fund must have ${total} checkpoints (got ${req.checkpoints.length})`)
 
+  // Guard 0: each of the trailing m house checkpoints must spend EXACTLY the
+  // reserved house outpoint, in order. The arkTx's trailing vins reference these
+  // checkpoints (Ark's checkpoint indirection — the vins are NOT the VTXO
+  // outpoints), so the checkpoint's spent VTXO is where we confirm the house
+  // signs only its reserved inputs. Guard 2 checks the contribution against the
+  // persisted state, not the tx, so without this a client could place other
+  // inputs at the trailing positions and have the house blindly sign them.
+  for (let i = 0; i < m; i++) {
+    const cp = Transaction.fromPSBT(base64.decode(req.checkpoints[k + i]))
+    const cpIn = cp.getInput(0)
+    const expected = state.houseInputs[i]
+    const cpTxid = cpIn?.txid ? hex.encode(cpIn.txid) : ''
+    if (cp.inputsLength !== 1 || cpTxid !== expected.txid || cpIn?.index !== expected.vout) {
+      throw new Error(`Co-fund house checkpoint ${k + i} does not spend the reserved house input ${expected.txid}:${expected.vout}`)
+    }
+  }
+
   // Guard 1: output 0 is the agreed pot — exact amount to the covenant script.
   const potOut = arkTx.getOutput(0)
   const potPkScript = ArkAddress.decode(state.potAddress).pkScript

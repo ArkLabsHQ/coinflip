@@ -202,19 +202,25 @@ export default defineComponent({
     // ── v0.4 joint-pot forfeit row (whole pot, client-built claim) ──────────
     const isV4Claiming = (b: StashedV4Forfeit) => !!claimingGames.value[b.gameId]
     const isV4AutoClaiming = (b: StashedV4Forfeit) => claimingGames.value[b.gameId]?.mode === 'auto'
-    const isV4Ready = (b: StashedV4Forfeit) => isCltvMatured(chainTime.value, b.forfeitClaimableAt)
+    // Stage 1 (publish the secret -> StageTwo) has no timelock, so it's always
+    // available; stage 2 (sweep the whole pot) needs the CLTV at finalExpiration.
+    const isV4Ready = (b: StashedV4Forfeit) =>
+      !b.stageTwoOutpoint || isCltvMatured(chainTime.value, b.forfeitClaimableAt)
 
     function v4StatusLabel(b: StashedV4Forfeit): string {
       if (isV4AutoClaiming(b)) return 'Auto-claiming…'
       if (chainTime.value === null) return 'Checking chain time…'
-      if (isV4Ready(b)) return 'Claimable now (joint pot)'
+      if (isV4Ready(b)) return b.stageTwoOutpoint ? 'Ready to sweep the pot' : 'Ready to contest the stall'
       const mins = Math.ceil((b.forfeitClaimableAt - chainTime.value) / 60)
-      return `Claimable in ~${mins} min (chain time)`
+      return `Sweepable in ~${mins} min (chain time)`
     }
     function v4Note(b: StashedV4Forfeit): string {
-      return isV4Ready(b)
-        ? 'The server never settled. You take the whole pot via the joint-pot forfeit leaf.'
-        : 'Settling — the operator completes this automatically, usually within a minute. This is your trustless backup if it stalls.'
+      if (b.stageTwoOutpoint) {
+        return isV4Ready(b)
+          ? 'Your secret is on-chain and the house never settled — sweep the whole pot to your wallet.'
+          : 'Your secret is on-chain (contest open). The house should settle to the winner; if it keeps stalling, you sweep the whole pot after the timelock.'
+      }
+      return 'The server never settled. Publish your secret on-chain to contest, then sweep the whole pot if it keeps stalling.'
     }
     function v4BtnLabel(b: StashedV4Forfeit): string {
       const info = claimingGames.value[b.gameId]
@@ -225,7 +231,7 @@ export default defineComponent({
       message.value = ''
       try {
         await store.dispatch('ark/claimV4Forfeit', { gameId, mode: 'manual' })
-        message.value = 'Full pot claimed via the joint-pot forfeit — funds returned to your wallet.'
+        message.value = 'Recovery step submitted — the whole pot returns to your wallet once the staged forfeit completes.'
       } catch (e: unknown) {
         message.value = e instanceof Error ? e.message : 'Forfeit failed'
       } finally {

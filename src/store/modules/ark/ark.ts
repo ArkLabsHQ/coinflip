@@ -15,7 +15,7 @@ import {
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
 // Subpath import (not the package root) so the browser bundle doesn't pull in
 // the v2 transactions module, which imports Node's `crypto`.
-import { buildCofundFromPlay, buildJointPotForfeitClaim } from 'arkade-coinflip/dist/joint-pot-tx'
+import { buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx } from 'arkade-coinflip/dist/joint-pot-tx'
 import { CoinflipJointPotScript } from 'arkade-coinflip/dist/joint-pot'
 import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
 import { initSwaps, destroySwaps } from '@/services/boltz'
@@ -1608,37 +1608,68 @@ const ark: Module<ArkState, RootState> = {
           playerStake: BigInt(cv.playerStake),
           houseStake: BigInt(cv.houseStake),
         })
-        const claim = buildJointPotForfeitClaim({
-          pot,
-          cofund: stash.potOutpoint,
+        // The staged-forfeit contest. Each leaf is [player, arkd, emu_tweaked]:
+        // sign our single player slot; arkd signs its slot; the emulator co-signs
+        // the tweaked slot after running its covenant. Same per checkpoint.
+        const signAndPostV4 = async (
+          built: { arkTx: Transaction; checkpoints: Transaction[] },
+          label: string,
+        ): Promise<string> => {
+          const signed = await identity.sign(built.arkTx, [0])
+          const checkpointTxs = await Promise.all(
+            built.checkpoints.map(async (c) => {
+              let s = c
+              try { s = await identity.sign(c, Array.from({ length: c.inputsLength }, (_, i) => i)) }
+              catch (e) { if (!getErrorMessage(e).includes('No taproot scripts signed')) throw e }
+              return base64.encode(s.toPSBT())
+            }),
+          )
+          const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ arkTx: base64.encode(signed.toPSBT()), checkpointTxs }),
+          })
+          if (!resp.ok) {
+            const text = await resp.text()
+            if (/locked|too early|CLTV|locktime/i.test(text)) {
+              throw new Error("Not claimable yet — the chain's block time hasn't reached the takeAll CLTV. Try again shortly.")
+            }
+            throw new Error(`Emulator rejected v0.4 ${label}: ${text}`)
+          }
+          return Transaction.fromPSBT(base64.decode((await resp.json() as { signedArkTx: string }).signedArkTx)).id
+        }
+
+        if (!stash.stageTwoOutpoint) {
+          // STAGE 1 — publish the player's secret on-chain (the ConditionMultisig
+          // leaf's SHA256 witness), moving the pot into the StageTwo contest.
+          // No timelock, so it pre-empts the house's refund. Persist the StageTwo
+          // outpoint; the stash stays until stage 2 sweeps it. From here the house's
+          // stage-2 poll settles to the winner, or — if the house stays dark — we
+          // sweep the whole pot at finalExpiration (stage 2 below).
+          const reveal = buildPlayerRevealTx({
+            pot,
+            cofund: stash.potOutpoint,
+            playerRevealBytes: hex.decode(stash.playerSecretHex),
+            serverUnroll,
+          })
+          const stageTwoTxid = await signAndPostV4(reveal, 'playerReveal (stage 1)')
+          await putV4Forfeit({
+            ...stash,
+            stageTwoOutpoint: { txid: stageTwoTxid, vout: 0, value: stash.potOutpoint.value },
+          })
+          return
+        }
+
+        // STAGE 2 — after finalExpiration (the CLTV), sweep the WHOLE pot to the
+        // player via the playerTakeAll leaf.
+        const takeAll = buildStageTwoTakeAllTx({
+          stageTwo: pot.stageTwo,
+          stageTwoOutpoint: stash.stageTwoOutpoint,
           playerPayoutPkScript: hex.decode(cv.playerPayoutPkScript),
-          potAmount: BigInt(stash.potOutpoint.value),
+          potAmount: BigInt(stash.stageTwoOutpoint.value),
           serverUnroll,
         })
-        // playerForfeit leaf = [player, arkd, emu_tweaked]: sign our single
-        // player slot; arkd signs its slot; the emulator co-signs the tweaked
-        // slot after running payTo. Same per checkpoint.
-        const signed = await identity.sign(claim.arkTx, [0])
-        const checkpointTxs = await Promise.all(
-          claim.checkpoints.map(async (c) => {
-            let s = c
-            try { s = await identity.sign(c, Array.from({ length: c.inputsLength }, (_, i) => i)) }
-            catch (e) { if (!getErrorMessage(e).includes('No taproot scripts signed')) throw e }
-            return base64.encode(s.toPSBT())
-          }),
-        )
-        const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ arkTx: base64.encode(signed.toPSBT()), checkpointTxs }),
-        })
-        if (!resp.ok) {
-          const text = await resp.text()
-          if (/locked|too early|CLTV|locktime/i.test(text)) {
-            throw new Error("Not claimable yet — the chain's block time hasn't reached the forfeit CLTV. Try again shortly.")
-          }
-          throw new Error(`Emulator rejected v0.4 forfeit: ${text}`)
-        }
+        await signAndPostV4(takeAll, 'playerTakeAll (stage 2)')
         // Whole pot swept to the player → drop the stash.
         await deleteV4Forfeit(gameId)
       } finally {
@@ -1709,7 +1740,18 @@ const ark: Module<ArkState, RootState> = {
             continue
           }
         } catch { /* server unreachable — fall through to the CLTV-gated claim */ }
-        if (!isCltvMatured(chainTime, v4.forfeitClaimableAt)) continue
+        // Two-stage timing. STAGE 1 (playerReveal) must fire BEFORE the house's
+        // refund (cancelDelay) so it pre-empts the split-back and we can later sweep
+        // the WHOLE pot (not just our stake back); STAGE 2 (playerTakeAll) needs the
+        // CLTV at finalExpiration. claimV4Forfeit picks the stage from the stash.
+        if (!v4.stageTwoOutpoint) {
+          // Give the house most of the pre-cancelDelay window to settle the happy
+          // path (which clears the stash), then contest before the refund fires.
+          const lead = Math.max(60, Math.floor((v4.covenant.finalExpiration - v4.covenant.cancelDelay) / 2))
+          if (chainTime === null || chainTime < v4.covenant.cancelDelay - lead) continue
+        } else if (!isCltvMatured(chainTime, v4.forfeitClaimableAt)) {
+          continue
+        }
         try {
           await dispatch('claimV4Forfeit', { gameId: v4.gameId, mode: 'auto' })
         } catch (e) {

@@ -58,13 +58,14 @@ export interface StashedV4Forfeit {
   forfeitClaimableAt: number
   /** Emulator base URL the signed claim is POSTed to (`/v1/tx`). */
   forfeitEmulatorUrl: string
-  /** Player's game secret (hex). NOT used by the current claim path — the
-   *  collaborative playerForfeit leaf is a bare payTo and reads no secret, and
-   *  v4 recovery presently REQUIRES a reachable emulator (there is no unilateral
-   *  client exit yet). Persisted only so a future on-chain `playerForfeitExit`
-   *  claim (player + emulator, after the CSV) could satisfy the leaf's
-   *  SHA256(secret) condition without re-deriving it. */
+  /** Player's game secret (hex). Stage 1 (`playerReveal`) publishes it on-chain as
+   *  the ConditionMultisig leaf's SHA256(secret) witness, moving the pot into the
+   *  StageTwo contest. REQUIRED for the staged-forfeit recovery. */
   playerSecretHex: string
+  /** Set after STAGE 1 succeeds: the StageTwo VTXO the pot moved into (the stage-1
+   *  txid, vout 0, whole-pot value). Its presence means stage 1 is done and the
+   *  recovery is waiting for finalExpiration to fire STAGE 2 (`playerTakeAll`). */
+  stageTwoOutpoint?: V4PotOutpoint
   createdAt: number
 }
 

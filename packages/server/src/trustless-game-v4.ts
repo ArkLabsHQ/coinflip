@@ -724,6 +724,12 @@ async function extractPlayerSecretFromChain(indexer: RestIndexerProvider, stageT
  * takeAll once finalExpiration passes.
  */
 export async function settleV4StageTwo(gameId: string, deps: AppDeps): Promise<{ settleTxid: string; winner: 'player' | 'house' }> {
+  // Serialize with handleV4Reveal on the SAME per-game lock so a /reveal and a
+  // reconcile tick can't both drive a settle for one game concurrently.
+  return revealLocks.runExclusive(gameId, () => settleV4StageTwoInner(gameId, deps))
+}
+
+async function settleV4StageTwoInner(gameId: string, deps: AppDeps): Promise<{ settleTxid: string; winner: 'player' | 'house' }> {
   const game = await deps.repos.games.get(gameId)
   if (!game) throw new Error('Game not found')
   const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
@@ -787,12 +793,17 @@ export async function reconcileV4StageTwo(deps: AppDeps): Promise<string[]> {
       const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(pot.stageTwo.pkScript)] })
       const live = vtxos.some((v) => v.value === state.pot && !v.isSpent)
       if (!live) {
-        // A SPENT StageTwo means the contest already concluded (the player swept via
-        // takeAll, or a prior tick settled it) — mark resolved so we stop re-checking
-        // it every tick. No StageTwo at all → not revealed; leave it for the refund.
+        // A SPENT StageTwo on a STILL-pending game means WE never settled it (a
+        // successful settleV4StageTwo would have marked it resolved with a winner) —
+        // so the player swept the whole pot via takeAll because the house failed to
+        // settle in time. Record it as a player win + ALARM: the house lost a
+        // winnable contest, most likely because the emulator/arkd was unreachable
+        // through finalExpiration. Mark resolved so we stop re-checking it every tick.
+        // No StageTwo at all → not revealed; leave it for the refund.
         if (vtxos.some((v) => v.value === state.pot)) {
+          console.warn(`[v4-stage2] game ${game.id}: StageTwo swept via takeAll before the house settled — house may have lost a winnable pot; check emulator/arkd liveness.`)
           reservations.release(game.id)
-          await deps.repos.games.update(game.id, { status: 'resolved' })
+          await deps.repos.games.update(game.id, { status: 'resolved', winner: 'player', payoutAmount: state.pot })
         }
         continue
       }

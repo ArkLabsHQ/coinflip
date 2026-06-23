@@ -1652,11 +1652,24 @@ const ark: Module<ArkState, RootState> = {
             playerRevealBytes: hex.decode(stash.playerSecretHex),
             serverUnroll,
           })
-          const stageTwoTxid = await signAndPostV4(reveal, 'playerReveal (stage 1)')
-          await putV4Forfeit({
-            ...stash,
-            stageTwoOutpoint: { txid: stageTwoTxid, vout: 0, value: stash.potOutpoint.value },
-          })
+          // Self-heal the crash window: if a PRIOR attempt already fired stage 1 but
+          // crashed before persisting stageTwoOutpoint (below), the cofund is now
+          // spent and this re-POST is rejected. Rather than loop on stage 1 forever,
+          // discover the StageTwo VTXO on-chain (exactly like the server's reconcile)
+          // and adopt it — so recovery advances to stage 2 WITHOUT depending on the
+          // server (the whole point of the client stash).
+          let stageTwoOutpoint: V4PotOutpoint
+          try {
+            const stageTwoTxid = await signAndPostV4(reveal, 'playerReveal (stage 1)')
+            stageTwoOutpoint = { txid: stageTwoTxid, vout: 0, value: stash.potOutpoint.value }
+          } catch (e) {
+            const indexer = new RestIndexerProvider(state.server)
+            const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(pot.stageTwo.pkScript)] })
+            const existing = vtxos.find((v) => v.value === stash.potOutpoint.value)
+            if (!existing) throw e // no StageTwo on-chain → a genuine failure, surface it
+            stageTwoOutpoint = { txid: existing.txid, vout: existing.vout, value: existing.value }
+          }
+          await putV4Forfeit({ ...stash, stageTwoOutpoint })
           return
         }
 

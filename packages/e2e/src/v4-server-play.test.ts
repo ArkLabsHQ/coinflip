@@ -507,6 +507,16 @@ describe('v4 server: handleV4Play', () => {
     // cancelDelay) opens. Advance the chain's MTP past cancelDelay first (arkd
     // rejects the CLTV spend until then).
     await setChainTime(cv.cancelDelay + 60, 14)
+    // The Ark server's chain-tip view lags bitcoind right after mining;
+    // reconcileV4Refunds gates on getChainTip().time, so wait for arkd to INDEX the
+    // advanced tip before reconciling. Otherwise the gate skips this game (the only
+    // pending one in CI's fresh DB), the broadcast never fires, and we'd be relying
+    // on flaky retries — the actual cause of the CI flake. Once the tip is indexed
+    // past cancelDelay, MTP is too, so arkd accepts the covenant refund's CLTV.
+    for (let i = 0; i < 60; i++) {
+      if ((await deps.wallet.onchainProvider.getChainTip()).time > cv.cancelDelay) break
+      await sleep(1000)
+    }
     const refundTxids = await server.reconcileV4Refunds(deps)
     expect(refundTxids.length).toBeGreaterThanOrEqual(1)
     const refundTxid = refundTxids[0]
@@ -621,7 +631,8 @@ describe('v4 server: handleV4Play', () => {
     }
     const vtxoLanded = async (pkScript: Uint8Array, txid: string): Promise<boolean> => {
       const pk = hex.encode(pkScript)
-      for (let i = 0; i < 20; i++) {
+      // 60s budget (see vtxoAt): a loaded CI runner can take >20s to settle + index a VTXO.
+      for (let i = 0; i < 60; i++) {
         const { vtxos } = await indexer3.getVtxos({ scripts: [pk] })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         if (vtxos.some((x: any) => x.txid === txid && x.value === 2 * BET)) return true
@@ -640,6 +651,13 @@ describe('v4 server: handleV4Play', () => {
     // waiting can't — CLTV is evaluated against MTP). NOTE: this freezes the
     // regtest clock, so this test must run isolated + the stack restarted after.
     await setChainTime(cv.finalExpiration + 60, 14)
+    // Same tip-sync lag as the refund path: wait for arkd to index the advanced tip
+    // past finalExpiration before the takeAll, so its CLTV is mature on the first post
+    // instead of relying on a jest-level retry.
+    for (let i = 0; i < 60; i++) {
+      if ((await deps.wallet.onchainProvider.getChainTip()).time > cv.finalExpiration) break
+      await sleep(1000)
+    }
 
     // Stage 2: after finalExpiration, the player sweeps the WHOLE pot.
     const takeAll = buildStageTwoTakeAllTx({
@@ -730,7 +748,10 @@ describe('v4 server: handleV4Play', () => {
     }
     const vtxoAt = async (pkScript: Uint8Array, txid: string): Promise<boolean> => {
       const pk = hex.encode(pkScript)
-      for (let i = 0; i < 20; i++) {
+      // 60s budget: a loaded CI runner can take well over 20s to settle + index the
+      // StageTwo / payout VTXO after the emulator post — this is the timeout-fragile
+      // assertion that flaked under load (passes in <20s locally).
+      for (let i = 0; i < 60; i++) {
         const { vtxos } = await indexer.getVtxos({ scripts: [pk] })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         if (vtxos.some((x: any) => x.txid === txid && x.value === 2 * BET)) return true

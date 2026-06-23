@@ -167,7 +167,10 @@ jobs:
           # handleTrustlessPlay throws "Emulator not configured".
           EMULATOR_URL: http://localhost:7073
           EMULATOR_PUBLIC_URL: http://localhost:7073
-        run: npx jest --runInBand --forceExit --testTimeout=300000 --ci
+        # The v4-staged-forfeit probe is clock-sensitive (spends fresh VTXOs), and the
+        # setChainTime tests in this pass advance the regtest MTP ~1h irreversibly — so
+        # the probe runs ISOLATED on a fresh stack below (issue #40). Exclude it here.
+        run: npx jest --runInBand --forceExit --testTimeout=300000 --ci --testPathIgnorePatterns "/node_modules/" "v4-staged-forfeit-probe"
 
       - name: Concurrent load test (100 games / 5 wallets)
         working-directory: packages/e2e
@@ -185,6 +188,26 @@ jobs:
           EMULATOR_URL: http://localhost:7073
           EMULATOR_PUBLIC_URL: http://localhost:7073
         run: npx jest --runInBand --forceExit --testTimeout=600000 src/load-100-games.test.ts
+
+      - name: Restart regtest before the clock-sensitive staged-forfeit probe
+        # The setChainTime tests above advance the regtest MTP ~1h to mature CLTV
+        # timelocks; the MTP can't be walked back (block timestamps must increase),
+        # so the probe (which spends fresh VTXOs) would inherit a future clock that
+        # expires them. A fresh stack resets the clock. See issue #40.
+        env:
+          ARKD_IMAGE: ghcr.io/arkade-os/arkd@sha256:c150be36424b6b81581f6f5e6d974d88a2bd4d97f918f9c5b1e9ed6360a80ac0
+          ARKD_WALLET_IMAGE: ghcr.io/arkade-os/arkd-wallet@sha256:52391b4a9b56ec9a9b2c64dc61907f74d052340b0f63fa91448a23e474433656
+        run: node arkade-regtest/regtest.mjs clean && node arkade-regtest/regtest.mjs start
+        timeout-minutes: 15
+
+      - name: Run staged-forfeit probe (fresh clock)
+        working-directory: packages/e2e
+        env:
+          ARK_SERVER_URL: http://localhost:7070
+          ESPLORA_URL: http://localhost:3000/api
+          EMULATOR_URL: http://localhost:7073
+          EMULATOR_PUBLIC_URL: http://localhost:7073
+        run: npx jest --runInBand --forceExit --testTimeout=300000 --ci src/v4-staged-forfeit-probe.test.ts
 
       - name: Capture logs on failure
         if: failure()

@@ -134,29 +134,39 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
       playerStake: BigInt(BET), houseStake: BigInt(BET),
     })
     const potAddr = pot.address(HRP, serverPub).pkScript
-    const pv = (await playerW.getVtxos())[0]
-    const hv = (await houseW.getVtxos())[0]
-    const cofund = buildOffchainTx([input(pv), input(hv)], [
-      { script: potAddr, amount: BigInt(2 * BET) },
-      { script: playerPayout, amount: BigInt(pv.value - BET) },
-      { script: housePayout, amount: BigInt(hv.value - BET) },
-    ], serverUnroll)
-    let cofundSigned = await playerId.sign(cofund.arkTx, [0])
-    cofundSigned = await houseId.sign(cofundSigned, [1])
-    const { arkTxid: cofundTxid, signedCheckpointTxs } = await arkProvider.submitTx(
-      base64.encode(cofundSigned.toPSBT()), cofund.checkpoints.map((c) => base64.encode(c.toPSBT())),
-    )
-    const finals: string[] = []
-    for (let i = 0; i < signedCheckpointTxs.length; i++) {
-      const tx = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[i]))
-      const owner = i === 0 ? playerId : houseId
-      let s = tx
-      try { s = await owner.sign(tx, Array.from({ length: tx.inputsLength }, (_, k) => k)) }
-      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
-      finals.push(base64.encode(s.toPSBT()))
+    // The player/house VTXO can RENEW between getVtxos() and finalizeTx, which
+    // invalidates the checkpoint signature (arkd: INVALID_SIGNATURE) — a CI-timing
+    // flake (passes locally). Re-fetch the fresh VTXO and rebuild the co-fund on retry.
+    for (let attempt = 0; ; attempt++) {
+      const pv = (await playerW.getVtxos())[0]
+      const hv = (await houseW.getVtxos())[0]
+      const cofund = buildOffchainTx([input(pv), input(hv)], [
+        { script: potAddr, amount: BigInt(2 * BET) },
+        { script: playerPayout, amount: BigInt(pv.value - BET) },
+        { script: housePayout, amount: BigInt(hv.value - BET) },
+      ], serverUnroll)
+      let cofundSigned = await playerId.sign(cofund.arkTx, [0])
+      cofundSigned = await houseId.sign(cofundSigned, [1])
+      const { arkTxid: cofundTxid, signedCheckpointTxs } = await arkProvider.submitTx(
+        base64.encode(cofundSigned.toPSBT()), cofund.checkpoints.map((c) => base64.encode(c.toPSBT())),
+      )
+      const finals: string[] = []
+      for (let i = 0; i < signedCheckpointTxs.length; i++) {
+        const tx = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[i]))
+        const owner = i === 0 ? playerId : houseId
+        let s = tx
+        try { s = await owner.sign(tx, Array.from({ length: tx.inputsLength }, (_, k) => k)) }
+        catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
+        finals.push(base64.encode(s.toPSBT()))
+      }
+      try {
+        await arkProvider.finalizeTx(cofundTxid, finals)
+        return { pot, cofundTxid, playerId, playerPayout, housePayout, playerRevealBytes, creatorRevealBytes, winner, finalExpiration: now + 3600 }
+      } catch (e) {
+        if (attempt >= 4 || !String(e).includes('INVALID_SIGNATURE')) throw e
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+      }
     }
-    await arkProvider.finalizeTx(cofundTxid, finals)
-    return { pot, cofundTxid, playerId, playerPayout, housePayout, playerRevealBytes, creatorRevealBytes, winner, finalExpiration: now + 3600 }
   }
 
   // Stage 1: player publishes the secret, pot -> StageTwo. Returns the StageTwo txid.

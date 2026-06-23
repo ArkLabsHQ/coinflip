@@ -13,6 +13,7 @@ import { HouseBusyError, BetExceedsCapacityError } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import { loadEmulatorConfig } from './emulator.js'
 import { newGameEscrowVersion } from './trustless-game.js'
+import { newGameProtocolVersion } from './trustless-game-v4.js'
 
 export function createPublicRoutes(deps: AppDeps): Router {
   const router = Router()
@@ -42,6 +43,12 @@ export function createPublicRoutes(deps: AppDeps): Router {
        * for verification.
        */
       escrowVersion: newGameEscrowVersion(),
+      /**
+       * Game protocol the client should drive — 'v3' (per-party escrow, the
+       * default) or 'v4' (joint pot, the /api/v4 flow). Opt-in via the server's
+       * PROTOCOL_VERSION env; the client routes to playV4Game when this is 'v4'.
+       */
+      protocolVersion: newGameProtocolVersion(),
     })
   })
 

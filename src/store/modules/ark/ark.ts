@@ -4,8 +4,8 @@ import type { State as RootState } from '@/store'
 import {
   Wallet, SingleKey, VtxoScript,
   ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
-  contractHandlers, RestIndexerProvider,
-  type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity,
+  contractHandlers, RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
+  type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity, type ArkTxInput,
 } from '@arkade-os/sdk'
 import {
   COINFLIP_ESCROW_TYPE,
@@ -13,14 +13,21 @@ import {
   registerCoinflipContracts,
 } from 'arkade-coinflip/contract'
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
+// Subpath import (not the package root) so the browser bundle doesn't pull in
+// the v2 transactions module, which imports Node's `crypto`.
+import { buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx } from 'arkade-coinflip/dist/joint-pot-tx'
+import { CoinflipJointPotScript } from 'arkade-coinflip/dist/joint-pot'
 import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
   forfeit as apiForfeit, getGame as apiGetGame,
-  type Outpoint, type ForfeitResponse,
+  v4Play, v4Cofund, v4CofundFinalize, v4Reveal,
+  type Outpoint, type ForfeitResponse, type V4CovenantParams,
 } from '@/services/api'
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
+import { resolveV4ForfeitStash, hasClaimableV4Forfeit, v4ClaimStage, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
+import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits } from './v4ForfeitStashStore'
 import { locateEscrowVtxo } from './locateEscrow'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
@@ -455,6 +462,50 @@ async function stashForfeitRecovery(
 }
 
 /**
+ * v0.4 analogue of `stashForfeitRecovery`. After the joint pot is co-funded,
+ * persist everything the client needs to reclaim it via the `playerForfeit`
+ * leaf should the server never settle. The claim is CLIENT-built from the
+ * covenant params, so all we need is the pot outpoint + covenant + the emulator
+ * URL — captured by the caller BEFORE the co-fund (playV4Game aborts pre-funding
+ * when it's absent). Crucially this does NOT re-fetch /api/network: that
+ * redundant fetch could fail transiently and, for v4 where the stash is the
+ * ONLY recovery (no v3-style self-refund), silently drop recovery for an
+ * already-funded pot. So a skip/write failure here is logged LOUDLY — but we
+ * still proceed to reveal, which on success makes the stash moot anyway.
+ */
+async function stashV4ForfeitRecovery(args: {
+  gameId: string
+  tier: number
+  potOutpoint: V4PotOutpoint
+  covenant: V4CovenantParams
+  expectedPayoutPkScriptHex: string
+  playerSecretHex: string
+  emulatorUrl: string | undefined
+}): Promise<void> {
+  const decision = resolveV4ForfeitStash({
+    emulatorUrl: args.emulatorUrl,
+    potOutpoint: args.potOutpoint,
+    covenant: args.covenant,
+    expectedPayoutPkScriptHex: args.expectedPayoutPkScriptHex,
+    playerSecretHex: args.playerSecretHex,
+  })
+  if (decision.kind === 'stash') {
+    try {
+      await putV4Forfeit({
+        ...decision.patch,
+        gameId: args.gameId,
+        tier: args.tier,
+        createdAt: Date.now(), // ms, matches the listStalledBets grace cutoff
+      })
+    } catch (e) {
+      console.error('[v4] CRITICAL: pot is funded but the recovery stash could not be written:', getErrorMessage(e))
+    }
+  } else {
+    console.error(`[v4] CRITICAL: forfeit not stashed for a funded pot (${decision.reason})`)
+  }
+}
+
+/**
  * Best-effort: mark a finished bet's player-escrow contract `inactive` so the
  * ContractWatcher stops watching it ("bet done → deactivate"). No-op when the
  * stash lacks an escrow address or the ContractManager is unavailable; never
@@ -571,7 +622,12 @@ async function chainTipTime(): Promise<number | null> {
   try {
     const tip = await sdkWallet.onchainProvider.getChainTip()
     return tip.time
-  } catch {
+  } catch (e) {
+    // A persistent failure here strands every claim button on "Checking chain
+    // time…" — isCltvMatured(null, …) is always false, so a matured, claimable
+    // pot stays unreachable in the UI. Surface it rather than swallowing; the
+    // claim is still valid and proceeds once the read recovers.
+    console.warn('[ark] chain-tip read failed; claim-readiness gating is stalled until it recovers:', getErrorMessage(e))
     return null
   }
 }
@@ -1199,6 +1255,145 @@ const ark: Module<ArkState, RootState> = {
       return result
     },
 
+    /**
+     * Play one v0.4 JOINT-POT game end-to-end (opt-in: the server advertises
+     * `protocolVersion: 'v4'` on /api/network). Two on-chain txs:
+     *   1. POST /api/v4/play — the house reserves stake VTXO(s) and returns the
+     *      joint-pot covenant params + its serialized stake inputs.
+     *   2. Build the atomic co-fund (the player's stake VTXOs + the house's, both
+     *      arbitrary in count, → one joint pot) with the lib's `buildCofundFromPlay`;
+     *      sign our leading input vins and run the 2-round handshake — POST /cofund
+     *      (server signs the trailing house vins + submits, returns our checkpoints)
+     *      → sign them → POST /cofund-finalize (creates the pot).
+     *   3. POST /api/v4/reveal — the server settles the WHOLE pot to the winner.
+     * Returns { winner, settleTxid, payout, roll, houseSecretHex }.
+     *
+     * NOTE: v0.4 stake-recovery (the covenant's cooperative-refund + unilateral
+     * exit leaves) has no client claim flow yet — a stalled co-fund/reveal throws
+     * with guidance. Only the happy path is wired; recovery is a follow-up.
+     */
+    async playV4Game(
+      { state, rootState },
+      { tier, side, oddsN, oddsTarget, oddsLo, emulatorUrl }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number; emulatorUrl?: string },
+    ) {
+      const { wallet, privateKey } = requireWalletAndKey(rootState)
+      const playerPubkey = rootState.wallet.publicKey
+      if (!playerPubkey) throw new Error('No wallet public key available')
+      const playerAddress = state.arkAddress
+      if (!playerAddress) throw new Error('No Ark address available — wallet still connecting?')
+      // v4 recovery (the playerForfeit claim) is submitted to the emulator, and
+      // for v4 the forfeit stash is the ONLY recovery. Refuse to fund a pot we
+      // couldn't recover: abort BEFORE any funds move if no emulator is known.
+      if (!emulatorUrl) {
+        throw new Error('v0.4 needs a reachable emulator for trustless recovery — aborting before any funds move.')
+      }
+
+      const identity = SingleKey.fromHex(privateKey)
+      const arkInfo = await wallet.arkProvider.getInfo()
+      const serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+
+      // Player reveal — same `[digit] ‖ salt` shape as v3. Coin → n=2, digit
+      // side=heads→0 / tails→1; variable-odds → uniform in [0, oddsN).
+      const isVariable = oddsN !== undefined && oddsTarget !== undefined
+      const n = isVariable ? (oddsN as number) : 2
+      const digit = isVariable ? uniformRandomInt(n) : (side === 'tails' ? 1 : 0)
+      const reveal = v3CommitDigit(digit, n)
+      const secretBytes = cwpPackets.encodeReveal(reveal.digit, reveal.salt)
+      const playerSecretHex = hex.encode(secretBytes)
+      const playerHash = await createHash(secretBytes)
+
+      // The co-fund spends the player's OWN stake inputs (the leading vins). Pick
+      // enough spendable VTXOs (largest-first) to cover the tier — one or many.
+      const spendable = (await wallet.getVtxos())
+        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed')
+        .sort((a: ExtendedVirtualCoin, b: ExtendedVirtualCoin) => b.value - a.value)
+      const playerVtxos: ExtendedVirtualCoin[] = []
+      let playerSum = 0
+      for (const v of spendable) {
+        if (playerSum >= tier) break
+        playerVtxos.push(v)
+        playerSum += v.value
+      }
+      if (playerSum < tier) {
+        throw new Error(`Insufficient spendable balance for a ${tier}-sat bet (have ${playerSum}) — top up or settle to consolidate, then retry.`)
+      }
+
+      // 1. /play — reserve the house stake + get the covenant params.
+      const playRes = await v4Play(
+        tier, playerPubkey, playerHash, playerAddress, playerAddress,
+        isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number, oddsLo: oddsLo ?? 0 } : undefined,
+      )
+
+      // 2. Build the atomic co-fund (player inputs = our own VTXOs; house inputs
+      // rebuilt from the /play response) and run the 2-round signing handshake.
+      const playerInputs: ArkTxInput[] = playerVtxos.map((v) => ({
+        txid: v.txid, vout: v.vout, value: v.value,
+        tapLeafScript: v.forfeitTapLeafScript, tapTree: v.tapTree,
+      }))
+      const cof = buildCofundFromPlay({
+        play: playRes,
+        playerInputs,
+        playerChangePkScript: ArkAddress.decode(playerAddress).pkScript,
+        betAmount: tier,
+        serverUnroll,
+      })
+      // Sign our input vins — the LEADING k.
+      const k = playerInputs.length
+      const arkTxSigned = await identity.sign(cof.arkTx, Array.from({ length: k }, (_, i) => i))
+      const cofundRes = await v4Cofund(
+        playRes.gameId,
+        base64.encode(arkTxSigned.toPSBT()),
+        cof.checkpoints.map((c) => base64.encode(c.toPSBT())),
+      )
+      // Sign each of our checkpoints (the server returns the leading k), then finalize.
+      const signedPlayerCheckpoints = await Promise.all(
+        cofundRes.playerCheckpoints.map(async (cpB64) => {
+          const cp = Transaction.fromPSBT(base64.decode(cpB64))
+          let s = cp
+          try { s = await identity.sign(cp, Array.from({ length: cp.inputsLength }, (_, i) => i)) }
+          catch (e) { if (!getErrorMessage(e).includes('No taproot scripts signed')) throw e }
+          return base64.encode(s.toPSBT())
+        }),
+      )
+      const finRes = await v4CofundFinalize(playRes.gameId, signedPlayerCheckpoints)
+
+      // Stash the forfeit recovery BEFORE revealing. If the server stalls on the
+      // settle, this is the player's claim to the WHOLE pot once the CLTV (the
+      // game's finalExpiration) matures — player + arkd + emulator, no operator.
+      await stashV4ForfeitRecovery({
+        gameId: playRes.gameId,
+        tier,
+        potOutpoint: finRes.potOutpoint,
+        covenant: playRes.covenant,
+        expectedPayoutPkScriptHex: hex.encode(ArkAddress.decode(playerAddress).pkScript),
+        playerSecretHex,
+        emulatorUrl, // captured before the co-fund (checked non-empty above)
+      })
+
+      // 3. Reveal → the server settles the whole pot to the winner. On success
+      // the pot is spent, so the recovery stash is moot; clear it best-effort
+      // (the auto-claim poll GCs it anyway if this misses).
+      const result = await v4Reveal(playRes.gameId, playerSecretHex)
+      await deleteV4Forfeit(playRes.gameId).catch(() => { /* leave for poll GC */ })
+      return result
+    },
+
+    /**
+     * Place a bet via whichever trustless flow the server advertises — v0.3
+     * per-party escrow (default) or v0.4 joint pot when `protocolVersion: 'v4'`
+     * is set on /api/network. The single entry point the UI dispatches; v0.4 is
+     * strictly opt-in, so existing deployments keep playing v0.3 untouched.
+     */
+    async placeTrustlessBet(
+      { dispatch },
+      payload: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
+    ) {
+      const net = await getNetwork()
+      return net.protocolVersion === 'v4'
+        ? dispatch('playV4Game', { ...payload, emulatorUrl: net.emulator?.url })
+        : dispatch('playTrustlessGame', payload)
+    },
+
     /** Locally-stashed stalled bets (escrows reclaimable if the server stalled). */
     async listStalledBets(): Promise<StashedRefund[]> {
       // Hide stashes < 90 s old: a fresh stash exists from /play through /commit
@@ -1211,6 +1406,16 @@ const ark: Module<ArkState, RootState> = {
       const RECENT_GRACE_MS = 90_000
       const cutoff = Date.now() - RECENT_GRACE_MS
       return (await loadRefunds()).filter((b) => b.createdAt <= cutoff)
+    },
+
+    /**
+     * v0.4 joint-pot forfeits eligible for the recovery UI. Same 90 s grace as
+     * listStalledBets — on the happy path the stash exists only briefly (≈100 ms
+     * between co-fund and settle), so anything older is a genuine stall.
+     */
+    async listV4StalledBets(): Promise<StashedV4Forfeit[]> {
+      const cutoff = Date.now() - 90_000
+      return (await loadV4Forfeits()).filter((b) => b.createdAt <= cutoff)
     },
 
     /**
@@ -1347,6 +1552,145 @@ const ark: Module<ArkState, RootState> = {
     },
 
     /**
+     * v0.4 recovery: reclaim the WHOLE joint pot via the playerForfeit leaf when
+     * the server never settled. Unlike v3 (which submits a server-built PSBT),
+     * the claim is rebuilt CLIENT-side from the stashed covenant — reconstruct
+     * the pot, spend the playerForfeit leaf into payTo(player, pot), sign our
+     * slot, and POST to the emulator (it co-signs the tweaked slot; arkd signs
+     * its slot and forwards). Valid only once chain time crosses the CLTV — an
+     * early submission is rejected, surfaced here as a friendly "not claimable yet".
+     */
+    async claimV4Forfeit(
+      { state, rootState, commit },
+      payload: string | { gameId: string; mode?: ClaimMode },
+    ) {
+      const { gameId, mode } = parseClaimPayload(payload)
+      if (state.claimingGames[gameId]) {
+        throw new Error('A claim is already in progress for this game.')
+      }
+      const { wallet, privateKey } = requireWalletAndKey(rootState)
+      // Set the in-flight flag BEFORE the stash read so the guard above is a
+      // true mutex — otherwise the 15 s auto-claim poll can slip a second
+      // submission in during the await below (manual-vs-auto double-submit).
+      commit('SET_CLAIMING', { gameId, info: { kind: 'forfeit', mode } })
+      try {
+        const stash = (await loadV4Forfeits()).find((s) => s.gameId === gameId)
+        if (!stash || !hasClaimableV4Forfeit(stash)) {
+          throw new Error('No v0.4 forfeit stashed for this game.')
+        }
+        // Re-assert the payout binding at claim time. IDB is not a trust
+        // boundary and the auto-claim poll fires this without user consent, so a
+        // tampered/corrupt stash must not sweep the pot to a foreign address.
+        if (!state.arkAddress) throw new Error('Wallet address unavailable for forfeit claim.')
+        const expectedPayout = hex.encode(ArkAddress.decode(state.arkAddress).pkScript)
+        if (stash.covenant.playerPayoutPkScript !== expectedPayout) {
+          throw new Error('v0.4 forfeit refused: the stashed pot does not pay this wallet (tampered or corrupt stash).')
+        }
+        const identity = SingleKey.fromHex(privateKey)
+        const arkInfo = await wallet.arkProvider.getInfo()
+        const serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
+        const cv = stash.covenant
+        const pot = new CoinflipJointPotScript({
+          creatorPubkey: hex.decode(cv.creatorPubkey),
+          playerPubkey: hex.decode(cv.playerPubkey),
+          serverPubkey: hex.decode(cv.serverPubkey),
+          creatorHash: hex.decode(cv.creatorHash),
+          playerHash: hex.decode(cv.playerHash),
+          finalExpiration: BigInt(cv.finalExpiration),
+          cancelDelay: BigInt(cv.cancelDelay),
+          exitDelay: BigInt(cv.exitDelay),
+          oddsN: cv.oddsN,
+          oddsTarget: cv.oddsTarget,
+          oddsLo: cv.oddsLo,
+          emulatorPubkey: hex.decode(cv.emulatorPubkey),
+          playerPayoutPkScript: hex.decode(cv.playerPayoutPkScript),
+          housePayoutPkScript: hex.decode(cv.housePayoutPkScript),
+          playerStake: BigInt(cv.playerStake),
+          houseStake: BigInt(cv.houseStake),
+        })
+        // The staged-forfeit contest. Each leaf is [player, arkd, emu_tweaked]:
+        // sign our single player slot; arkd signs its slot; the emulator co-signs
+        // the tweaked slot after running its covenant. Same per checkpoint.
+        const signAndPostV4 = async (
+          built: { arkTx: Transaction; checkpoints: Transaction[] },
+          label: string,
+        ): Promise<string> => {
+          const signed = await identity.sign(built.arkTx, [0])
+          const checkpointTxs = await Promise.all(
+            built.checkpoints.map(async (c) => {
+              let s = c
+              try { s = await identity.sign(c, Array.from({ length: c.inputsLength }, (_, i) => i)) }
+              catch (e) { if (!getErrorMessage(e).includes('No taproot scripts signed')) throw e }
+              return base64.encode(s.toPSBT())
+            }),
+          )
+          const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ arkTx: base64.encode(signed.toPSBT()), checkpointTxs }),
+          })
+          if (!resp.ok) {
+            const text = await resp.text()
+            if (/locked|too early|CLTV|locktime/i.test(text)) {
+              throw new Error("Not claimable yet — the chain's block time hasn't reached the takeAll CLTV. Try again shortly.")
+            }
+            throw new Error(`Emulator rejected v0.4 ${label}: ${text}`)
+          }
+          return Transaction.fromPSBT(base64.decode((await resp.json() as { signedArkTx: string }).signedArkTx)).id
+        }
+
+        if (!stash.stageTwoOutpoint) {
+          // STAGE 1 — publish the player's secret on-chain (the ConditionMultisig
+          // leaf's SHA256 witness), moving the pot into the StageTwo contest.
+          // No timelock, so it pre-empts the house's refund. Persist the StageTwo
+          // outpoint; the stash stays until stage 2 sweeps it. From here the house's
+          // stage-2 poll settles to the winner, or — if the house stays dark — we
+          // sweep the whole pot at finalExpiration (stage 2 below).
+          const reveal = buildPlayerRevealTx({
+            pot,
+            cofund: stash.potOutpoint,
+            playerRevealBytes: hex.decode(stash.playerSecretHex),
+            serverUnroll,
+          })
+          // Self-heal the crash window: if a PRIOR attempt already fired stage 1 but
+          // crashed before persisting stageTwoOutpoint (below), the cofund is now
+          // spent and this re-POST is rejected. Rather than loop on stage 1 forever,
+          // discover the StageTwo VTXO on-chain (exactly like the server's reconcile)
+          // and adopt it — so recovery advances to stage 2 WITHOUT depending on the
+          // server (the whole point of the client stash).
+          let stageTwoOutpoint: V4PotOutpoint
+          try {
+            const stageTwoTxid = await signAndPostV4(reveal, 'playerReveal (stage 1)')
+            stageTwoOutpoint = { txid: stageTwoTxid, vout: 0, value: stash.potOutpoint.value }
+          } catch (e) {
+            const indexer = new RestIndexerProvider(state.server)
+            const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(pot.stageTwo.pkScript)] })
+            const existing = vtxos.find((v) => v.value === stash.potOutpoint.value)
+            if (!existing) throw e // no StageTwo on-chain → a genuine failure, surface it
+            stageTwoOutpoint = { txid: existing.txid, vout: existing.vout, value: existing.value }
+          }
+          await putV4Forfeit({ ...stash, stageTwoOutpoint })
+          return
+        }
+
+        // STAGE 2 — after finalExpiration (the CLTV), sweep the WHOLE pot to the
+        // player via the playerTakeAll leaf.
+        const takeAll = buildStageTwoTakeAllTx({
+          stageTwo: pot.stageTwo,
+          stageTwoOutpoint: stash.stageTwoOutpoint,
+          playerPayoutPkScript: hex.decode(cv.playerPayoutPkScript),
+          potAmount: BigInt(stash.stageTwoOutpoint.value),
+          serverUnroll,
+        })
+        await signAndPostV4(takeAll, 'playerTakeAll (stage 2)')
+        // Whole pot swept to the player → drop the stash.
+        await deleteV4Forfeit(gameId)
+      } finally {
+        commit('CLEAR_CLAIMING', gameId)
+      }
+    },
+
+    /**
      * One pass over every stashed game: if its CLTV has matured and no
      * claim is in flight, fire the better one (forfeit > refund) with
      * `mode: 'auto'`. Backgrounded by `autoClaimTimer`; also safe to
@@ -1389,6 +1733,37 @@ const ark: Module<ArkState, RootState> = {
             `[auto-claim] ${stash.gameId} failed:`,
             getErrorMessage(e),
           )
+        }
+      }
+
+      // v0.4 joint-pot forfeits live in their own store + claim path. The happy
+      // path clears the stash on settle, so a lingering one is almost always a
+      // genuine stall — fire the client-built claim once the CLTV matures.
+      for (const v4 of await loadV4Forfeits()) {
+        if (state.claimingGames[v4.gameId]) continue
+        if (!hasClaimableV4Forfeit(v4)) continue
+        // Positive GC ONLY: if the server settled this game normally, drop the
+        // stale stash. We must NOT infer "settled" from a claim-error string —
+        // a transient emulator rejection can carry "spent"/"not found" and would
+        // otherwise delete a still-claimable pot (lost recovery). The resolved
+        // check is the sole authority that removes a stash here.
+        try {
+          if ((await apiGetGame(v4.gameId)).status === 'resolved') {
+            await deleteV4Forfeit(v4.gameId)
+            continue
+          }
+        } catch { /* server unreachable — fall through to the CLTV-gated claim */ }
+        // Two-stage timing (pure + unit-tested as v4ClaimStage): STAGE 1 fires
+        // BEFORE cancelDelay (pre-empting the refund so we can sweep the WHOLE pot,
+        // not just our stake), STAGE 2 at finalExpiration. claimV4Forfeit picks the
+        // matching stage from the stash's stageTwoOutpoint.
+        if (v4ClaimStage(v4, chainTime) === 'wait') continue
+        try {
+          await dispatch('claimV4Forfeit', { gameId: v4.gameId, mode: 'auto' })
+        } catch (e) {
+          // Keep the stash on ANY claim error and retry next tick — erring
+          // toward keeping the recovery record is the only safe bias for a pot.
+          console.warn(`[auto-claim:v4] ${v4.gameId} failed (will retry):`, getErrorMessage(e))
         }
       }
     },

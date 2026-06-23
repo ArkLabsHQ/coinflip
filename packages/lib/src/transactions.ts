@@ -14,7 +14,6 @@ import {
   Transaction,
   ConditionWitness,
   setArkPsbtField,
-  getArkPsbtFields,
 } from '@arkade-os/sdk'
 import { CoinflipEscrowScript, VARIABLE_ODDS_BASE_LEN, type CoinflipEscrowOptions } from './script'
 import { Game } from './types'
@@ -506,24 +505,6 @@ export function generateVariableSecret(n: number): Uint8Array {
   return randomBytes(VARIABLE_ODDS_BASE_LEN + digit)
 }
 
-/**
- * Add condition witness (secrets) to a transaction for cashout.
- */
-export function addConditionWitness(
-  tx: Transaction,
-  inputIndex: number,
-  witnesses: Uint8Array[]
-): void {
-  setArkPsbtField(tx, inputIndex, ConditionWitness, witnesses)
-}
-
-/**
- * Get condition witness from a transaction.
- */
-export function getConditionWitness(
-  tx: Transaction,
-  inputIndex: number
-): Uint8Array[] | undefined {
-  const witnesses = getArkPsbtFields(tx, inputIndex, ConditionWitness)
-  return witnesses.length > 0 ? witnesses[0] : undefined
-}
+// addConditionWitness + getConditionWitness moved to ./condition-witness — they're
+// crypto-free, so the browser bundle (which imports the v4 builders from
+// joint-pot-tx) can use them without dragging in this module's Node `crypto` import.

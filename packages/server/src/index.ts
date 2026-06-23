@@ -25,6 +25,8 @@ import { contractHandlers } from '@arkade-os/sdk'
 import { registerCoinflipContracts } from 'arkade-coinflip'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
+import { createV4Routes } from './v4-routes.js'
+import { startV4RefundTimer } from './trustless-game-v4.js'
 import { createAdminRoutes } from './admin/routes.js'
 import type { AppDeps } from './deps.js'
 
@@ -55,8 +57,30 @@ export {
   type TrustlessForfeitResult,
   type Outpoint,
 } from './trustless-game.js'
+export {
+  handleV4Play,
+  handleV4Cofund,
+  handleV4CofundFinalize,
+  handleV4Reveal,
+  broadcastV4Refund,
+  reconcileV4Refunds,
+  settleV4StageTwo,
+  reconcileV4StageTwo,
+  newGameProtocolVersion,
+  type V4PlayRequest,
+  type V4PlayResult,
+  type V4CovenantParams,
+  type V4State,
+  type V4CofundRequest,
+  type V4CofundResult,
+  type V4CofundFinalizeRequest,
+  type V4CofundFinalizeResult,
+  type V4RevealRequest,
+  type V4RevealResult,
+} from './trustless-game-v4.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'
+export { createV4Routes } from './v4-routes.js'
 export { createAdminRoutes } from './admin/routes.js'
 export type { AppDeps } from './deps.js'
 
@@ -132,6 +156,11 @@ async function main() {
   // matures, so abandoned games don't slowly lock up house funds.
   startEscrowRecoveryTimer(deps)
 
+  // v4: refund (split the pot back) any co-funded joint-pot game whose player
+  // never revealed, once past cancelDelay — the house's protection against the
+  // never-reveal griefing vector, pre-empting the player's forfeit.
+  startV4RefundTimer(deps)
+
   // Subscribe to the ContractManager so a house escrow's `vtxo_spent` event
   // reconciles its game eagerly (the failsafe timer above still backstops it).
   startContractWatch(deps)
@@ -150,6 +179,7 @@ async function main() {
   })
 
   publicApp.use(createPublicRoutes(deps))
+  publicApp.use(createV4Routes(deps))
 
   // Single-image mode: when CLIENT_DIR is set (the bundled image), the public
   // port also serves the built Vue client + an SPA fallback, so the player gets

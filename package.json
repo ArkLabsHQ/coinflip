@@ -10,7 +10,8 @@
     "build": "vue-cli-service build",
     "lint": "vue-cli-service lint",
     "test:unit": "vitest run",
-    "test:unit:watch": "vitest"
+    "test:unit:watch": "vitest",
+    "test:live": "vitest run --config vitest.live.config.ts"
   },
   "dependencies": {
     "@3d-dice/dice-box-threejs": "^0.0.12",
@@ -49,6 +50,7 @@
     "@vue/eslint-config-typescript": "^11.0.3",
     "eslint": "^8.42.0",
     "eslint-plugin-vue": "^9.14.1",
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
     "sass": "^1.63.4",
     "sass-loader": "^13.3.2",

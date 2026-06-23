@@ -64,10 +64,12 @@ export {
   determineVariableWinner,
   generateVariableSecret,
   computeVariableRoll,
-  addConditionWitness,
-  getConditionWitness,
   type BuiltOffchainTx,
 } from './transactions'
+
+// ConditionWitness PSBT-field helpers — split out of transactions.ts (crypto-free,
+// so the browser bundle can import them via joint-pot-tx without Node `crypto`).
+export { addConditionWitness, getConditionWitness } from './condition-witness'
 
 // Coin selection — see `coinselect.ts` for the note on the SDK's
 // internal `selectVirtualCoins` and why we keep our own greedy variant.
@@ -97,6 +99,7 @@ export {
   arkadeScriptHash,
   computeArkadeScriptPublicKey,
   buildForfeitArkadeScript,
+  buildSplitArkadeScript,
   buildForfeitLeafSpec,
   type ForfeitLeafSpec,
   encodeEmulatorWitness,
@@ -118,6 +121,38 @@ export {
   CoinflipEscrowScriptV3,
   type CoinflipEscrowOptionsV3,
 } from './script-v3'
+
+// v0.4 joint-pot taptree — see joint-pot.ts module header.
+export {
+  CoinflipJointPotScript,
+  type CoinflipJointPotOptions,
+} from './joint-pot'
+
+// v0.4 Phase 2 staged-forfeit StageTwo taptree — see joint-pot-stage2.ts header.
+export {
+  StageTwoScript,
+  type StageTwoOptions,
+} from './joint-pot-stage2'
+
+// v0.4 joint-pot tx builders (co-fund + settle) — see joint-pot-tx.ts header.
+export {
+  buildJointPotCofundTx,
+  buildJointPotSettleTx,
+  buildPlayerRevealTx,
+  buildStageTwoSettleTx,
+  buildStageTwoTakeAllTx,
+  buildJointPotRefundTx,
+  jointPotCofundOutputs,
+  encodeSettleForEmulator,
+  serializeTapLeaf,
+  deserializeTapLeaf,
+  buildCofundFromPlay,
+  type BuiltJointPotTx,
+  type Outpoint,
+  type SerializedTapLeaf,
+  type SerializedHouseInput,
+  type PlayResponseForCofund,
+} from './joint-pot-tx'
 
 // v0.3 transaction-building helpers — see transactions-v3.ts module header.
 export {

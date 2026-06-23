@@ -12,6 +12,7 @@
  * package directly.
  */
 
+import { OP } from '@scure/btc-signer'
 import { covenants, emulator } from '@arklabshq/contract-workflows-prototype'
 
 /**
@@ -55,6 +56,31 @@ export function buildForfeitArkadeScript(
     return covenants.atomicSweep(recipientPkScript, payAmount, otherStakeValue)
   }
   return covenants.payTo(recipientPkScript, payAmount)
+}
+
+/**
+ * Build the REFUND split covenant — asserts the spending tx pays EXACTLY the
+ * player's stake to `playerPkScript` (at the witness's first output index) AND
+ * the house's stake to `housePkScript` (at the second index, checked first).
+ * The emulator co-signs only a tx that makes BOTH outputs, so the refund needs
+ * no pre-signing — the covenant alone guarantees the fair split-back.
+ *
+ * Composes two `payTo` bodies: the house output is VERIFY'd (its bool consumed)
+ * so the player output's check is the script's final result.
+ *
+ *   Witness: `[playerOutputIndex, houseOutputIndex]` (house index on top of the
+ *   stack at script start, so it's checked first — matches `atomicSweep`'s
+ *   "second witness item on top" convention).
+ */
+export function buildSplitArkadeScript(
+  playerPkScript: Uint8Array,
+  playerAmount: bigint,
+  housePkScript: Uint8Array,
+  houseAmount: bigint,
+): Uint8Array {
+  const houseBody = covenants.payTo(housePkScript, houseAmount) // ends OP_EQUAL
+  const playerBody = covenants.payTo(playerPkScript, playerAmount) // ends OP_EQUAL
+  return new Uint8Array([...houseBody.slice(0, -1), OP.EQUALVERIFY, ...playerBody])
 }
 
 /**

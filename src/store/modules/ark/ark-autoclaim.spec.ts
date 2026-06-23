@@ -2,13 +2,14 @@ import { describe, it, expect, vi } from 'vitest'
 import ark from './ark'
 
 // The happy-path orchestration of claimV4Forfeit (build -> sign -> POST -> stash
-// update) can't be unit-tested here: it goes through requireWalletAndKey, which
-// reads the module-level `sdkWallet` singleton set only by the connect flow (no
-// test hook). That path is covered by the proven lib flow (v4-server-play staged
-// forfeit) + the unit-tested timing (v4ClaimStage); a live-browser smoke-test is
-// the follow-up. What IS reachable without a wallet are the SAFETY GUARDS that run
-// BEFORE the wallet is touched — and they're the highest-risk bit for a pot claim
-// (no double-submit, no stuck in-flight flag).
+// update) goes through requireWalletAndKey, which reads the module-level
+// `sdkWallet` singleton set only by the connect flow — so a PURE unit test can't
+// reach it. That full path IS exercised by ark-recovery.live.spec.ts (a real
+// connect under vitest drives both stages against the local stack; run via
+// `npm run test:live`), and by the proven lib flow (v4-server-play staged forfeit)
+// + the unit-tested timing (v4ClaimStage). What's reachable WITHOUT a wallet here
+// are the SAFETY GUARDS that run BEFORE the wallet is touched — the highest-risk
+// bit for a pot claim (no double-submit, no stuck in-flight flag).
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const claimV4Forfeit = (ark as any).actions.claimV4Forfeit as (

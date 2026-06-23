@@ -64,10 +64,12 @@ export {
   determineVariableWinner,
   generateVariableSecret,
   computeVariableRoll,
-  addConditionWitness,
-  getConditionWitness,
   type BuiltOffchainTx,
 } from './transactions'
+
+// ConditionWitness PSBT-field helpers — split out of transactions.ts (crypto-free,
+// so the browser bundle can import them via joint-pot-tx without Node `crypto`).
+export { addConditionWitness, getConditionWitness } from './condition-witness'
 
 // Coin selection — see `coinselect.ts` for the note on the SDK's
 // internal `selectVirtualCoins` and why we keep our own greedy variant.

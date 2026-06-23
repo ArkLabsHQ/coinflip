@@ -22,7 +22,7 @@ import {
 import { emulator, packets } from '@arklabshq/contract-workflows-prototype'
 import { CoinflipJointPotScript } from './joint-pot'
 import { StageTwoScript } from './joint-pot-stage2'
-import { addConditionWitness } from './transactions'
+import { addConditionWitness } from './condition-witness'
 
 /** A built (unsigned) offchain tx: the round tx + one checkpoint per input. */
 export interface BuiltJointPotTx {

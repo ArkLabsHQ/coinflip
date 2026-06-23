@@ -106,6 +106,16 @@ jobs:
           node-version: '22'
 
       - name: Start regtest environment
+        env:
+          # Pin arkd/arkd-wallet to the last-good DIGEST. The .env.defaults tag
+          # `:v0.9.9-rc.1` is mutable and was re-pushed upstream with a regression
+          # that rejects the co-fund checkpoint signatures (INVALID_SIGNATURE) — the
+          # local cache + the prior green CI run use sha c150be36, but ghcr now serves
+          # a different digest for the same tag. Pinning the digest makes the existing
+          # version-pin immutable; the step env wins over .env.defaults (see
+          # arkade-regtest/lib/env.mjs). Remove once the upstream rc tag is fixed.
+          ARKD_IMAGE: ghcr.io/arkade-os/arkd@sha256:c150be36424b6b81581f6f5e6d974d88a2bd4d97f918f9c5b1e9ed6360a80ac0
+          ARKD_WALLET_IMAGE: ghcr.io/arkade-os/arkd-wallet@sha256:52391b4a9b56ec9a9b2c64dc61907f74d052340b0f63fa91448a23e474433656
         run: node arkade-regtest/regtest.mjs start
         timeout-minutes: 15
 

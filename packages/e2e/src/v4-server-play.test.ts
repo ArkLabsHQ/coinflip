@@ -275,7 +275,8 @@ describe('v4 server: handleV4Play', () => {
     const indexer = new RestIndexerProvider(ARK_SERVER_URL)
     const potPk = hex.encode(ArkAddress.decode(res.potAddress).pkScript)
     let found = false
-    for (let i = 0; i < 20 && !found; i++) {
+    // 60s budget (see vtxoAt): a loaded CI runner can take >20s to index the pot VTXO.
+    for (let i = 0; i < 60 && !found; i++) {
       const { vtxos } = await indexer.getVtxos({ scripts: [potPk] })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if (vtxos.some((x: any) => x.txid === finRes.cofundTxid && x.value === 2 * BET)) found = true
@@ -294,7 +295,8 @@ describe('v4 server: handleV4Play', () => {
     const winnerAddr = revealRes.winner === 'player' ? await playerW.getAddress() : await deps.wallet.getAddress()
     const winnerPk = hex.encode(ArkAddress.decode(winnerAddr).pkScript)
     let settled = false
-    for (let i = 0; i < 20 && !settled; i++) {
+    // 60s budget (see vtxoAt): a loaded CI runner can take >20s to index the settle VTXO.
+    for (let i = 0; i < 60 && !settled; i++) {
       const { vtxos } = await indexer.getVtxos({ scripts: [winnerPk] })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if (vtxos.some((x: any) => x.txid === revealRes.settleTxid && x.value === 2 * BET)) settled = true
@@ -378,7 +380,8 @@ describe('v4 server: handleV4Play', () => {
     const indexer2 = new RestIndexerProvider(ARK_SERVER_URL)
     const potPk = hex.encode(ArkAddress.decode(res.potAddress).pkScript)
     let found = false
-    for (let i = 0; i < 20 && !found; i++) {
+    // 60s budget (see vtxoAt): a loaded CI runner can take >20s to index the pot VTXO.
+    for (let i = 0; i < 60 && !found; i++) {
       const { vtxos } = await indexer2.getVtxos({ scripts: [potPk] })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if (vtxos.some((x: any) => x.txid === finRes.cofundTxid && x.value === 2 * BET)) found = true
@@ -528,7 +531,8 @@ describe('v4 server: handleV4Play', () => {
     const housePk = hex.encode(ArkAddress.decode(await deps.wallet.getAddress()).pkScript)
     let playerBack = false
     let houseBack = false
-    for (let i = 0; i < 20 && !(playerBack && houseBack); i++) {
+    // 60s budget (see vtxoAt): a loaded CI runner can take >20s to index the split-back VTXOs.
+    for (let i = 0; i < 60 && !(playerBack && houseBack); i++) {
       const [pRes, hRes] = await Promise.all([
         indexer.getVtxos({ scripts: [playerPk] }),
         indexer.getVtxos({ scripts: [housePk] }),

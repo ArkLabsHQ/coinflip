@@ -71,6 +71,7 @@ import { hashSecret, networkHrpFromArkInfo, ARK_SERVER_URL } from './house-walle
 import { reservations, selectionMutex, freeHouseVtxos, HouseBusyError, BetExceedsCapacityError, KeyedMutex, outpointKey, pickEscrowVtxos, houseVtxoCache } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import { loadEmulatorConfig } from './emulator.js'
+import { makeLogDedup } from './log-dedup.js'
 import type { GameRow } from './repositories/types.js'
 
 export interface Outpoint { txid: string; vout: number; value: number }
@@ -1261,6 +1262,10 @@ export async function handleTrustlessForfeit(
   }
 }
 
+// Dedup the per-game reclaim-failure log so a sustained backend outage doesn't
+// spam every tick (logs first/changed, re-logs ~5 min); cleared on a reclaim.
+const recoveryLog = makeLogDedup()
+
 /**
  * Reclaim orphaned HOUSE escrows for stalled (expired) games whose refund CLTV
  * (finalExpiration) has matured. The per-party model means each side reclaims
@@ -1333,6 +1338,7 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
       // Bet done (house stake reclaimed) → stop watching its house escrow.
       await deactivateHouseEscrowContract(deps, hex.encode(houseEscrowScriptPkScript))
       recovered++
+      recoveryLog.clear(game.id) // reclaimed -> drop any suppressed-error state
       console.log(`[recovery] reclaimed house escrow for stalled game ${game.id} (${state.houseEscrow.value} sats), txid ${txid}`)
     } catch (err) {
       // Most likely the CLTV isn't accepted yet or the escrow was already spent.
@@ -1348,7 +1354,8 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
       //
       // Leave the game for a later pass rather than marking it reclaimed — if it
       // was a transient CLTV rejection the next scheduled run will succeed.
-      console.warn(`[recovery] house escrow reclaim failed for game ${game.id}:`, err instanceof Error ? err.message : err)
+      const msg = `[recovery] house escrow reclaim failed for game ${game.id}: ${err instanceof Error ? err.message : String(err)}`
+      if (recoveryLog.shouldLog(game.id, msg)) console.warn(msg)
     }
   }
   if (recovered > 0) console.log(`[recovery] reclaimed ${recovered} orphaned house escrow(s)`)

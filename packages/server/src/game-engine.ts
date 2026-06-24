@@ -7,6 +7,7 @@ import {
   houseVtxoCache,
 } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
+import { makeLogDedup } from './log-dedup.js'
 
 /**
  * Convert SDK ExtendedVirtualCoin to lib VtxoInput.
@@ -177,11 +178,13 @@ export function shouldRenew(expiringVtxoCount: number, boardingTotalSats: number
  */
 export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.Timeout {
   let renewing = false
+  const renewalLog = makeLogDedup()
   const tick = async () => {
     if (renewing) return
     renewing = true
     try {
       const [balance, all] = await Promise.all([deps.wallet.getBalance(), deps.wallet.getVtxos()])
+      renewalLog.clear('renewal') // backend reachable -> reset so a future failure logs fresh
       const { dropped } = selectableHouseVtxos(all) // VTXOs expiring within the buffer
       if (!shouldRenew(dropped.length, balance.boarding.total)) return
       console.log(`[renewal] settling: ${dropped.length} expiring VTXO(s), boarding ${balance.boarding.total} sats`)
@@ -196,7 +199,8 @@ export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.T
         )
       }
     } catch (err) {
-      console.warn('[renewal] tick failed:', err instanceof Error ? err.message : err)
+      const msg = `[renewal] tick failed: ${err instanceof Error ? err.message : String(err)}`
+      if (renewalLog.shouldLog('renewal', msg)) console.warn(msg)
     } finally {
       renewing = false
     }

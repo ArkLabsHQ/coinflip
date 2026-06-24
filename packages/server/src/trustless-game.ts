@@ -1089,9 +1089,11 @@ async function resettleCommittedGameLocked(game: GameRow, state: TrustlessState,
     reservations.release(game.id)
     await deactivateHouseEscrowContract(deps, ctx.houseEscrowPkScriptHex)
     console.log(`[reconcile] re-settled committed game ${game.id} (winner ${ctx.winner}, tx ${resolveTxid})`)
+    loopLog.clear(`resettle:${game.id}`)
     return 1
   } catch (e) {
-    console.warn(`[reconcile] re-settle of ${game.id} failed (retry next tick): ${e instanceof Error ? e.message : e}`)
+    const m = `[reconcile] re-settle of ${game.id} failed (retry next tick): ${e instanceof Error ? e.message : String(e)}`
+    if (loopLog.shouldLog(`resettle:${game.id}`, m)) console.warn(m)
     return 0
   }
 }
@@ -1262,9 +1264,10 @@ export async function handleTrustlessForfeit(
   }
 }
 
-// Dedup the per-game reclaim-failure log so a sustained backend outage doesn't
-// spam every tick (logs first/changed, re-logs ~5 min); cleared on a reclaim.
-const recoveryLog = makeLogDedup()
+// Dedup the reconcile/recovery loop's failure logs so a sustained backend outage
+// (the every-2-min tick) doesn't repeat the same line. Logs first/changed, re-logs
+// an unchanged one ~every 5 min, clears on success. Keys are namespaced per source.
+const loopLog = makeLogDedup()
 
 /**
  * Reclaim orphaned HOUSE escrows for stalled (expired) games whose refund CLTV
@@ -1338,7 +1341,7 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
       // Bet done (house stake reclaimed) → stop watching its house escrow.
       await deactivateHouseEscrowContract(deps, hex.encode(houseEscrowScriptPkScript))
       recovered++
-      recoveryLog.clear(game.id) // reclaimed -> drop any suppressed-error state
+      loopLog.clear(`recovery:${game.id}`) // reclaimed -> drop any suppressed-error state
       console.log(`[recovery] reclaimed house escrow for stalled game ${game.id} (${state.houseEscrow.value} sats), txid ${txid}`)
     } catch (err) {
       // Most likely the CLTV isn't accepted yet or the escrow was already spent.
@@ -1355,7 +1358,7 @@ export async function recoverOrphanedHouseEscrows(deps: AppDeps): Promise<number
       // Leave the game for a later pass rather than marking it reclaimed — if it
       // was a transient CLTV rejection the next scheduled run will succeed.
       const msg = `[recovery] house escrow reclaim failed for game ${game.id}: ${err instanceof Error ? err.message : String(err)}`
-      if (recoveryLog.shouldLog(game.id, msg)) console.warn(msg)
+      if (loopLog.shouldLog(`recovery:${game.id}`, msg)) console.warn(msg)
     }
   }
   if (recovered > 0) console.log(`[recovery] reclaimed ${recovered} orphaned house escrow(s)`)
@@ -1491,9 +1494,11 @@ async function reconcileGame(game: GameRow, deps: AppDeps, indexer: IndexerProvi
           ? `[reconcile] R1 forfeit player win ${fresh.id} resolved (player swept the pot, tx ${v.arkTxId})`
           : `[reconcile] crash-mid-sweep house win ${fresh.id} resolved (escrow spent by ${v.spentBy ?? 'unknown'})`,
       )
+      loopLog.clear(`spentcheck:${fresh.id}`)
       return 1
     } catch (err) {
-      console.warn(`[reconcile] spent-check failed for game ${fresh.id}:`, err instanceof Error ? err.message : err)
+      const m = `[reconcile] spent-check failed for game ${fresh.id}: ${err instanceof Error ? err.message : String(err)}`
+      if (loopLog.shouldLog(`spentcheck:${fresh.id}`, m)) console.warn(m)
       return 0
     }
   })
@@ -1550,11 +1555,19 @@ export function startContractWatch(deps: AppDeps): () => void {
  */
 export function startEscrowRecoveryTimer(deps: AppDeps, intervalMs = 120_000): NodeJS.Timeout {
   const tick = async () => {
-    await reconcilePendingSweeps(deps).catch((e) =>
-      console.error('[reconcile] tick failed:', e instanceof Error ? e.message : e),
+    await reconcilePendingSweeps(deps).then(
+      () => loopLog.clear('reconcile-tick'),
+      (e) => {
+        const m = `[reconcile] tick failed: ${e instanceof Error ? e.message : String(e)}`
+        if (loopLog.shouldLog('reconcile-tick', m)) console.error(m)
+      },
     )
-    await recoverOrphanedHouseEscrows(deps).catch((e) =>
-      console.error('[recovery] tick failed:', e instanceof Error ? e.message : e),
+    await recoverOrphanedHouseEscrows(deps).then(
+      () => loopLog.clear('recovery-tick'),
+      (e) => {
+        const m = `[recovery] tick failed: ${e instanceof Error ? e.message : String(e)}`
+        if (loopLog.shouldLog('recovery-tick', m)) console.error(m)
+      },
     )
   }
   setTimeout(tick, 5_000)

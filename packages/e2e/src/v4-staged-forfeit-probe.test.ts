@@ -23,7 +23,7 @@ import {
   Transaction, ArkAddress, type ArkInfo, type ArkProvider, type ArkTxInput,
 } from '@arkade-os/sdk'
 import { packets } from '@arklabshq/contract-workflows-prototype'
-import { faucet, setChainTime, resetChainTime } from './helpers'
+import { faucet, setChainTime, resetChainTime, waitVtxos } from './helpers'
 
 const ARK = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA = process.env.ESPLORA_URL || 'http://localhost:3000/api'
@@ -67,6 +67,9 @@ async function fund(w: Wallet): Promise<void> {
 function input(v: { txid: string; vout: number; value: number; forfeitTapLeafScript: unknown; tapTree: Uint8Array }): ArkTxInput {
   return { txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript as ArkTxInput['tapLeafScript'], tapTree: v.tapTree }
 }
+
+// Net inherent real-stack co-fund transients (VTXO renew/expire mid-co-fund), as v4-server-play does. See #40.
+jest.retryTimes(2, { logErrorsBeforeRetry: true })
 
 describe('v4 Phase 2 spike: staged-forfeit contest', () => {
   let arkAvailable = false
@@ -138,8 +141,8 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
     // invalidates the checkpoint signature (arkd: INVALID_SIGNATURE) — a CI-timing
     // flake (passes locally). Re-fetch the fresh VTXO and rebuild the co-fund on retry.
     for (let attempt = 0; ; attempt++) {
-      const pv = (await playerW.getVtxos())[0]
-      const hv = (await houseW.getVtxos())[0]
+      const pv = (await waitVtxos(playerW))[0]
+      const hv = (await waitVtxos(houseW))[0]
       const cofund = buildOffchainTx([input(pv), input(hv)], [
         { script: potAddr, amount: BigInt(2 * BET) },
         { script: playerPayout, amount: BigInt(pv.value - BET) },

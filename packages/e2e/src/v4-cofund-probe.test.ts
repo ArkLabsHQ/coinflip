@@ -16,7 +16,7 @@ import {
   decodeTapscript, buildOffchainTx, CSVMultisigTapscript, Transaction, ArkAddress,
   type ArkInfo, type ArkProvider, type ArkTxInput, type Identity,
 } from '@arkade-os/sdk'
-import { faucet } from './helpers'
+import { faucet, waitVtxos } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
@@ -59,6 +59,9 @@ function vtxoInput(v: { txid: string; vout: number; value: number; forfeitTapLea
   return { txid: v.txid, vout: v.vout, value: v.value, tapLeafScript: v.forfeitTapLeafScript as ArkTxInput['tapLeafScript'], tapTree: v.tapTree }
 }
 
+// Net inherent real-stack co-fund transients (VTXO renew/expire mid-co-fund), as v4-server-play does. See #40.
+jest.retryTimes(2, { logErrorsBeforeRetry: true })
+
 describe('v4 spike: two-party atomic co-fund', () => {
   let arkAvailable = false
   let arkProvider: ArkProvider
@@ -83,8 +86,8 @@ describe('v4 spike: two-party atomic co-fund', () => {
     await fundAndSettle(playerW)
     await fundAndSettle(houseW)
 
-    const pv = (await playerW.getVtxos())[0]
-    const hv = (await houseW.getVtxos())[0]
+    const pv = (await waitVtxos(playerW))[0]
+    const hv = (await waitVtxos(houseW))[0]
     // Joint-pot output stand-in: send 2*BET to the player's address (the OUTPUT
     // covenant is irrelevant to THIS question — we only test whether a 2-input,
     // 2-signer offchain tx submits+finalizes at all). Change back to each owner.

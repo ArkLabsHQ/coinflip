@@ -20,7 +20,7 @@ import {
   Transaction, ArkAddress, type ArkInfo, type ArkProvider, type ArkTxInput, type Identity,
 } from '@arkade-os/sdk'
 import { packets } from '@arklabshq/contract-workflows-prototype'
-import { faucet } from './helpers'
+import { faucet, waitVtxos } from './helpers'
 
 const ARK = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA = process.env.ESPLORA_URL || 'http://localhost:3000/api'
@@ -53,6 +53,9 @@ function withArkLock<T>(fn: () => Promise<T>): Promise<T> {
   arkLock = ARK_GAP > 0 ? run.then(() => sleep(ARK_GAP), () => sleep(ARK_GAP)) : run.catch(() => undefined)
   return run
 }
+
+// Net inherent real-stack co-fund transients (VTXO renew/expire mid-co-fund), as v4-server-play does. See #40.
+jest.retryTimes(2, { logErrorsBeforeRetry: true })
 
 describe('v4 scale: many concurrent joint-pot games', () => {
   let ok = false
@@ -135,7 +138,7 @@ describe('v4 scale: many concurrent joint-pot games', () => {
       // getVtxos() returns WALLET-enriched VTXOs (forfeitTapLeafScript + tapTree,
       // which the raw indexer response omits and toInput/buildOffchainTx need) —
       // for both the input spent here and the freshly-split stakes re-fetched below.
-      const big = (await w.getVtxos()).sort((a, b) => b.value - a.value)[0]
+      const big = (await waitVtxos(w)).sort((a, b) => b.value - a.value)[0]
       const outs = Array.from({ length: take }, () => ({ script: selfPk, amount: BigInt(PER_VTXO) }))
       const change = big.value - take * PER_VTXO
       if (change > 330) outs.push({ script: selfPk, amount: BigInt(change) })

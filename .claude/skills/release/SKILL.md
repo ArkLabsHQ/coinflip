@@ -75,4 +75,4 @@ The bump commit is package.json-only, so its e2e matches the prior green commit 
 - **`git tag vX.Y.Z`** (lightweight) → `fatal: no tag message?` — repo forces annotated. Use `git tag -a … -m …`.
 - **`gh release create --notes "…"`** with backticks fails in the shell — use `--notes-file`.
 - Direct `git push origin master` is allowed (no PR for the bump). Stage **only** `package.json`.
-- Any push to master triggers the full ~15min e2e (no path filter yet) — expected, not an error.
+- A **code** push to master triggers the full ~15min e2e; **docs-only** pushes (`**.md`, `.claude/**`, `docs/**`) skip it via `paths-ignore` in `e2e.yml`. `docker.yml` is left unfiltered (it still rebuilds images on any master push) to keep the `v*` tag-build safe.

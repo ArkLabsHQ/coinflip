@@ -3,6 +3,15 @@ name: E2E Tests
 on:
   push:
     branches: [master, refactor/extract-coinflip-library]
+    # Docs/skills/markdown don't affect the e2e — skip the ~15min run when a push
+    # touches ONLY these paths. Any code file in the same push still triggers the
+    # full suite (paths-ignore skips only when EVERY changed file matches).
+    # Push-only on purpose: PRs still run it, so a skipped-but-required check can't
+    # block a docs PR's merge.
+    paths-ignore:
+      - '**.md'
+      - '.claude/**'
+      - 'docs/**'
   pull_request:
     branches: [master]
 

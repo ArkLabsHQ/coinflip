@@ -71,6 +71,29 @@ export async function settleWithRetry(wallet: Wallet, tries = 3): Promise<void> 
 }
 
 /**
+ * Poll a wallet's spendable VTXOs until at least one is present, then return
+ * them. Co-funds index `(await w.getVtxos())[0]`, but a VTXO can briefly vanish
+ * while the Ark server renews/re-syncs it under CI timing — indexing [0] then
+ * yields `undefined` ("Cannot read properties of undefined (reading 'txid')").
+ * Waiting it out makes the co-fund deterministic; the per-test jest.retryTimes
+ * net covers the rarer mid-co-fund renewal (stale checkpoint signature).
+ */
+export async function waitVtxos(
+  wallet: Wallet,
+  timeoutMs = 30_000,
+): Promise<Awaited<ReturnType<Wallet['getVtxos']>>> {
+  const start = Date.now()
+  for (;;) {
+    const vtxos = await wallet.getVtxos()
+    if (vtxos.length > 0) return vtxos
+    if (Date.now() - start >= timeoutMs) {
+      throw new Error(`waitVtxos: no spendable VTXO after ${timeoutMs}ms`)
+    }
+    await sleep(1500)
+  }
+}
+
+/**
  * Fund a wallet using the nigiri faucet + Ark settlement.
  * 1. Send BTC to the wallet's boarding address via faucet
  * 2. Mine blocks

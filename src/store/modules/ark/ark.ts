@@ -33,6 +33,13 @@ import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
 import { getErrorMessage } from '@/utils/errors'
 import { isCltvMatured } from '@/utils/cltv'
+import {
+  buildActivities,
+  boardingResolver,
+  gameActivityResolver,
+  type Activity,
+  type CoinflipGameRecord,
+} from '@/utils/activityHistory'
 
 /** VtxoInput shape expected by the server's /api/play endpoint. */
 export interface VtxoInput {
@@ -215,6 +222,8 @@ interface ArkState {
   arkAddress: string | null
   boardingAddress: string | null
   txHistory: TxHistoryEntry[]
+  /** Grouped activity view of txHistory (local engine; see utils/activityHistory). */
+  activityHistory: Activity[]
   claimingGames: Record<string, ClaimingInfo>
 }
 
@@ -654,6 +663,7 @@ const ark: Module<ArkState, RootState> = {
     arkAddress: null,
     boardingAddress: null,
     txHistory: [],
+    activityHistory: [],
     claimingGames: {},
   },
 
@@ -702,6 +712,9 @@ const ark: Module<ArkState, RootState> = {
     },
     SET_TX_HISTORY(state, history: TxHistoryEntry[]) {
       state.txHistory = history
+    },
+    SET_ACTIVITY_HISTORY(state, activities: Activity[]) {
+      state.activityHistory = activities
     },
     SET_CLAIMING(state, { gameId, info }: { gameId: string; info: ClaimingInfo }) {
       state.claimingGames = { ...state.claimingGames, [gameId]: info }
@@ -1025,14 +1038,40 @@ const ark: Module<ArkState, RootState> = {
         // commitmentTxid / boardingTxid — flatten to a single best-effort txid
         // and an `isBoarding` flag for the UI.
         const history = await sdkWallet.getTransactionHistory()
-        commit('SET_TX_HISTORY', history.map((tx) => ({
+        const entries: TxHistoryEntry[] = history.map((tx) => ({
           txid: tx.key.arkTxid || tx.key.commitmentTxid || tx.key.boardingTxid,
           type: tx.type,
           amount: tx.amount,
           settled: tx.settled,
           createdAt: tx.createdAt,
           isBoarding: !!tx.key.boardingTxid && !tx.key.arkTxid,
-        })))
+        }))
+        commit('SET_TX_HISTORY', entries)
+        // Group the flat history into activities (a dice game's co-fund + settle
+        // collapse into one "Dice game" row) via the local engine. Replace with
+        // wallet.getActivityHistory() when the SDK ships it on coinflip's line.
+        const games: CoinflipGameRecord[] = (() => {
+          try {
+            const raw = JSON.parse(localStorage.getItem('gameHistory') || '[]')
+            return (Array.isArray(raw) ? raw : [])
+              .filter((g) => g?.id && Array.isArray(g.txids) && g.txids.length)
+              .map((g) => ({
+                id: String(g.id),
+                tier: Number(g.tier) || 0,
+                winner: g.winner ?? null,
+                txids: g.txids,
+              }))
+          } catch {
+            return []
+          }
+        })()
+        commit(
+          'SET_ACTIVITY_HISTORY',
+          await buildActivities(entries, [
+            gameActivityResolver(() => games),
+            boardingResolver(),
+          ]),
+        )
       } catch (error) {
         console.error('Failed to refresh history:', error)
       }
@@ -1375,7 +1414,9 @@ const ark: Module<ArkState, RootState> = {
       // (the auto-claim poll GCs it anyway if this misses).
       const result = await v4Reveal(playRes.gameId, playerSecretHex)
       await deleteV4Forfeit(playRes.gameId).catch(() => { /* leave for poll GC */ })
-      return result
+      // Surface the on-chain txids so the activity history can collapse this
+      // game's wallet transactions (co-fund + settle) into one "Dice game" row.
+      return { ...result, cofundTxid: finRes.potOutpoint.txid }
     },
 
     /**
@@ -1797,6 +1838,7 @@ const ark: Module<ArkState, RootState> = {
     },
     walletBalance: (state) => state.walletBalance,
     txHistory: (state) => state.txHistory,
+    activityHistory: (state) => state.activityHistory,
     networkPreset: (state) => state.networkPreset,
     networkPresets: () => NETWORK_PRESETS,
   }

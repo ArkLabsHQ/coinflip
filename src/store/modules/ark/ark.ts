@@ -19,6 +19,7 @@ import { buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx } from
 import { CoinflipJointPotScript } from 'arkade-coinflip/dist/joint-pot'
 import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
 import { initSwaps, destroySwaps } from '@/services/boltz'
+import { singleFlight } from '@/utils/singleFlight'
 import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
   forfeit as apiForfeit, getGame as apiGetGame,
@@ -330,9 +331,17 @@ async function submitOffchain(
 
 // SDK wallet instance (kept outside Vuex state to avoid reactivity issues with complex objects)
 let sdkWallet: Wallet | null = null
-// Guards the manual boarding settle so concurrent refreshBalance calls don't
-// fire overlapping settlement rounds (settlementConfig is false — see Wallet.create).
-let settling = false
+// Run at most ONE boarding-settle round at a time. settlementConfig is false (see
+// Wallet.create), so the client settles boarding itself — from BOTH the auto-settle
+// in refreshBalance AND the manual `settle` action. Two concurrent sdkWallet.settle()
+// calls register competing intents for the same boarding UTXO; arkd settles one and
+// the other hangs forever (the button awaiting it never clears). singleFlight funnels
+// both through one round so a second caller reuses it instead of racing.
+const settleOnce = singleFlight((eventCallback?: (event: unknown) => void): Promise<string> => {
+  const w = sdkWallet
+  if (!w) return Promise.reject(new Error('Wallet not connected'))
+  return w.settle(undefined, eventCallback as never)
+})
 // Auto-reconnect backoff: a failed connect (slow load, arkd blip, reconnect
 // after a redeploy) schedules a retry with capped exponential backoff so the
 // client heals itself instead of stranding the user on "not connected".
@@ -984,13 +993,10 @@ const ark: Module<ArkState, RootState> = {
         // settlementConfig is false, so the SDK won't auto-settle boarding.
         // Settle it ourselves once funds land (guarded against concurrency).
         // Fire-and-forget: the round is slow; the next refresh shows the result.
-        if (balance.boarding.total > 0 && !settling) {
-          settling = true
-          const w = sdkWallet
-          w.settle()
+        if (balance.boarding.total > 0 && !settleOnce.active) {
+          settleOnce()
             .then(() => dispatch('refreshBalance', { light: true }))
             .catch((e) => console.warn('boarding settle failed:', e))
-            .finally(() => { settling = false })
         }
 
         // Hot-path (watcher-driven) refreshes are LIGHT: the balance is all the
@@ -1091,7 +1097,8 @@ const ark: Module<ArkState, RootState> = {
     async settle(_ctx, params?: { eventCallback?: (event: unknown) => void }) {
       if (!sdkWallet) throw new Error('Wallet not connected')
 
-      const txid = await sdkWallet.settle(undefined, params?.eventCallback as never)
+      // Reuse an in-flight auto-settle instead of racing it (overlapping rounds hang).
+      const txid = await settleOnce(params?.eventCallback)
 
       await _ctx.dispatch('refreshBalance')
 

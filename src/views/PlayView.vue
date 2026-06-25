@@ -571,8 +571,8 @@ export default defineComponent({
           )
         }
         const [result] = await Promise.all([
-          // Routes to v0.3 (per-party escrow) or v0.4 (joint pot) by the server's
-          // advertised protocolVersion — v0.4 is opt-in, so this is v0.3 by default.
+          // Routes to v0.4 (joint pot) or v0.3 (per-party escrow) by the server's
+          // advertised protocolVersion — v0.4 is the default; PROTOCOL_VERSION=v3 opts out.
           store.dispatch('ark/placeTrustlessBet', {
             tier: selectedTier.value,
             oddsN: bet.n, oddsTarget: bet.target, oddsLo: bet.lo,

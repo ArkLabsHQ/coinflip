@@ -50,7 +50,7 @@ describe("gameActivityResolver", () => {
 
   it("groups every tx of a game as one 'Dice game' activity; leaves others flat", async () => {
     const txs = [
-      tx("cofund4", { type: "SENT", amount: -10000, createdAt: 1 }),
+      tx("cofund4", { type: "SENT", amount: 10000, createdAt: 1 }),
       tx("settle4", { type: "RECEIVED", amount: 19000, createdAt: 2 }),
       tx("deposit", { isBoarding: true, amount: 50000, createdAt: 3 }),
     ];
@@ -66,6 +66,20 @@ describe("gameActivityResolver", () => {
 
     const deposit = acts.find((a) => a.id === "boarding:deposit")!;
     expect(deposit.intent?.label).toBe("Deposit");
+  });
+
+  it("a losing game nets NEGATIVE (a sent stake, no payback)", async () => {
+    // TxHistoryEntry.amount is an unsigned magnitude — direction is in `type`.
+    // A loss leaves only the co-fund (SENT) in the player's history.
+    const lossGames: CoinflipGameRecord[] = [
+      { id: "gL", tier: 1000, winner: "house", txids: ["cofundL"] },
+    ];
+    const [act] = await buildActivities(
+      [tx("cofundL", { type: "SENT", amount: 1000, createdAt: 5 })],
+      [gameActivityResolver(() => lossGames)]
+    );
+    expect(act.intent?.label).toBe("Dice game");
+    expect(act.amount).toBe(-1000); // staked tier, lost
   });
 
   it("re-indexes on prepare(): no stale entries", async () => {

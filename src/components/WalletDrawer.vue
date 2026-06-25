@@ -202,36 +202,39 @@
 
         <!-- ── Activity ───────────────────────────────────────────── -->
         <section v-if="tab === 'activity'" class="activity-section">
-          <div v-if="txHistory.length === 0" class="empty-state">
+          <div v-if="activityHistory.length === 0" class="empty-state">
             <div class="empty-icon">&#9728;</div>
-            <div class="empty-text">No transactions yet</div>
+            <div class="empty-text">No activity yet</div>
             <div class="hint">Your wallet activity will appear here</div>
           </div>
           <div v-else class="tx-list">
-            <div v-for="tx in txHistory" :key="tx.txid + ':' + tx.createdAt" class="tx-row">
-              <div class="tx-dir" :class="tx.type.toLowerCase()">
-                <span v-if="tx.type === 'RECEIVED'">&#9660;</span>
+            <div v-for="act in activityHistory" :key="act.id" class="tx-row">
+              <div class="tx-dir" :class="act.amount >= 0 ? 'received' : 'sent'">
+                <span v-if="act.amount >= 0">&#9660;</span>
                 <span v-else>&#9650;</span>
               </div>
               <div class="tx-body">
                 <div class="tx-top">
                   <span class="tx-label">
-                    {{ tx.type === 'RECEIVED' ? 'Received' : 'Sent' }}
-                    <span v-if="tx.isBoarding" class="tx-badge boarding">Boarding</span>
+                    {{ act.intent?.label || (act.amount >= 0 ? 'Received' : 'Sent') }}
+                    <span v-if="act.intent?.kind === 'boarding'" class="tx-badge boarding">Boarding</span>
                   </span>
-                  <span class="tx-amount" :class="tx.type.toLowerCase()">
-                    {{ tx.type === 'RECEIVED' ? '+' : '−' }}{{ Math.abs(tx.amount).toLocaleString() }}
+                  <span class="tx-amount" :class="act.amount >= 0 ? 'received' : 'sent'">
+                    {{ act.amount >= 0 ? '+' : '−' }}{{ Math.abs(act.amount).toLocaleString() }}
                     <span class="tx-unit">sats</span>
                   </span>
                 </div>
                 <div class="tx-bottom">
-                  <span class="tx-time text-muted">{{ formatRelative(tx.createdAt) }}</span>
-                  <span class="tx-status" :class="tx.settled ? 'settled' : 'pending'">
-                    {{ tx.settled ? 'Settled' : 'Pending' }}
+                  <span class="tx-time text-muted">{{ formatRelative(act.createdAt) }}</span>
+                  <span class="tx-status" :class="act.settled ? 'settled' : 'pending'">
+                    {{ act.settled ? 'Settled' : 'Pending' }}
                   </span>
                 </div>
-                <div v-if="tx.txid" class="tx-id mono" @click="copyText(tx.txid)">
-                  {{ tx.txid.slice(0, 12) }}…{{ tx.txid.slice(-8) }}
+                <div v-if="act.txs.length > 1" class="tx-id mono">
+                  {{ act.txs.length }} transactions grouped
+                </div>
+                <div v-else-if="act.txs[0]" class="tx-id mono" @click="copyText(act.txs[0].txid)">
+                  {{ act.txs[0].txid.slice(0, 12) }}…{{ act.txs[0].txid.slice(-8) }}
                 </div>
               </div>
             </div>
@@ -461,6 +464,7 @@ export default defineComponent({
     })
     const isMutinyTestnet = computed(() => arkServer.value === 'https://mutinynet.arkade.sh')
     const txHistory = computed(() => store.getters['ark/txHistory'] || [])
+    const activityHistory = computed(() => store.getters['ark/activityHistory'] || [])
 
     // ── LNURL session (amountless Lightning Address receive) ──────────
     // Mirrors the wallet's behaviour: open an SSE session against the
@@ -825,7 +829,7 @@ export default defineComponent({
       hasUnsettledFunds, settleReasonLabel,
       hasUnconfirmedBoarding, unconfirmedBoardingAmount,
       hasRecoverable, recoverableAmount,
-      isMutinyTestnet, txHistory, formatRelative,
+      isMutinyTestnet, txHistory, activityHistory, formatRelative,
       tab,
       depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
       showAmountForm, copySheetOpen, copyOptions,

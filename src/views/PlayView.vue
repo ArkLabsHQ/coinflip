@@ -592,6 +592,10 @@ export default defineComponent({
           status: 'resolved',
           createdAt: new Date().toISOString(),
           resolvedAt: new Date().toISOString(),
+          // On-chain txids this game touched (v4 co-fund + settle, or v3 sweep),
+          // so the activity history can group its wallet transactions into one
+          // "Dice game" row. See src/utils/activityHistory.ts.
+          txids: [result.cofundTxid, result.settleTxid, result.txid].filter(Boolean),
         }
         const history = JSON.parse(localStorage.getItem('gameHistory') || '[]')
         history.unshift(historyEntry)

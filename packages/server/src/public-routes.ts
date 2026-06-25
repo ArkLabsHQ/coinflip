@@ -44,9 +44,9 @@ export function createPublicRoutes(deps: AppDeps): Router {
        */
       escrowVersion: newGameEscrowVersion(),
       /**
-       * Game protocol the client should drive — 'v3' (per-party escrow, the
-       * default) or 'v4' (joint pot, the /api/v4 flow). Opt-in via the server's
-       * PROTOCOL_VERSION env; the client routes to playV4Game when this is 'v4'.
+       * Game protocol the client should drive — 'v4' (joint pot, the /api/v4
+       * flow, the default) or 'v3' (per-party escrow). Set PROTOCOL_VERSION=v3
+       * to fall back; the client routes to playV4Game when this is 'v4'.
        */
       protocolVersion: newGameProtocolVersion(),
     })

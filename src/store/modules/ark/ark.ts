@@ -1256,7 +1256,7 @@ const ark: Module<ArkState, RootState> = {
     },
 
     /**
-     * Play one v0.4 JOINT-POT game end-to-end (opt-in: the server advertises
+     * Play one v0.4 JOINT-POT game end-to-end (the default; the server advertises
      * `protocolVersion: 'v4'` on /api/network). Two on-chain txs:
      *   1. POST /api/v4/play — the house reserves stake VTXO(s) and returns the
      *      joint-pot covenant params + its serialized stake inputs.
@@ -1379,10 +1379,10 @@ const ark: Module<ArkState, RootState> = {
     },
 
     /**
-     * Place a bet via whichever trustless flow the server advertises — v0.3
-     * per-party escrow (default) or v0.4 joint pot when `protocolVersion: 'v4'`
-     * is set on /api/network. The single entry point the UI dispatches; v0.4 is
-     * strictly opt-in, so existing deployments keep playing v0.3 untouched.
+     * Place a bet via whichever trustless flow the server advertises — v0.4
+     * joint pot (the default) or v0.3 per-party escrow when `protocolVersion`
+     * is 'v3' on /api/network. The single entry point the UI dispatches; pin the
+     * old flow with the server's PROTOCOL_VERSION=v3.
      */
     async placeTrustlessBet(
       { dispatch },

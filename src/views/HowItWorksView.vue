@@ -19,7 +19,8 @@
           <h2 class="tldr-title">The 30-second version</h2>
           <ol class="tldr-steps">
             <li>Both sides <strong>commit</strong> to a hidden secret (only its hash is shared).</li>
-            <li>Each side <strong>escrows</strong> its own stake into its <strong>own</strong> per-party escrow — neither can touch the other's.</li>
+            <li v-if="activeVersion === 'v4'">Both sides <strong>co-fund</strong> a single joint pot in one atomic transaction — neither stake moves unless both sign.</li>
+            <li v-else>Each side <strong>escrows</strong> its own stake into its <strong>own</strong> per-party escrow — neither can touch the other's.</li>
             <li>You <strong>reveal</strong> your secret. The two secrets together decide the winner.</li>
             <li>An <strong>Arkade&nbsp;Script covenant</strong> pays the full pot to the winner — the
               winner never signs, and the loser has no spend path.</li>
@@ -142,11 +143,12 @@
         <h2>Design evolution</h2>
         <p class="section-intro">
           The contract has gone through three shipped designs, plus a fourth (<strong>v0.4</strong>, the joint
-          pot) now wired end-to-end. <strong>v0.3</strong> is the default this client plays — all detailed
-          sections below describe it. <strong>v0.4</strong> is opt-in: when the server sets
-          <span class="mono">PROTOCOL_VERSION=v4</span> it advertises the joint-pot flow via /api/network and
-          the client routes to it (only the happy path is wired so far). The earlier variants are kept for
-          reference — each one fixes a real flaw in the previous.
+          pot). This client is playing
+          <strong>{{ activeVersion === 'v4' ? 'v0.4 (joint pot)' : 'v0.3 (per-party escrow)' }}</strong>
+          right now — read from <span class="mono">/api/network</span> — and the tabs below open on it. The
+          other variants are kept for reference; each one fixes a real flaw in the previous. The detailed
+          spend-path and flow sections further down describe the <strong>v0.3</strong> per-party-escrow design,
+          the shape v0.4 streamlines into a single co-funded pot.
         </p>
         <div class="variant-tabs evolution-tabs" role="tablist" aria-label="Design evolution">
           <button v-for="e in EVOLUTION" :key="e.id" type="button" role="tab"
@@ -366,8 +368,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import StepList from '@/components/StepList.vue'
+import { getNetwork } from '@/services/api'
 
 // Expand state, keyed by leaf name (+ 'cond' for the shared win-condition).
 const open = ref<Record<string, boolean>>({})
@@ -471,6 +474,20 @@ const EVOLUTION_BY: Record<Evolution, EvolutionCard> = {
   },
 }
 const evolution = ref<Evolution>('v3')
+
+// Reflect the protocol version the server actually serves (from /api/network):
+// open the page on that version and tailor the "what this client plays" copy.
+// Falls back to v0.3 if the network can't be reached.
+const activeVersion = ref<'v3' | 'v4'>('v3')
+onMounted(async () => {
+  try {
+    const net = await getNetwork()
+    activeVersion.value = net.protocolVersion === 'v4' ? 'v4' : 'v3'
+    evolution.value = activeVersion.value
+  } catch {
+    /* keep the v0.3 default */
+  }
+})
 
 // Per-version game flow. v0.1 (shared escrow) had setup + final txs; v0.2 and
 // v0.3 share the per-party shape, but v0.3 specifically routes reveals through

@@ -131,9 +131,9 @@ export interface NetworkResponse {
    *  length-encoded predicate; v3 = arkade-script + packet-borne reveals.
    *  Drives client secret format: v2 = raw bytes; v3 = `[digit] ‖ salt`. */
   escrowVersion?: 'v2' | 'v3'
-  /** Game protocol the client should drive — 'v3' (per-party escrow, default)
-   *  or 'v4' (joint pot, /api/v4 flow). Opt-in via the server's PROTOCOL_VERSION;
-   *  the play flow routes to playV4Game when this is 'v4'. */
+  /** Game protocol the client should drive — 'v4' (joint pot, /api/v4 flow,
+   *  the default) or 'v3' (per-party escrow). Set the server's PROTOCOL_VERSION=v3
+   *  to fall back; the play flow routes to playV4Game when this is 'v4'. */
   protocolVersion?: 'v3' | 'v4'
 }
 export async function getNetwork(): Promise<NetworkResponse> {

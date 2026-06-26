@@ -140,6 +140,40 @@ export async function renewSettle(deps: AppDeps, label = 'renewal'): Promise<boo
 }
 
 /**
+ * Migrate house VTXOs minted under a now-deprecated arkd signer (operator key
+ * rotation) to the active signer. A plain `settle()` REJECTS deprecated-signer
+ * inputs (`INVALID_VTXO_SCRIPT`), so once arkd rotates its signer the renewal
+ * jams on those inputs every tick. `migrateDeprecatedSignerVtxos()` self-refreshes
+ * the signer set (so the renewal `settle()` then filters them cleanly) and
+ * cooperatively migrates pre-cutoff funds; past-cutoff funds it reports as
+ * `expired` and they recover on their own after the server sweeps their batch.
+ * No-op when nothing is deprecated. Best-effort: a hiccup here must not block the
+ * normal renewal settle.
+ *
+ * Exported for unit testing.
+ */
+export async function migrateDeprecatedSigners(
+  deps: AppDeps,
+  log: ReturnType<typeof makeLogDedup> = makeLogDedup(),
+): Promise<void> {
+  try {
+    const vm = await deps.wallet.getVtxoManager()
+    const report = await vm.migrateDeprecatedSignerVtxos()
+    const legErr = report.vtxos?.error || report.boarding?.error
+    if (report.rotated || report.expired.length > 0 || report.signers.length > 0 || legErr) {
+      console.log(
+        `[renewal] deprecated-signer migration: rotated=${report.rotated}, ` +
+        `expired/awaiting-sweep=${report.expired.length}, deprecated-signers=${report.signers.length}` +
+        (legErr ? ` (leg error: ${legErr})` : ''),
+      )
+    }
+  } catch (err) {
+    const msg = `[renewal] deprecated-signer migration failed: ${err instanceof Error ? err.message : String(err)}`
+    if (log.shouldLog('migration', msg)) console.warn(msg)
+  }
+}
+
+/**
  * Try to renew house VTXOs by joining a settlement batch. Returns true if
  * a settle round was triggered, false if the wallet has no expiring VTXOs
  * to renew. Called when the selectable house balance would otherwise be
@@ -150,6 +184,10 @@ export async function renewExpiringHouseVtxos(deps: AppDeps): Promise<boolean> {
   const { dropped } = selectableHouseVtxos(all)
   if (dropped.length === 0) return false
   console.log(`[house wallet] renewing ${dropped.length} expiring VTXOs via settle()`)
+  // Same key-rotation guard as the renewal timer: settle() rejects deprecated-signer
+  // inputs, so migrate them first (no-op when nothing is deprecated) — otherwise a
+  // /play that needs renewal jams on INVALID_VTXO_SCRIPT until the timer catches up.
+  await migrateDeprecatedSigners(deps)
   return renewSettle(deps, 'play-fallback')
 }
 
@@ -183,6 +221,11 @@ export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.T
     if (renewing) return
     renewing = true
     try {
+      // Key-rotation guard: cooperatively migrate any deprecated-signer VTXOs
+      // BEFORE the plain settle below — settle() rejects deprecated-signer inputs
+      // (INVALID_VTXO_SCRIPT), so without this the renewal jams once the operator
+      // rotates arkd's signer. Self-refreshes the signer set; no-op otherwise.
+      await migrateDeprecatedSigners(deps, renewalLog)
       const [balance, all] = await Promise.all([deps.wallet.getBalance(), deps.wallet.getVtxos()])
       renewalLog.clear('renewal') // backend reachable -> reset so a future failure logs fresh
       const { dropped } = selectableHouseVtxos(all) // VTXOs expiring within the buffer

@@ -184,6 +184,10 @@ export async function renewExpiringHouseVtxos(deps: AppDeps): Promise<boolean> {
   const { dropped } = selectableHouseVtxos(all)
   if (dropped.length === 0) return false
   console.log(`[house wallet] renewing ${dropped.length} expiring VTXOs via settle()`)
+  // Same key-rotation guard as the renewal timer: settle() rejects deprecated-signer
+  // inputs, so migrate them first (no-op when nothing is deprecated) — otherwise a
+  // /play that needs renewal jams on INVALID_VTXO_SCRIPT until the timer catches up.
+  await migrateDeprecatedSigners(deps)
   return renewSettle(deps, 'play-fallback')
 }
 

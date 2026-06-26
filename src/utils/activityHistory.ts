@@ -56,6 +56,12 @@ export interface Activity {
   settled: boolean;
 }
 
+/** Net sats this tx moved the wallet, SIGNED: SENT is negative, RECEIVED positive.
+ *  `TxHistoryEntry.amount` is an unsigned magnitude — the direction lives in `type`. */
+function signedAmount(tx: TxHistoryEntry): number {
+  return tx.type === "SENT" ? -Math.abs(tx.amount) : Math.abs(tx.amount);
+}
+
 /**
  * Project a flat tx list into grouped activities via resolvers. A tx with no
  * memberships becomes its own single-member activity (= the flat row). A
@@ -105,7 +111,7 @@ export async function buildActivities(
     }
 
     if (perGroup.size === 0) {
-      buckets.set(tx.txid, { members: [{ tx, amount: tx.amount }] });
+      buckets.set(tx.txid, { members: [{ tx, amount: signedAmount(tx) }] });
       continue;
     }
     for (const m of perGroup.values()) {
@@ -115,7 +121,7 @@ export async function buildActivities(
         kind: b.intent?.kind ?? m.kind,
         metadata: { ...m.metadata, ...b.intent?.metadata },
       };
-      b.members.push({ tx, amount: m.amount ?? tx.amount });
+      b.members.push({ tx, amount: m.amount ?? signedAmount(tx) });
       buckets.set(m.groupId, b);
     }
   }

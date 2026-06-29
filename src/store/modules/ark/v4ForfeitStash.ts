@@ -58,15 +58,37 @@ export interface StashedV4Forfeit {
   forfeitClaimableAt: number
   /** Emulator base URL the signed claim is POSTed to (`/v1/tx`). */
   forfeitEmulatorUrl: string
-  /** Player's game secret (hex). Stage 1 (`playerReveal`) publishes it on-chain as
-   *  the ConditionMultisig leaf's SHA256(secret) witness, moving the pot into the
-   *  StageTwo contest. REQUIRED for the staged-forfeit recovery. */
-  playerSecretHex: string
+  /** Player's game secret (hex), or `null` when unknown. Stage 1 (`playerReveal`)
+   *  publishes it on-chain as the ConditionMultisig leaf's SHA256(secret) witness,
+   *  moving the pot into the StageTwo contest — so it is REQUIRED for the staged-
+   *  forfeit (take-the-WHOLE-pot) recovery.
+   *
+   *  `null` marks a RESTORED stash (re-armed from a server `reclaimHint` after a
+   *  browser clear / new device): the server never holds the take-the-pot key, so a
+   *  restored game has no secret to reveal. A null-secret stash can ONLY drive the
+   *  covenant-only SELF-REFUND (the `cooperativeSpend` split-back of the player's own
+   *  stake), never the staged forfeit. See pickV4ClaimPath / claimV4Forfeit. */
+  playerSecretHex: string | null
   /** Set after STAGE 1 succeeds: the StageTwo VTXO the pot moved into (the stage-1
    *  txid, vout 0, whole-pot value). Its presence means stage 1 is done and the
    *  recovery is waiting for finalExpiration to fire STAGE 2 (`playerTakeAll`). */
   stageTwoOutpoint?: V4PotOutpoint
   createdAt: number
+  /**
+   * Count of consecutive PERMANENT auto-claim failures for the SELF-REFUND path
+   * (a restored, no-secret stash). Mirrors StashedRefund.claimFailures + the #47
+   * reclaimBackoff: a covenant whose split the emulator keeps rejecting can never
+   * succeed, so auto-claim backs off after MAX_RECLAIM_ATTEMPTS rather than spamming
+   * `/v1/tx`. The "already spent" case is handled separately (the stash is dropped),
+   * and transient (network / CLTV-timing) failures do NOT increment this.
+   *
+   * Deliberately NOT applied to the staged-forfeit path, which keeps the stash on
+   * ANY error and retries — for a take-the-whole-pot claim, never giving up is the
+   * only safe bias.
+   */
+  claimFailures?: number
+  /** Last permanent self-refund error message, for surfacing in the UI. */
+  lastClaimError?: string
 }
 
 /** The subset `resolveV4ForfeitStash` produces; the play action stamps `gameId`,

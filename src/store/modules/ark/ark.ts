@@ -15,8 +15,7 @@ import {
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
 // Subpath import (not the package root) so the browser bundle doesn't pull in
 // the v2 transactions module, which imports Node's `crypto`.
-import { buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx } from 'arkade-coinflip/dist/joint-pot-tx'
-import { CoinflipJointPotScript } from 'arkade-coinflip/dist/joint-pot'
+import { buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx, encodeSettleForEmulator } from 'arkade-coinflip/dist/joint-pot-tx'
 import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import { singleFlight } from '@/utils/singleFlight'
@@ -32,6 +31,7 @@ import { signChallenge } from '@/utils/signChallenge'
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
 import { resolveV4ForfeitStash, hasClaimableV4Forfeit, v4ClaimStage, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
 import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits, saveV4Forfeits } from './v4ForfeitStashStore'
+import { buildV4SelfRefund, pickV4ClaimPath, rebuildJointPot, isAlreadySpentError, isTransientSelfRefundError, rearmV4ReclaimHint } from './v4SelfRefund'
 import { locateEscrowVtxo } from './locateEscrow'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
@@ -536,6 +536,70 @@ async function stashV4ForfeitRecovery(args: {
   } else {
     console.error(`[v4] CRITICAL: forfeit not stashed for a funded pot (${decision.reason})`)
   }
+}
+
+/**
+ * Actionable-restore re-arm: for each PENDING v4 reclaim hint, persist a no-secret
+ * SELF-REFUND stash so StalledBets + auto-claim can reclaim the player's own stake.
+ *
+ * Pure decision in `rearmV4ReclaimHint` (unit-tested); this wrapper is the network/
+ * storage glue. Best-effort and idempotent:
+ *  - skips a hint we already hold as a FUNDED (secret-bearing) stash — that one can
+ *    sweep the WHOLE pot, so a no-secret restore must never downgrade it;
+ *  - refreshes an existing no-secret stash in place (covenant/outpoint may have moved
+ *    from null→known since a pre-co-fund restore);
+ *  - never throws: a re-arm failure must not break the history return, and the
+ *    server's own refund timer remains the backstop.
+ */
+async function rearmV4ReclaimHints(
+  hints: V4ReclaimHint[],
+  games: GameSummary[],
+  arkAddress: string | null,
+): Promise<void> {
+  if (!arkAddress) {
+    console.info(`[restore] ${hints.length} v4 reclaim hint(s) returned, but the wallet isn't connected yet — re-arm deferred to a post-connect restore.`)
+    return
+  }
+  let emulatorUrl: string | undefined
+  try {
+    emulatorUrl = (await getNetwork()).emulator?.url
+  } catch (e) {
+    console.warn('[restore] could not reach /api/network for the emulator URL (continuing):', getErrorMessage(e))
+  }
+  let expectedPayout: string
+  try {
+    expectedPayout = addressToPkScriptHex(arkAddress)
+  } catch (e) {
+    console.warn('[restore] could not derive payout pkScript — skipping v4 re-arm:', getErrorMessage(e))
+    return
+  }
+  const statusById = new Map(games.map((g) => [g.gameId, g.status]))
+  const existing = await loadV4Forfeits()
+  let rearmed = 0
+  for (const hint of hints) {
+    // Never downgrade a funded (secret-bearing) stash to a no-secret restore.
+    const prior = existing.find((s) => s.gameId === hint.gameId)
+    if (prior && pickV4ClaimPath(prior) === 'forfeit') continue
+    const decision = rearmV4ReclaimHint({
+      hint,
+      status: statusById.get(hint.gameId) ?? 'pending',
+      expectedPayoutPkScriptHex: expectedPayout,
+      fallbackEmulatorUrl: emulatorUrl,
+    })
+    if (decision.kind !== 'rearm') {
+      console.info(`[restore] v4 hint ${hint.gameId} not re-armed (${decision.reason})`)
+      continue
+    }
+    try {
+      // Preserve an existing no-secret stash's stage/backoff bookkeeping across a
+      // re-restore (a fresh putV4Forfeit would otherwise reset claimFailures).
+      await putV4Forfeit(prior ? { ...decision.stash, claimFailures: prior.claimFailures, lastClaimError: prior.lastClaimError } : decision.stash)
+      rearmed++
+    } catch (e) {
+      console.error(`[restore] could not persist re-armed self-refund for ${hint.gameId} (continuing):`, getErrorMessage(e))
+    }
+  }
+  console.info(`[restore] re-armed ${rearmed}/${hints.length} pending v4 reclaim hint(s) as self-refund stashes.`)
 }
 
 /**
@@ -1629,13 +1693,24 @@ const ark: Module<ArkState, RootState> = {
     },
 
     /**
-     * v0.4 recovery: reclaim the WHOLE joint pot via the playerForfeit leaf when
-     * the server never settled. Unlike v3 (which submits a server-built PSBT),
-     * the claim is rebuilt CLIENT-side from the stashed covenant — reconstruct
-     * the pot, spend the playerForfeit leaf into payTo(player, pot), sign our
-     * slot, and POST to the emulator (it co-signs the tweaked slot; arkd signs
-     * its slot and forwards). Valid only once chain time crosses the CLTV — an
-     * early submission is rejected, surfaced here as a friendly "not claimable yet".
+     * v0.4 recovery from a stashed joint pot. Two mutually-exclusive paths,
+     * selected by whether we hold the player's secret (pickV4ClaimPath):
+     *
+     *  - FORFEIT (we have the secret): reclaim the WHOLE pot via the staged
+     *    contest. Reconstruct the pot, spend playerReveal → (later) playerTakeAll,
+     *    sign our player slot, and POST to the emulator (it co-signs the tweaked
+     *    slot; arkd signs its slot). Gated on finalExpiration.
+     *
+     *  - SELF-REFUND (no secret — a RESTORED stash from a server reclaimHint):
+     *    reclaim only OUR OWN stake via the covenant-only `cooperativeSpend`
+     *    split-back. The leaf has NO player slot, so we sign NOTHING and POST the
+     *    built tx as-is (identical to the server's broadcastV4Refund). Gated on
+     *    cancelDelay (NOT finalExpiration — that gates the take-all leaf). If the
+     *    pot is already spent (the server's refund timer beat us, paying our own
+     *    payout script), that IS success: we clear the stash, never retry.
+     *
+     * Either way an early submission (before the CLTV) is rejected and surfaced as
+     * a friendly "not claimable yet".
      */
     async claimV4Forfeit(
       { state, rootState, commit },
@@ -1658,6 +1733,8 @@ const ark: Module<ArkState, RootState> = {
         // Re-assert the payout binding at claim time. IDB is not a trust
         // boundary and the auto-claim poll fires this without user consent, so a
         // tampered/corrupt stash must not sweep the pot to a foreign address.
+        // (Self-refund splits the pot to BOTH payout scripts via the covenant, but
+        // the same check still guarantees OUR half lands at this wallet.)
         if (!state.arkAddress) throw new Error('Wallet address unavailable for forfeit claim.')
         const expectedPayout = hex.encode(ArkAddress.decode(state.arkAddress).pkScript)
         if (stash.covenant.playerPayoutPkScript !== expectedPayout) {
@@ -1667,24 +1744,52 @@ const ark: Module<ArkState, RootState> = {
         const arkInfo = await wallet.arkProvider.getInfo()
         const serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
         const cv = stash.covenant
-        const pot = new CoinflipJointPotScript({
-          creatorPubkey: hex.decode(cv.creatorPubkey),
-          playerPubkey: hex.decode(cv.playerPubkey),
-          serverPubkey: hex.decode(cv.serverPubkey),
-          creatorHash: hex.decode(cv.creatorHash),
-          playerHash: hex.decode(cv.playerHash),
-          finalExpiration: BigInt(cv.finalExpiration),
-          cancelDelay: BigInt(cv.cancelDelay),
-          exitDelay: BigInt(cv.exitDelay),
-          oddsN: cv.oddsN,
-          oddsTarget: cv.oddsTarget,
-          oddsLo: cv.oddsLo,
-          emulatorPubkey: hex.decode(cv.emulatorPubkey),
-          playerPayoutPkScript: hex.decode(cv.playerPayoutPkScript),
-          housePayoutPkScript: hex.decode(cv.housePayoutPkScript),
-          playerStake: BigInt(cv.playerStake),
-          houseStake: BigInt(cv.houseStake),
-        })
+
+        // SELF-REFUND path (no player secret — a restored stash). Covenant-only
+        // split-back of OUR stake; gate on cancelDelay; treat already-spent as done.
+        if (pickV4ClaimPath(stash) === 'self-refund') {
+          const chainTime = await chainTipTime()
+          // Gate on the cooperativeSpend CLTV (cancelDelay), which arkd enforces
+          // against the chain's MTP. Before it, show "recovering", not an error.
+          if (!isCltvMatured(chainTime, cv.cancelDelay)) {
+            const lifts = new Date(cv.cancelDelay * 1000).toLocaleString()
+            throw new Error(
+              chainTime !== null
+                ? `Recovering — the refund timelock lifts at ${lifts} (chain time, as new blocks are mined).`
+                : `Recovering — waiting for the chain tip before the refund can be submitted (timelock lifts at ${lifts}).`,
+            )
+          }
+          const refund = buildV4SelfRefund(stash, serverUnroll)
+          const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(encodeSettleForEmulator(refund)),
+          })
+          if (!resp.ok) {
+            const text = await resp.text()
+            // Already refunded/settled (the server's timer beat us, paying our own
+            // payout script) → success-equivalent: drop the stash, don't retry/spam.
+            if (isAlreadySpentError(text)) {
+              console.info(`[v4-self-refund] ${gameId}: pot already spent (server refunded) — clearing stash.`)
+              await deleteV4Forfeit(gameId)
+              return
+            }
+            // CLTV not yet satisfied at the chain's MTP — keep the stash, retry later.
+            if (/locked|too early|CLTV|locktime/i.test(text)) {
+              throw new Error("Not reclaimable yet — the chain's block time hasn't reached the refund timelock. Try again shortly.")
+            }
+            throw new Error(`Emulator rejected v0.4 self-refund: ${text}`)
+          }
+          // Our stake split back to our wallet → drop the stash.
+          await deleteV4Forfeit(gameId)
+          return
+        }
+
+        // FORFEIT path (we hold the secret) — pickV4ClaimPath narrows it to truthy,
+        // but assert for the type and to fail closed on a corrupt empty secret.
+        if (!stash.playerSecretHex) throw new Error('v0.4 forfeit refused: missing player secret.')
+        const playerSecretHex = stash.playerSecretHex
+        const pot = rebuildJointPot(cv)
         // The staged-forfeit contest. Each leaf is [player, arkd, emu_tweaked]:
         // sign our single player slot; arkd signs its slot; the emulator co-signs
         // the tweaked slot after running its covenant. Same per checkpoint.
@@ -1726,7 +1831,7 @@ const ark: Module<ArkState, RootState> = {
           const reveal = buildPlayerRevealTx({
             pot,
             cofund: stash.potOutpoint,
-            playerRevealBytes: hex.decode(stash.playerSecretHex),
+            playerRevealBytes: hex.decode(playerSecretHex),
             serverUnroll,
           })
           // Self-heal the crash window: if a PRIOR attempt already fired stage 1 but
@@ -1838,6 +1943,13 @@ const ark: Module<ArkState, RootState> = {
       for (const v4 of await loadV4Forfeits()) {
         if (state.claimingGames[v4.gameId]) continue
         if (!hasClaimableV4Forfeit(v4)) continue
+        const selfRefund = pickV4ClaimPath(v4) === 'self-refund'
+        // SELF-REFUND ONLY: back off a restored stash whose covenant the emulator
+        // keeps rejecting (it can never succeed) so we don't spam /v1/tx. The
+        // already-spent case clears the stash inside claimV4Forfeit; this catches
+        // OTHER permanent failures. The staged-forfeit path is intentionally never
+        // backed off (keep retrying a take-the-whole-pot claim).
+        if (selfRefund && hasExhaustedReclaim(v4.claimFailures)) continue
         // Positive GC ONLY: if the server settled this game normally, drop the
         // stale stash. We must NOT infer "settled" from a claim-error string —
         // a transient emulator rejection can carry "spent"/"not found" and would
@@ -1849,17 +1961,36 @@ const ark: Module<ArkState, RootState> = {
             continue
           }
         } catch { /* server unreachable — fall through to the CLTV-gated claim */ }
-        // Two-stage timing (pure + unit-tested as v4ClaimStage): STAGE 1 fires
-        // BEFORE cancelDelay (pre-empting the refund so we can sweep the WHOLE pot,
-        // not just our stake), STAGE 2 at finalExpiration. claimV4Forfeit picks the
-        // matching stage from the stash's stageTwoOutpoint.
-        if (v4ClaimStage(v4, chainTime) === 'wait') continue
+        // Timing gate. A restored, no-secret stash can ONLY self-refund its own
+        // stake (no secret to reveal), which arkd allows once chain time passes the
+        // cooperativeSpend CLTV (cancelDelay). A secret-bearing stash runs the
+        // two-stage forfeit (v4ClaimStage: stage 1 before cancelDelay to pre-empt the
+        // refund and sweep the WHOLE pot, stage 2 at finalExpiration).
+        if (selfRefund) {
+          if (!isCltvMatured(chainTime, v4.covenant.cancelDelay)) continue
+        } else if (v4ClaimStage(v4, chainTime) === 'wait') {
+          continue
+        }
         try {
           await dispatch('claimV4Forfeit', { gameId: v4.gameId, mode: 'auto' })
         } catch (e) {
-          // Keep the stash on ANY claim error and retry next tick — erring
-          // toward keeping the recovery record is the only safe bias for a pot.
-          console.warn(`[auto-claim:v4] ${v4.gameId} failed (will retry):`, getErrorMessage(e))
+          const msg = getErrorMessage(e)
+          // For a self-refund, count PERMANENT failures so auto-claim backs off
+          // (the stake still recovers via the server's own refund timer). Transient
+          // (network / CLTV-timing "not reclaimable yet") failures are NOT counted.
+          // For the staged forfeit, keep the stash on ANY error and retry — erring
+          // toward keeping the recovery record is the only safe bias for the pot.
+          if (selfRefund && !isTransientSelfRefundError(msg)) {
+            const claimFailures = (v4.claimFailures ?? 0) + 1
+            await putV4Forfeit({ ...v4, claimFailures, lastClaimError: msg })
+            if (hasExhaustedReclaim(claimFailures)) {
+              console.warn(
+                `[auto-claim:v4] ${v4.gameId}: giving up on self-refund after ${claimFailures} permanent ` +
+                  `failures. The stake still recovers via the server's refund timer; not retrying.`,
+              )
+            }
+          }
+          console.warn(`[auto-claim:v4] ${v4.gameId} failed (will retry):`, msg)
         }
       }
     },
@@ -1878,15 +2009,22 @@ const ark: Module<ArkState, RootState> = {
      * on a fresh device before the Ark connect completes (hence it reads
      * rootState.wallet directly instead of requireWalletAndKey).
      *
-     * SCOPE: history display only. `reclaimHints` are returned but NOT acted on:
-     * a restored v4 hint has no player secret (`playerSecretHex` is always null
-     * server-side), so it can't drive a take-the-pot claim, and stalled v4
-     * stakes already self-recover server-side via the refund timer. Actionable
-     * v4 recovery from a restore is a deferred follow-up; we only count the hints
-     * here.
+     * ACTIONABLE v4 RECOVERY: for each PENDING v4 `reclaimHint`, re-arm a no-secret
+     * SELF-REFUND stash (StashedV4Forfeit with playerSecretHex: null) so the
+     * StalledBets panel + auto-claim can reclaim the player's OWN stake via the
+     * covenant-only `cooperativeSpend` split-back. The server never holds the
+     * take-the-pot key, so a restored hint can't sweep the whole pot — only refund
+     * the stake. This is a DEFENSIVE backstop to the server's own refund timer
+     * (startV4RefundTimer); the claim dedups against it (already-spent ⇒ done).
+     *
+     * The re-arm needs this wallet's payout pkScript (to anti-tamper-bind the pot to
+     * us) + an emulator URL; both come from a connected wallet (state.arkAddress) and
+     * /api/network. When the wallet isn't connected yet we skip the re-arm and just
+     * return the hints — a later restore (post-connect) re-arms them. Re-arm failures
+     * never break the history return (the server's refund timer remains the backstop).
      */
     async restoreFromServer(
-      { rootState },
+      { state, rootState },
     ): Promise<{ games: GameSummary[]; reclaimHints: V4ReclaimHint[] }> {
       const playerPubkey = rootState.wallet.publicKey
       const privateKey = rootState.wallet.privateKey
@@ -1896,8 +2034,7 @@ const ark: Module<ArkState, RootState> = {
         const sig = signChallenge(nonce, privateKey)
         const { games, reclaimHints } = await restoreGamesFromServer(playerPubkey, nonce, sig)
         if (reclaimHints.length > 0) {
-          // Counted but intentionally unused — see the SCOPE note above.
-          console.info(`[restore] ${reclaimHints.length} pending v4 reclaim hint(s) returned (history-only; not re-armed)`)
+          await rearmV4ReclaimHints(reclaimHints, games, state.arkAddress)
         }
         return { games, reclaimHints }
       } catch (e) {

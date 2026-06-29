@@ -5,8 +5,15 @@ import type {
   GameStats,
   GameUpdate,
   NewGame,
+  PlayerGamesFilter,
   SQLExecutor,
 } from './types.js'
+
+/** Hard ceiling on `listForPlayer` page size — clamps a caller-supplied limit
+ *  so a "restore my games" request can't ask for an unbounded scan. */
+export const LIST_FOR_PLAYER_MAX = 100
+/** Default page size when the caller doesn't specify one. */
+export const LIST_FOR_PLAYER_DEFAULT = 50
 
 export class SQLiteGameRepository implements GameRepository {
   constructor(private readonly db: SQLExecutor) {}
@@ -76,6 +83,27 @@ export class SQLiteGameRepository implements GameRepository {
       [playerPubkey],
     )
     return row?.count ?? 0
+  }
+
+  async listForPlayer(playerPubkey: string, opts: PlayerGamesFilter = {}): Promise<GameRow[]> {
+    // Clamp the page size to [1, LIST_FOR_PLAYER_MAX] (NaN/≤0 → default) so a
+    // restore request can't request an unbounded scan; floor a non-negative
+    // offset. Backed by idx_games_player (see db.ts initDb).
+    const rawLimit = opts.limit
+    const limit = Number.isFinite(rawLimit) && (rawLimit as number) > 0
+      ? Math.min(Math.floor(rawLimit as number), LIST_FOR_PLAYER_MAX)
+      : LIST_FOR_PLAYER_DEFAULT
+    const offset = Number.isFinite(opts.offset) && (opts.offset as number) > 0 ? Math.floor(opts.offset as number) : 0
+    if (opts.status) {
+      return this.db.all<GameRow>(
+        'SELECT * FROM games WHERE player_pubkey = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
+        [playerPubkey, opts.status, limit, offset],
+      )
+    }
+    return this.db.all<GameRow>(
+      'SELECT * FROM games WHERE player_pubkey = ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
+      [playerPubkey, limit, offset],
+    )
   }
 
   async expirePending(maxAgeMinutes: number): Promise<{ expired: number; rows: GameRow[] }> {

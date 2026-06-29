@@ -70,6 +70,11 @@ export async function initDb(): Promise<void> {
     try { db.exec(`ALTER TABLE games ADD COLUMN ${col} TEXT`) } catch { /* already there */ }
   }
 
+  // Index the player-pubkey lookups (countPendingForPlayer / listForPlayer —
+  // the "restore my games" path). Additive and idempotent, same IF-NOT-EXISTS
+  // bootstrap style as the tables above (no migration framework here).
+  db.exec('CREATE INDEX IF NOT EXISTS idx_games_player ON games(player_pubkey)')
+
   // Seed default config
   const seed = db.prepare('INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)')
   seed.run('rake_type', 'percentage')

@@ -264,7 +264,10 @@
             <h3 class="modal-title text-gold">Wallet Backup</h3>
             <p class="modal-desc text-muted">Your recovery phrase (or legacy key). Save it securely; never share it.</p>
             <div class="key-display" @click="copyText(privateKey)">
-              <code class="mono">{{ privateKey }}</code>
+              <ol v-if="phraseWords.length" class="mnemonic-grid">
+                <li v-for="(word, i) in phraseWords" :key="i" class="mnemonic-word">{{ word }}</li>
+              </ol>
+              <code v-else class="mono">{{ privateKey }}</code>
               <span class="address-action">Click to copy</span>
             </div>
             <button class="btn-outline" @click="showKey = false">Close</button>
@@ -441,6 +444,12 @@ export default defineComponent({
     // Prefer the BIP39 recovery phrase for mnemonic-backed wallets; fall back to
     // the nsec for legacy key-only wallets (both back up the same key).
     const privateKey = computed(() => store.getters.walletMnemonic || store.getters.nsecKey || store.state.wallet.privateKey)
+    // Render a 12/24-word recovery phrase as a numbered grid; legacy nsec/hex
+    // (any other word count) falls back to the plain code display.
+    const phraseWords = computed(() => {
+      const w = (privateKey.value || '').trim().split(/\s+/).filter(Boolean)
+      return w.length === 12 || w.length === 24 ? w : []
+    })
     const boardingAddress = computed(() => store.getters['ark/boardingAddress'])
     const boardingBalance = computed(() => Number(store.getters['ark/boardingBalance'] || BigInt(0)))
     const boardingUtxos = computed(() => store.getters['ark/boardingUtxos'] || [])
@@ -827,7 +836,7 @@ export default defineComponent({
     return {
       store, close, reconnect,
       arkStatus, ready, connText, arkServer, info,
-      arkAddress, privateKey, boardingAddress, boardingBalance, boardingUtxos,
+      arkAddress, privateKey, phraseWords, boardingAddress, boardingBalance, boardingUtxos,
       hasUnsettledFunds, settleReasonLabel,
       hasUnconfirmedBoarding, unconfirmedBoardingAmount,
       hasRecoverable, recoverableAmount,
@@ -852,6 +861,32 @@ export default defineComponent({
 </script>
 
 <style scoped lang="scss">
+.mnemonic-grid {
+  list-style: none;
+  counter-reset: word;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px 10px;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+}
+.mnemonic-word {
+  counter-increment: word;
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.mnemonic-word::before {
+  content: counter(word);
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  min-width: 14px;
+  text-align: right;
+}
 .drawer-backdrop {
   position: fixed; inset: 0;
   background: rgba(0, 0, 0, 0.6);

@@ -97,8 +97,10 @@
           <h2 class="modal-title text-gold">Your Recovery Phrase</h2>
           <p class="modal-desc text-muted">Save these 12 words securely, in order. They are the only way to recover your wallet!</p>
           <div class="key-box" @click="copyKey">
-            <code class="mono">{{ newPrivateKey }}</code>
-            <span class="key-hint">Click to copy</span>
+            <ol class="mnemonic-grid">
+              <li v-for="(word, i) in phraseWords" :key="i" class="mnemonic-word">{{ word }}</li>
+            </ol>
+            <span class="key-hint">Click to copy all</span>
           </div>
           <label class="checkbox-label">
             <input type="checkbox" v-model="hasBackedUp" />
@@ -114,7 +116,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, ref } from 'vue'
+import { defineComponent, ref, computed } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
 import { copyToClipboard } from '@/utils/clipboard'
@@ -130,6 +132,8 @@ export default defineComponent({
     const showPrivateKey = ref(false)
     const newPrivateKey = ref('')
     const hasBackedUp = ref(false)
+    // The recovery phrase split into words for the numbered backup grid.
+    const phraseWords = computed(() => newPrivateKey.value.trim().split(/\s+/).filter(Boolean))
 
     async function createWallet() {
       await store.dispatch('createNewWallet')
@@ -160,7 +164,7 @@ export default defineComponent({
 
     return {
       mode, privateKey, error,
-      showPrivateKey, newPrivateKey, hasBackedUp,
+      showPrivateKey, newPrivateKey, hasBackedUp, phraseWords,
       createWallet, restoreWallet, copyKey, onConfirm,
     }
   },
@@ -474,6 +478,32 @@ export default defineComponent({
   line-height: 1.5;
 }
 
+.mnemonic-grid {
+  list-style: none;
+  counter-reset: word;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px 10px;
+  margin: 0 0 10px;
+  padding: 0;
+  text-align: left;
+}
+.mnemonic-word {
+  counter-increment: word;
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.mnemonic-word::before {
+  content: counter(word);
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  min-width: 14px;
+  text-align: right;
+}
 .key-hint {
   font-size: 0.7rem;
   color: var(--text-muted);

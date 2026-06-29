@@ -50,11 +50,12 @@
       </template>
     </div>
 
-    <!-- v0.4 joint-pot forfeits: the whole pot via the playerForfeit leaf. No
-         self-refund split — v4 funds a single joint pot, so it's pot-or-nothing. -->
+    <!-- v0.4 joint-pot recovery: the whole pot via the staged forfeit when we hold
+         the secret, else the player's own stake via the covenant-only self-refund
+         (a RESTORED, no-secret stash). -->
     <div v-for="b in v4Bets" :key="b.gameId" class="bet-row">
       <div class="bet-info">
-        <span class="amount penalty-amount">Claim full pot — {{ b.potOutpoint.value.toLocaleString() }} sats (your stake + house)</span>
+        <span class="amount" :class="{ 'penalty-amount': !isV4SelfRefund(b) }">{{ v4AmountLabel(b) }}</span>
         <span class="state" :class="{ ready: isV4Ready(b), auto: isV4AutoClaiming(b) }">{{ v4StatusLabel(b) }}</span>
         <span class="penalty-note">{{ v4Note(b) }}</span>
       </div>
@@ -80,6 +81,7 @@ import { useStore } from 'vuex'
 import type { StashedRefund, ClaimingInfo } from '@/store/modules/ark/ark'
 import { hasStashedForfeit } from '@/store/modules/ark/forfeitStash'
 import type { StashedV4Forfeit } from '@/store/modules/ark/v4ForfeitStash'
+import { pickV4ClaimPath } from '@/store/modules/ark/v4SelfRefund'
 import { isCltvMatured } from '@/utils/cltv'
 
 export default defineComponent({
@@ -199,22 +201,43 @@ export default defineComponent({
       }
     }
 
-    // ── v0.4 joint-pot forfeit row (whole pot, client-built claim) ──────────
+    // ── v0.4 joint-pot recovery row ─────────────────────────────────────────
+    // Two shapes share this row, by whether we hold the player secret:
+    //  - FORFEIT (secret present): sweep the WHOLE pot via the staged contest.
+    //  - SELF-REFUND (no secret — a RESTORED stash): reclaim only OUR OWN stake via
+    //    the covenant-only cooperativeSpend split-back, gated on cancelDelay.
     const isV4Claiming = (b: StashedV4Forfeit) => !!claimingGames.value[b.gameId]
     const isV4AutoClaiming = (b: StashedV4Forfeit) => claimingGames.value[b.gameId]?.mode === 'auto'
-    // Stage 1 (publish the secret -> StageTwo) has no timelock, so it's always
-    // available; stage 2 (sweep the whole pot) needs the CLTV at finalExpiration.
+    const isV4SelfRefund = (b: StashedV4Forfeit) => pickV4ClaimPath(b) === 'self-refund'
+    /** The sats this row recovers: the player's stake for a self-refund, the whole pot for a forfeit. */
+    const v4Amount = (b: StashedV4Forfeit) =>
+      isV4SelfRefund(b) ? b.covenant.playerStake : b.potOutpoint.value
+    // Self-refund: ready once chain time passes cancelDelay. Forfeit: stage 1
+    // (publish the secret) has no timelock so it's always available; stage 2 (sweep
+    // the whole pot) needs the CLTV at finalExpiration.
     const isV4Ready = (b: StashedV4Forfeit) =>
-      !b.stageTwoOutpoint || isCltvMatured(chainTime.value, b.forfeitClaimableAt)
+      isV4SelfRefund(b)
+        ? isCltvMatured(chainTime.value, b.covenant.cancelDelay)
+        : !b.stageTwoOutpoint || isCltvMatured(chainTime.value, b.forfeitClaimableAt)
 
     function v4StatusLabel(b: StashedV4Forfeit): string {
       if (isV4AutoClaiming(b)) return 'Auto-claiming…'
       if (chainTime.value === null) return 'Checking chain time…'
+      if (isV4SelfRefund(b)) {
+        if (isV4Ready(b)) return 'Reclaimable now'
+        const mins = Math.ceil((b.covenant.cancelDelay - chainTime.value) / 60)
+        return `Reclaimable in ~${mins} min (chain time)`
+      }
       if (isV4Ready(b)) return b.stageTwoOutpoint ? 'Ready to sweep the pot' : 'Ready to contest the stall'
       const mins = Math.ceil((b.forfeitClaimableAt - chainTime.value) / 60)
       return `Sweepable in ~${mins} min (chain time)`
     }
     function v4Note(b: StashedV4Forfeit): string {
+      if (isV4SelfRefund(b)) {
+        return isV4Ready(b)
+          ? 'Restored from the server — reclaim your stake. (Your secret isn’t on this device, so only your own stake is recoverable, not the whole pot.)'
+          : 'Restored from the server. The operator usually refunds stalled games automatically; this reclaims your stake as a backup once the timelock lifts.'
+      }
       if (b.stageTwoOutpoint) {
         return isV4Ready(b)
           ? 'Your secret is on-chain and the house never settled — sweep the whole pot to your wallet.'
@@ -222,18 +245,23 @@ export default defineComponent({
       }
       return 'The server never settled. Publish your secret on-chain to contest, then sweep the whole pot if it keeps stalling.'
     }
+    function v4AmountLabel(b: StashedV4Forfeit): string {
+      return isV4SelfRefund(b)
+        ? `Reclaim your stake — ${v4Amount(b).toLocaleString()} sats`
+        : `Claim full pot — ${v4Amount(b).toLocaleString()} sats (your stake + house)`
+    }
     function v4BtnLabel(b: StashedV4Forfeit): string {
       const info = claimingGames.value[b.gameId]
       if (info) return info.mode === 'auto' ? 'Auto-claiming…' : 'Claiming…'
-      return 'Claim full pot'
+      return isV4SelfRefund(b) ? 'Reclaim stake' : 'Claim full pot'
     }
     async function claimV4(gameId: string) {
       message.value = ''
       try {
         await store.dispatch('ark/claimV4Forfeit', { gameId, mode: 'manual' })
-        message.value = 'Recovery step submitted — the whole pot returns to your wallet once the staged forfeit completes.'
+        message.value = 'Recovery step submitted — your funds return to your wallet once it completes.'
       } catch (e: unknown) {
-        message.value = e instanceof Error ? e.message : 'Forfeit failed'
+        message.value = e instanceof Error ? e.message : 'Recovery failed'
       } finally {
         await refresh()
       }
@@ -266,8 +294,8 @@ export default defineComponent({
       isClaiming, isAutoClaiming,
       statusLabel, forfeitStatusLabel, forfeitNote, claimBtnLabel,
       reclaim, claimForfeit,
-      v4Bets, isV4Claiming, isV4AutoClaiming, isV4Ready,
-      v4StatusLabel, v4Note, v4BtnLabel, claimV4,
+      v4Bets, isV4Claiming, isV4AutoClaiming, isV4Ready, isV4SelfRefund,
+      v4StatusLabel, v4Note, v4AmountLabel, v4BtnLabel, claimV4,
     }
   },
 })

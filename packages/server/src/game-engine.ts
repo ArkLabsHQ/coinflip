@@ -193,19 +193,25 @@ export async function renewExpiringHouseVtxos(deps: AppDeps): Promise<boolean> {
 
 /**
  * Renew iff there's something to do: expiring house VTXOs to re-anchor, or
- * boarding deposits to confirm into Ark. Gating this (vs. settling every poll)
- * is the whole point — a blind poll-loop finalizes preconfirmed game VTXOs into
- * batch rounds and pays the per-intent fee each cycle (~5k sats/flip drain).
+ * boarding deposits to confirm into Ark. This is the SAME gate the installed
+ * SDK's `runPeriodicSettle` now applies (it returns early unless there's
+ * near-expiry or confirmable-boarding work, and prices the intent fee) — so the
+ * old "blind poll-loop finalizes every preconfirmed VTXO and drains ~5k/flip"
+ * fear no longer describes the SDK. We keep the gate coinflip-side because
+ * `/play`'s coin-selection needs renewal coupled to its own 30-min buffer (see
+ * startRenewalTimer + selectableHouseVtxos).
  */
 export function shouldRenew(expiringVtxoCount: number, boardingTotalSats: number): boolean {
   return expiringVtxoCount > 0 || boardingTotalSats > 0
 }
 
 /**
- * Production VTXO-renewal timer. The SDK settlement poll-loop is disabled
- * (settlementConfig:false); this replaces it with a long-cadence settle that
- * fires ONLY when `shouldRenew` says so — renewing house VTXOs before their
- * batch expiry and confirming boarding deposits, without the per-poll fee drain.
+ * Production VTXO-renewal timer. We keep the SDK settlement poll-loop disabled
+ * (settlementConfig:false) and drive renewal on a long cadence that fires ONLY
+ * when `shouldRenew` says so — renewing house VTXOs before their batch expiry and
+ * confirming boarding deposits. NB: the installed SDK's poll-loop is itself gated
+ * + fee-aware now, so this is NOT about avoiding a per-poll fee drain; we own the
+ * renewal so it stays coupled to `/play`'s selection buffer (below).
  * A `renewing` guard prevents overlapping settles if one runs long.
  *
  * `selectableHouseVtxos` flags VTXOs expiring within the buffer OR already

@@ -667,8 +667,6 @@ export async function cashoutTx(
     throw error
   }
 
-  console.log('creatorSecret', hex.encode(secret), secret.length)
-  console.log('playerSecret', hex.encode(playerSecret), playerSecret.length)
   let winLeaf = null
   let cashoutAddress = null
   if ((secret.length != 15 && secret.length != 16) || secret.length === playerSecret.length) {

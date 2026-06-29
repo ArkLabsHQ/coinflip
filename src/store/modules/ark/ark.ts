@@ -28,7 +28,7 @@ import {
 } from '@/services/api'
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
 import { resolveV4ForfeitStash, hasClaimableV4Forfeit, v4ClaimStage, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
-import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits } from './v4ForfeitStashStore'
+import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits, saveV4Forfeits } from './v4ForfeitStashStore'
 import { locateEscrowVtxo } from './locateEscrow'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
@@ -164,6 +164,7 @@ export interface StashedRefund {
 // these thin re-exports keep the call-site names familiar.
 import {
   loadStashes as loadRefunds,
+  saveStashes as saveAllRefunds,
   putStash as stashRefund,
   deleteStash as clearRefund,
   patchStash as updateRefundStash,
@@ -980,6 +981,20 @@ const ark: Module<ArkState, RootState> = {
       } catch (e) {
         console.warn('purgeLocalData: failed to clear local wallet store:', e)
       }
+    },
+
+    /**
+     * Wipe ALL local stalled-bet stashes — v3 refunds/forfeits + v4 joint-pot
+     * forfeits — from the `coinflip-stashes` IndexedDB (separate from the SDK's
+     * store that purgeLocalData clears). Used by the deliberate "Clear wallet"
+     * (wallet/clearWallet), NOT by resyncWallet: a resync keeps the key, so its
+     * recovery stashes must survive. clearWallet also drops the wallet key that
+     * the reclaim path needs to sign, so these stashes are orphaned regardless —
+     * leaving them only strands dead "Reclaim stalled bets" rows (which otherwise
+     * survive the clear AND a page reload, since they reload from this DB).
+     */
+    async purgeStashes() {
+      await Promise.all([saveAllRefunds([]), saveV4Forfeits([])])
     },
 
     /**

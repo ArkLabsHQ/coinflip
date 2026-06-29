@@ -62,6 +62,12 @@ export interface GameFilter {
   offset?: number
 }
 
+export interface PlayerGamesFilter {
+  status?: string
+  limit?: number
+  offset?: number
+}
+
 export interface GameStats {
   gamesToday: number
   profit24h: number
@@ -73,6 +79,12 @@ export interface GameRepository {
   update(id: string, updates: GameUpdate): Promise<void>
   get(id: string): Promise<GameRow | undefined>
   list(filter?: GameFilter): Promise<GameRow[]>
+  /**
+   * Every game owned by `playerPubkey`, newest first — the "restore my games"
+   * read. Mirrors `countPendingForPlayer`'s `WHERE player_pubkey = ?` filter;
+   * `limit` is hard-capped by the implementation (see LIST_FOR_PLAYER_MAX).
+   */
+  listForPlayer(playerPubkey: string, opts?: PlayerGamesFilter): Promise<GameRow[]>
   countPendingForPlayer(playerPubkey: string): Promise<number>
   expirePending(maxAgeMinutes: number): Promise<{ expired: number; rows: GameRow[] }>
   stats(): Promise<GameStats>

@@ -8,6 +8,8 @@ import {
 } from './v4ForfeitStashStore'
 import { resolveV4ForfeitStash, type StashedV4Forfeit } from './v4ForfeitStash'
 import type { V4CovenantParams } from '@/services/api'
+import { putStash, saveStashes, loadStashes } from '@/utils/stashStore'
+import type { StashedRefund } from './ark'
 
 // Runtime verification of the happy-path stash LIFECYCLE through the REAL store
 // (the SDK's IndexedDB adapter, against a fake-indexeddb polyfill) — the piece
@@ -93,5 +95,39 @@ describe('v4ForfeitStashStore lifecycle (real store, fake-indexeddb)', () => {
     await deleteV4Forfeit('g1')
     const list = await loadV4Forfeits()
     expect(list.map((s) => s.gameId)).toEqual(['g2'])
+  })
+})
+
+// The deliberate "Clear wallet" (wallet/clearWallet -> ark/purgeStashes) must
+// empty BOTH stash stores that share the coinflip-stashes DB — the v3 refunds
+// (stashStore) and these v4 forfeits. The bug it guards: clearWallet emptied
+// neither, so stale "Reclaim stalled bets" rows survived the clear AND a page
+// reload (they reload from this DB, which a refresh does not clear).
+describe('clearWallet purge — empties both stash stores (fake-indexeddb)', () => {
+  const v3 = (gameId: string): StashedRefund => ({
+    gameId,
+    tier: 330,
+    playerEscrow: { txid: '22'.repeat(32), vout: 0, value: 330 },
+    refundPsbt: 'cHNidP8=',
+    refundCheckpoints: [],
+    finalExpiration: 1_900_000_000, // future -> survives pruneOnLoad
+    createdAt: 1_900_000_000,
+  })
+
+  beforeEach(async () => {
+    await Promise.all([saveStashes([]), saveV4Forfeits([])])
+  })
+
+  it('a single purge clears both the v3 refund and v4 forfeit stores', async () => {
+    await putStash(v3('g1'))
+    await putV4Forfeit(stash('g2'))
+    expect(await loadStashes()).toHaveLength(1)
+    expect(await loadV4Forfeits()).toHaveLength(1)
+
+    // Exactly what ark/purgeStashes runs.
+    await Promise.all([saveStashes([]), saveV4Forfeits([])])
+
+    expect(await loadStashes()).toEqual([])
+    expect(await loadV4Forfeits()).toEqual([])
   })
 })

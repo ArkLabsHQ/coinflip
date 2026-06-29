@@ -147,6 +147,16 @@ export interface StashedRefund {
    * except as the /commit payload at reveal time.
    */
   reveal?: { digit: number; salt: string }
+  /**
+   * Count of consecutive PERMANENT auto-claim failures (a witness-utxo script
+   * mismatch — the stashed refund no longer matches the Service's VTXO, e.g. a
+   * pre-v4 or rotated-signer escrow). Auto-claim backs off once this reaches
+   * MAX_RECLAIM_ATTEMPTS; the stake still recovers via the operator sweep.
+   * Transient (network / CLTV-timing) failures do NOT increment it.
+   */
+  claimFailures?: number
+  /** Last permanent auto-claim error message, for surfacing in the UI. */
+  lastClaimError?: string
 }
 
 // Stash backend moved to IndexedDB via @/utils/stashStore. The shape and
@@ -158,6 +168,7 @@ import {
   deleteStash as clearRefund,
   patchStash as updateRefundStash,
 } from '@/utils/stashStore'
+import { isPermanentReclaimError, hasExhaustedReclaim } from '@/utils/reclaimBackoff'
 
 export interface ArkServerInfo {
   pubkey: string
@@ -1753,6 +1764,12 @@ const ark: Module<ArkState, RootState> = {
       if (chainTime === null) return // can't decide; try next tick
       for (const stash of stashes) {
         if (state.claimingGames[stash.gameId]) continue
+        // Back off games whose reclaim keeps failing PERMANENTLY (the stashed
+        // refund no longer matches the server's VTXO — e.g. a pre-v4 or rotated
+        // escrow that recovers via the operator sweep, not a cooperative reclaim).
+        // Without this, auto-claim re-submits the doomed refund every tick +
+        // reconnect, spamming /v1/tx/submit with 400s.
+        if (hasExhaustedReclaim(stash.claimFailures)) continue
         // Thin failsafe behind the contract watcher: if the server already
         // settled this game (a vtxo_spent event was missed, or the escrow
         // contract failed to register at all), drop the stash + deactivate the
@@ -1775,12 +1792,25 @@ const ark: Module<ArkState, RootState> = {
             await dispatch('reclaimStalledBet', { gameId: stash.gameId, mode: 'auto' })
           }
         } catch (e) {
-          // Transient — next tick retries. Log once so a persistent
-          // failure shows up in console.
-          console.warn(
-            `[auto-claim] ${stash.gameId} failed:`,
-            getErrorMessage(e),
-          )
+          const msg = getErrorMessage(e)
+          // A PERMANENT failure (witness-utxo script mismatch — the stashed
+          // refund no longer matches the server's VTXO, e.g. a pre-v4 / rotated
+          // escrow) will never succeed on retry. Count it so auto-claim backs off
+          // instead of re-submitting the doomed refund every tick + reconnect.
+          // The stake still recovers via the operator sweep. Transient failures
+          // (network, CLTV-timing) are NOT counted and keep retrying.
+          if (isPermanentReclaimError(msg)) {
+            const claimFailures = (stash.claimFailures ?? 0) + 1
+            await updateRefundStash(stash.gameId, { claimFailures, lastClaimError: msg })
+            if (hasExhaustedReclaim(claimFailures)) {
+              console.warn(
+                `[auto-claim] ${stash.gameId}: giving up after ${claimFailures} permanent failures — ` +
+                  `the stashed refund no longer matches the server's VTXO (likely a pre-v4 / rotated ` +
+                  `escrow). The stake recovers via the operator sweep; not retrying.`,
+              )
+            }
+          }
+          console.warn(`[auto-claim] ${stash.gameId} failed:`, msg)
         }
       }
 

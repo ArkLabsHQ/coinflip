@@ -65,13 +65,13 @@
       </div>
       <h1 class="setup-title">{{ mode === 'create' ? 'Create wallet' : 'Restore wallet' }}</h1>
       <p class="setup-subtitle text-muted">
-        {{ mode === 'create' ? 'A fresh keypair, stored in your browser only.' : 'Paste your nsec to recover an existing wallet.' }}
+        {{ mode === 'create' ? 'A fresh keypair, stored in your browser only.' : 'Paste your recovery phrase (or nsec) to recover an existing wallet.' }}
       </p>
 
       <!-- Create flow -->
       <div v-if="mode === 'create'" class="setup-form">
         <div class="warning-box">
-          Your private key will be shown once. Save it securely!
+          Your recovery phrase will be shown once. Save it securely!
         </div>
         <button class="btn-gold btn-lg" @click="createWallet" style="width:100%">
           Generate Wallet
@@ -81,7 +81,7 @@
 
       <!-- Restore flow -->
       <div v-if="mode === 'restore'" class="setup-form">
-        <input class="input" type="text" v-model="privateKey" placeholder="nsec1..." />
+        <input class="input" type="text" v-model="privateKey" placeholder="Recovery phrase or nsec…" />
         <div v-if="error" class="error-msg">{{ error }}</div>
         <button class="btn-primary btn-lg" :disabled="!privateKey" @click="restoreWallet" style="width:100%">
           Restore
@@ -94,15 +94,15 @@
     <transition name="fade">
       <div v-if="showPrivateKey" class="overlay">
         <div class="setup-card casino-card-glow modal-card">
-          <h2 class="modal-title text-gold">Your Private Key</h2>
-          <p class="modal-desc text-muted">Save this key securely. It cannot be recovered!</p>
+          <h2 class="modal-title text-gold">Your Recovery Phrase</h2>
+          <p class="modal-desc text-muted">Save these 12 words securely, in order. They are the only way to recover your wallet!</p>
           <div class="key-box" @click="copyKey">
             <code class="mono">{{ newPrivateKey }}</code>
             <span class="key-hint">Click to copy</span>
           </div>
           <label class="checkbox-label">
             <input type="checkbox" v-model="hasBackedUp" />
-            I have safely stored my private key
+            I have safely stored my recovery phrase
           </label>
           <button class="btn-gold btn-lg" :disabled="!hasBackedUp" @click="onConfirm" style="width:100%">
             Continue
@@ -133,7 +133,8 @@ export default defineComponent({
 
     async function createWallet() {
       await store.dispatch('createNewWallet')
-      newPrivateKey.value = store.getters.walletPrivateKeyEncoded
+      // New wallets are mnemonic-backed; show the recovery phrase as the backup.
+      newPrivateKey.value = store.getters.walletMnemonic
       showPrivateKey.value = true
     }
 
@@ -142,7 +143,7 @@ export default defineComponent({
         await store.dispatch('restoreWallet', privateKey.value)
         router.push('/')
       } catch {
-        error.value = 'Invalid private key'
+        error.value = 'Invalid recovery phrase or key'
       }
     }
 

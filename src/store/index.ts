@@ -8,6 +8,7 @@ export interface State {
   wallet: {
     privateKey: string | null
     publicKey: string | null
+    mnemonic: string | null
     isInitialized: boolean
   }
   walletBalance: number
@@ -25,6 +26,7 @@ export default createStore<State>({
     wallet: {
       privateKey: localStorage.getItem('wallet_privkey'),
       publicKey: localStorage.getItem('wallet_pubkey'),
+      mnemonic: localStorage.getItem('wallet_mnemonic'),
       isInitialized: !!localStorage.getItem('wallet_privkey')
     },
     walletBalance: 0,

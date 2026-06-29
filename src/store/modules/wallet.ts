@@ -2,23 +2,24 @@ import { Module } from 'vuex'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { bech32 } from 'bech32'
+import {
+  generateMnemonicPhrase,
+  deriveKeyFromMnemonic,
+  isMnemonic,
+  normalizeMnemonic,
+} from '@/utils/mnemonic'
 
 export type { WalletState }
 
 interface WalletState {
   privateKey: string | null
   publicKey: string | null
+  mnemonic: string | null
   isInitialized: boolean
 }
 
 interface RootState {
   wallet: WalletState
-}
-
-function generatePrivateKey(): string {
-  const bytes = new Uint8Array(32)
-  crypto.getRandomValues(bytes)
-  return hex.encode(bytes)
 }
 
 function getPublicKey(privateKeyHex: string): string {
@@ -40,6 +41,7 @@ const wallet: Module<WalletState, RootState> = {
   state: {
     privateKey: localStorage.getItem('wallet_privkey'),
     publicKey: localStorage.getItem('wallet_pubkey'),
+    mnemonic: localStorage.getItem('wallet_mnemonic'),
     isInitialized: !!localStorage.getItem('wallet_privkey')
   },
 
@@ -47,48 +49,69 @@ const wallet: Module<WalletState, RootState> = {
     isWalletInitialized: (state: WalletState) => state.isInitialized,
     walletPrivateKey: (state: WalletState) => state.privateKey,
     walletPrivateKeyEncoded: (state: WalletState) => state.privateKey ? nsecEncode(state.privateKey) : false,
-    walletPublicKey: (state: WalletState) => state.publicKey
+    walletPublicKey: (state: WalletState) => state.publicKey,
+    // The BIP39 recovery phrase — present only for mnemonic-backed wallets (new
+    // wallets + phrase imports). Legacy nsec/raw-hex wallets have no phrase, so
+    // the backup UI falls back to the nsec (walletPrivateKeyEncoded) for them.
+    walletMnemonic: (state: WalletState) => state.mnemonic
   },
 
   mutations: {
-    SET_WALLET(state: WalletState, { privateKey, publicKey }: { privateKey: string | null, publicKey: string | null }) {
+    SET_WALLET(state: WalletState, { privateKey, publicKey, mnemonic }: { privateKey: string | null, publicKey: string | null, mnemonic?: string | null }) {
       state.privateKey = privateKey
       state.publicKey = publicKey
+      state.mnemonic = mnemonic ?? null
       state.isInitialized = !!privateKey
     }
   },
 
   actions: {
     createNewWallet({ commit }) {
-      const privateKey = generatePrivateKey()
+      // New wallets are mnemonic-backed: generate a 12-word phrase and derive the
+      // raw 32-byte key from it (BIP86 m/86'/0'/0'/0/0). The STORED key format is
+      // identical to before, so SingleKey.fromHex + the whole game signing path
+      // are unchanged — the phrase is purely a friendlier backup than the nsec.
+      const mnemonic = generateMnemonicPhrase()
+      const privateKey = deriveKeyFromMnemonic(mnemonic)
       const publicKey = getPublicKey(privateKey)
 
       localStorage.setItem('wallet_privkey', privateKey)
       localStorage.setItem('wallet_pubkey', publicKey)
+      localStorage.setItem('wallet_mnemonic', mnemonic)
 
-      commit('SET_WALLET', { privateKey, publicKey })
+      commit('SET_WALLET', { privateKey, publicKey, mnemonic })
     },
 
-    restoreWallet({ commit }, nsecKey: string) {
+    restoreWallet({ commit }, input: string) {
       let privateKey: string
+      let mnemonic: string | null = null
+      let publicKey: string
       try {
-        // Accept both nsec-encoded and raw hex keys
-        if (nsecKey.startsWith('nsec')) {
-          privateKey = nsecDecode(nsecKey)
+        if (isMnemonic(input)) {
+          // BIP39 recovery phrase -> the same key any BIP86 wallet derives.
+          mnemonic = normalizeMnemonic(input)
+          privateKey = deriveKeyFromMnemonic(input)
+        } else if (input.startsWith('nsec')) {
+          privateKey = nsecDecode(input) // legacy nsec backup
         } else {
-          if (nsecKey.length !== 64) throw new Error('Invalid key length')
-          privateKey = nsecKey
+          if (input.length !== 64) throw new Error('Invalid key length')
+          privateKey = input // legacy raw-hex backup
         }
+        // Fail closed: derive the pubkey INSIDE the guard so a bad scalar (any
+        // path) throws here and we never persist a half-broken wallet.
+        publicKey = getPublicKey(privateKey)
       } catch (err) {
-        throw new Error('Invalid private key format', { cause: err })
+        throw new Error('Invalid recovery phrase or key', { cause: err })
       }
-
-      const publicKey = getPublicKey(privateKey)
 
       localStorage.setItem('wallet_privkey', privateKey)
       localStorage.setItem('wallet_pubkey', publicKey)
+      // Persist the phrase only for a phrase import; a legacy nsec/hex import has
+      // no phrase, so clear any stale one (e.g. re-importing over a phrase wallet).
+      if (mnemonic) localStorage.setItem('wallet_mnemonic', mnemonic)
+      else localStorage.removeItem('wallet_mnemonic')
 
-      commit('SET_WALLET', { privateKey, publicKey })
+      commit('SET_WALLET', { privateKey, publicKey, mnemonic })
     },
 
     async clearWallet({ commit, dispatch }) {
@@ -100,8 +123,9 @@ const wallet: Module<WalletState, RootState> = {
       await dispatch('ark/purgeLocalData', null, { root: true })
       localStorage.removeItem('wallet_privkey')
       localStorage.removeItem('wallet_pubkey')
+      localStorage.removeItem('wallet_mnemonic')
 
-      commit('SET_WALLET', { privateKey: null, publicKey: null })
+      commit('SET_WALLET', { privateKey: null, publicKey: null, mnemonic: null })
     }
   }
 }

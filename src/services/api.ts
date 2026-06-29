@@ -356,3 +356,78 @@ export function forfeit(gameId: string, playerEscrow: Outpoint): Promise<Forfeit
     body: JSON.stringify({ playerEscrow }),
   })
 }
+
+// ── Restore my games (history) ────────────────────────────────────────────────
+// "Restore Games from Server": after a browser clear / new device the client
+// has the key but no local history. It proves it holds the key behind
+// `playerPubkey` (so a stranger can't pull someone's history) and pulls the
+// summaries back. Two-step, signature-proof challenge:
+//   1. GET /api/games/challenge?playerPubkey= -> { nonce }
+//   2. client schnorr-signs sha256(utf8(nonce)) (see @/utils/signChallenge)
+//   3. GET /api/games?playerPubkey=&nonce=&sig=&… -> { games, reclaimHints }
+// Mirrors the server's public-routes.ts restore handlers + restore-auth.ts.
+
+/** One game's history summary, as returned by GET /api/games. */
+export interface GameSummary {
+  gameId: string
+  tier: number
+  status: string
+  winner: string | null
+  payoutAmount: number | null
+  rakeAmount: number
+  createdAt: string
+  resolvedAt: string | null
+  /** 'v4' (joint pot), 'v3'/'v2' (per-party escrow) — what the game was minted with. */
+  protocolVersion: string
+}
+
+/**
+ * Self-refund hint for a PENDING v4 game, echoed by GET /api/games. The server
+ * never holds the take-the-pot key, so `playerSecretHex` is ALWAYS null here —
+ * a restored hint can't drive a claim. History display only; actionable v4
+ * recovery (re-arming a refund) is a deferred follow-up (stalled v4 stakes
+ * already self-recover server-side via the refund timer). See ark.ts
+ * `restoreFromServer` for why these are counted but not acted on.
+ */
+export interface V4ReclaimHint {
+  gameId: string
+  contractVersion: 'v4'
+  potOutpoint: { txid: string | null; vout: number; value: number | null }
+  covenant: V4CovenantParams | null
+  forfeitClaimableAt: number | null
+  forfeitEmulatorUrl: string | null
+  playerSecretHex: null
+}
+
+export interface RestoreChallengeResponse {
+  nonce: string
+}
+
+export interface RestoreGamesResponse {
+  games: GameSummary[]
+  reclaimHints: V4ReclaimHint[]
+}
+
+/** Step 1: fetch a signature-proof challenge nonce for `playerPubkey`. */
+export function getRestoreChallenge(playerPubkey: string): Promise<RestoreChallengeResponse> {
+  return request(`/api/games/challenge?playerPubkey=${encodeURIComponent(playerPubkey)}`)
+}
+
+/**
+ * Step 3: fetch the player's game history. `nonce` is the challenge from
+ * `getRestoreChallenge` and `sig` is `signChallenge(nonce, privKeyHex)`. The
+ * server verifies the signature against `playerPubkey` before any DB read, so a
+ * bad/expired proof returns 401. Optional paging/filter via `opts`.
+ */
+export function restoreGamesFromServer(
+  playerPubkey: string,
+  nonce: string,
+  sig: string,
+  opts?: { limit?: number; offset?: number; status?: string },
+): Promise<RestoreGamesResponse> {
+  const params = new URLSearchParams({ playerPubkey, nonce, sig })
+  if (opts?.limit !== undefined) params.set('limit', String(opts.limit))
+  if (opts?.offset !== undefined) params.set('offset', String(opts.offset))
+  if (opts?.status !== undefined) params.set('status', opts.status)
+  return request(`/api/games?${params.toString()}`)
+}

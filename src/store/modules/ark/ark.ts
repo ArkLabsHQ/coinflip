@@ -24,8 +24,11 @@ import {
   getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
   forfeit as apiForfeit, getGame as apiGetGame,
   v4Play, v4Cofund, v4CofundFinalize, v4Reveal,
+  getRestoreChallenge, restoreGamesFromServer,
   type Outpoint, type ForfeitResponse, type V4CovenantParams,
+  type GameSummary, type V4ReclaimHint,
 } from '@/services/api'
+import { signChallenge } from '@/utils/signChallenge'
 import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
 import { resolveV4ForfeitStash, hasClaimableV4Forfeit, v4ClaimStage, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
 import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits } from './v4ForfeitStashStore'
@@ -1843,6 +1846,58 @@ const ark: Module<ArkState, RootState> = {
           // toward keeping the recovery record is the only safe bias for a pot.
           console.warn(`[auto-claim:v4] ${v4.gameId} failed (will retry):`, getErrorMessage(e))
         }
+      }
+    },
+
+    /**
+     * "Restore Games from Server": fetch this wallet's game history back from the
+     * server, proving key ownership. Used after a browser clear / new device,
+     * where the key is present but the local history is gone.
+     *
+     * Signature-proof challenge (matches packages/server/src/restore-auth.ts):
+     *   1. GET a nonce for our pubkey,
+     *   2. schnorr-sign sha256(utf8(nonce)) with our private key,
+     *   3. GET /api/games with (nonce, sig) → { games, reclaimHints }.
+     *
+     * Needs only the raw wallet key — NOT a connected SDK wallet — so it works
+     * on a fresh device before the Ark connect completes (hence it reads
+     * rootState.wallet directly instead of requireWalletAndKey).
+     *
+     * SCOPE: history display only. `reclaimHints` are returned but NOT acted on:
+     * a restored v4 hint has no player secret (`playerSecretHex` is always null
+     * server-side), so it can't drive a take-the-pot claim, and stalled v4
+     * stakes already self-recover server-side via the refund timer. Actionable
+     * v4 recovery from a restore is a deferred follow-up; we only count the hints
+     * here.
+     */
+    async restoreFromServer(
+      { rootState },
+    ): Promise<{ games: GameSummary[]; reclaimHints: V4ReclaimHint[] }> {
+      const playerPubkey = rootState.wallet.publicKey
+      const privateKey = rootState.wallet.privateKey
+      if (!playerPubkey || !privateKey) throw new Error('No wallet key available to restore from')
+      try {
+        const { nonce } = await getRestoreChallenge(playerPubkey)
+        const sig = signChallenge(nonce, privateKey)
+        const { games, reclaimHints } = await restoreGamesFromServer(playerPubkey, nonce, sig)
+        if (reclaimHints.length > 0) {
+          // Counted but intentionally unused — see the SCOPE note above.
+          console.info(`[restore] ${reclaimHints.length} pending v4 reclaim hint(s) returned (history-only; not re-armed)`)
+        }
+        return { games, reclaimHints }
+      } catch (e) {
+        const msg = getErrorMessage(e)
+        // 401 → the signature proof failed (the `request` wrapper throws the
+        // server's body text, which contains "challenge signature" here).
+        if (/401|challenge signature|Invalid or expired/i.test(msg)) {
+          throw new Error("Couldn't verify your wallet — please try again.")
+        }
+        if (/429|Too many requests/i.test(msg)) {
+          throw new Error('Too many restore attempts — please wait a minute and try again.')
+        }
+        // Network / fetch failure (offline, DNS, CORS) surfaces as a TypeError
+        // with no useful body — give a friendly catch-all.
+        throw new Error(`Couldn't reach the server to restore your games (${msg}).`)
       }
     },
   },

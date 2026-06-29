@@ -248,6 +248,10 @@
             {{ resyncing ? 'Resyncing…' : 'Resync Wallet Data' }}
           </button>
           <p class="text-muted mono resync-hint">Clears cached balance/VTXOs and re-syncs from the server. Keeps your key — use after a node/chain reset.</p>
+          <button class="btn-outline" :disabled="restoring" @click="restoreGames">
+            {{ restoring ? 'Restoring…' : 'Restore Games from Server' }}
+          </button>
+          <p class="text-muted mono resync-hint">Fetches your game history from the server, signed with your wallet key. Stalled games recover automatically.</p>
           <button class="btn-danger" @click="showDeleteConfirm = true">Delete Wallet</button>
           <div class="server-info text-muted mono">
             <div>Network: {{ info?.network || '—' }} <span class="net-note">(set by server)</span></div>
@@ -287,6 +291,33 @@
         </div>
       </transition>
 
+      <!-- Restore Games Result Modal -->
+      <transition name="fade">
+        <div v-if="showRestore" class="overlay" @click.self="showRestore = false">
+          <div class="modal-card casino-card-glow">
+            <h3 class="modal-title text-gold">Restored Games</h3>
+            <p v-if="restoreError" class="modal-desc error-hint">{{ restoreError }}</p>
+            <p v-else-if="restoredGames.length === 0" class="modal-desc text-muted">No games found for this wallet.</p>
+            <p v-else class="modal-desc text-muted">
+              {{ restoredGames.length }} game{{ restoredGames.length === 1 ? '' : 's' }} found.
+            </p>
+            <div v-if="restoredGames.length > 0" class="restore-list">
+              <div v-for="g in restoredGames" :key="g.gameId" class="restore-row">
+                <div class="restore-top">
+                  <span class="restore-tier mono">{{ g.tier.toLocaleString() }} <span class="restore-unit">sats</span></span>
+                  <span class="restore-outcome" :class="outcomeClass(g)">{{ outcomeLabel(g) }}</span>
+                </div>
+                <div class="restore-bottom">
+                  <span class="restore-status">{{ g.status }}</span>
+                  <span class="restore-time text-muted">{{ formatRestoreDate(g.createdAt) }}</span>
+                </div>
+              </div>
+            </div>
+            <button class="btn-outline" @click="showRestore = false">Close</button>
+          </div>
+        </div>
+      </transition>
+
       <transition name="toast">
         <div v-if="toastMsg" class="toast" :class="toastType">{{ toastMsg }}</div>
       </transition>
@@ -310,6 +341,7 @@ import {
   type LimitsResponse,
 } from '@/services/boltz'
 import { copyToClipboard } from '@/utils/clipboard'
+import type { GameSummary } from '@/services/api'
 import { detectLnurlInput, resolveLnurlToInvoice } from '@/utils/lnurl'
 import { encodeBip21 } from '@/utils/bip21'
 import { getErrorMessage } from '@/utils/errors'
@@ -784,6 +816,51 @@ export default defineComponent({
       }
     }
 
+    // ── Restore games from server ─────────────────────────────────
+    // Signs a server challenge with the wallet key to pull this player's game
+    // history back (after a browser clear / new device). History display only —
+    // the store action returns reclaimHints but doesn't act on them.
+    const restoring = ref(false)
+    const showRestore = ref(false)
+    const restoredGames = ref<GameSummary[]>([])
+    const restoreError = ref('')
+
+    async function restoreGames() {
+      if (restoring.value) return
+      restoring.value = true
+      restoreError.value = ''
+      try {
+        const { games } = await store.dispatch('ark/restoreFromServer')
+        restoredGames.value = games
+        showRestore.value = true
+      } catch (e) {
+        restoreError.value = getErrorMessage(e)
+        restoredGames.value = []
+        showRestore.value = true
+      } finally {
+        restoring.value = false
+      }
+    }
+
+    // A restored game's outcome from the player's POV. `winner` is 'player' /
+    // 'house' once resolved; pending/expired games have none yet.
+    function outcomeLabel(g: GameSummary): string {
+      if (g.status === 'pending') return 'In progress'
+      if (g.winner === 'player') return 'Won'
+      if (g.winner === 'house') return 'Lost'
+      if (g.status === 'expired') return 'Expired'
+      return g.status
+    }
+    function outcomeClass(g: GameSummary): string {
+      if (g.winner === 'player') return 'won'
+      if (g.winner === 'house') return 'lost'
+      return 'neutral'
+    }
+    function formatRestoreDate(iso: string): string {
+      const t = Date.parse(iso)
+      return Number.isNaN(t) ? iso : new Date(t).toLocaleString()
+    }
+
     async function requestFaucet() {
       if (!arkAddress.value) return
       try {
@@ -843,6 +920,8 @@ export default defineComponent({
       createLnDeposit, resetDeposit, settleFunds,
       showKey, showDeleteConfirm, deleteConfirmText, deleteWallet, requestFaucet,
       resyncing, resyncWallet,
+      restoring, showRestore, restoredGames, restoreError, restoreGames,
+      outcomeLabel, outcomeClass, formatRestoreDate,
       copyText, toastMsg, toastType,
     }
   },
@@ -1157,6 +1236,36 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 10px; padding: 12px; cursor: pointer; margin: 12px 0;
   code { font-size: 0.75rem; word-break: break-all; }
 }
+
+/* Restored-games list inside the restore modal. */
+.restore-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 50vh; overflow-y: auto; margin: 12px 0;
+}
+.restore-row {
+  padding: 10px 12px;
+  background: var(--bg-elevated); border: 1px solid var(--border-light);
+  border-radius: 10px;
+}
+.restore-top {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 0.85rem; font-weight: 600;
+}
+.restore-tier { color: var(--text); }
+.restore-unit { font-size: 0.7rem; color: var(--text-muted); margin-left: 3px; }
+.restore-outcome {
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 2px 8px; border-radius: 6px;
+  background: var(--bg); border: 1px solid var(--border-light); color: var(--text-muted);
+  &.won { color: var(--green, #22c55e); border-color: var(--green, #22c55e); background: rgba(34, 197, 94, 0.1); }
+  &.lost { color: var(--red); border-color: var(--red); background: rgba(239, 68, 68, 0.08); }
+}
+.restore-bottom {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 4px; font-size: 0.72rem;
+}
+.restore-status { color: var(--text-muted); text-transform: capitalize; }
+.restore-time { letter-spacing: 0.3px; }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 

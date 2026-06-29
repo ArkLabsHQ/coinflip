@@ -29,10 +29,11 @@ export interface HouseWalletBundle {
 
 export interface InitHouseWalletOptions {
   /**
-   * Settlement configuration forwarded to `Wallet.create`. Set to `false`
-   * to disable the wallet's auto-renewal loop (useful for tests that
-   * don't want a background ticker firing INTENT_INSUFFICIENT_FEE every
-   * 30 seconds against the regtest fee config).
+   * Settlement configuration forwarded to `Wallet.create`. Set to `false` to
+   * disable the wallet's auto-renewal poll-loop. Production keeps it off and
+   * drives renewal via the gated `startRenewalTimer` (so renewal stays coupled
+   * to `/play`'s selection buffer; see index.ts), and tests pass `false` to keep
+   * a background ticker from firing during regtest.
    */
   settlementConfig?: false | object
 }

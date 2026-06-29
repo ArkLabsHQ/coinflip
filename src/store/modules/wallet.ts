@@ -98,6 +98,11 @@ const wallet: Module<WalletState, RootState> = {
       // namespaced `ark` module, so it must be dispatched with the `ark/` prefix
       // and `{ root: true }` from this (non-namespaced) wallet module.
       await dispatch('ark/purgeLocalData', null, { root: true })
+      // Also wipe the trustless stalled-bet stashes. They live in a SEPARATE
+      // IndexedDB (`coinflip-stashes`) that purgeLocalData/resyncWallet leave
+      // intact on purpose — but a deliberate wallet clear should drop them too,
+      // else stale "Reclaim stalled bets" rows survive the clear (and a reload).
+      await dispatch('ark/purgeStashes', null, { root: true })
       localStorage.removeItem('wallet_privkey')
       localStorage.removeItem('wallet_pubkey')
 

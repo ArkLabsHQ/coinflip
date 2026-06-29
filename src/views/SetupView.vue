@@ -65,13 +65,13 @@
       </div>
       <h1 class="setup-title">{{ mode === 'create' ? 'Create wallet' : 'Restore wallet' }}</h1>
       <p class="setup-subtitle text-muted">
-        {{ mode === 'create' ? 'A fresh keypair, stored in your browser only.' : 'Paste your nsec to recover an existing wallet.' }}
+        {{ mode === 'create' ? 'A fresh keypair, stored in your browser only.' : 'Paste your recovery phrase (or nsec) to recover an existing wallet.' }}
       </p>
 
       <!-- Create flow -->
       <div v-if="mode === 'create'" class="setup-form">
         <div class="warning-box">
-          Your private key will be shown once. Save it securely!
+          Your recovery phrase will be shown once. Save it securely!
         </div>
         <button class="btn-gold btn-lg" @click="createWallet" style="width:100%">
           Generate Wallet
@@ -81,7 +81,7 @@
 
       <!-- Restore flow -->
       <div v-if="mode === 'restore'" class="setup-form">
-        <input class="input" type="text" v-model="privateKey" placeholder="nsec1..." />
+        <input class="input" type="text" v-model="privateKey" placeholder="Recovery phrase or nsec…" />
         <div v-if="error" class="error-msg">{{ error }}</div>
         <button class="btn-primary btn-lg" :disabled="!privateKey" @click="restoreWallet" style="width:100%">
           Restore
@@ -94,15 +94,17 @@
     <transition name="fade">
       <div v-if="showPrivateKey" class="overlay">
         <div class="setup-card casino-card-glow modal-card">
-          <h2 class="modal-title text-gold">Your Private Key</h2>
-          <p class="modal-desc text-muted">Save this key securely. It cannot be recovered!</p>
+          <h2 class="modal-title text-gold">Your Recovery Phrase</h2>
+          <p class="modal-desc text-muted">Save these 12 words securely, in order. They are the only way to recover your wallet!</p>
           <div class="key-box" @click="copyKey">
-            <code class="mono">{{ newPrivateKey }}</code>
-            <span class="key-hint">Click to copy</span>
+            <ol class="mnemonic-grid">
+              <li v-for="(word, i) in phraseWords" :key="i" class="mnemonic-word">{{ word }}</li>
+            </ol>
+            <span class="key-hint">Click to copy all</span>
           </div>
           <label class="checkbox-label">
             <input type="checkbox" v-model="hasBackedUp" />
-            I have safely stored my private key
+            I have safely stored my recovery phrase
           </label>
           <button class="btn-gold btn-lg" :disabled="!hasBackedUp" @click="onConfirm" style="width:100%">
             Continue
@@ -114,7 +116,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, ref } from 'vue'
+import { defineComponent, ref, computed } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
 import { copyToClipboard } from '@/utils/clipboard'
@@ -130,10 +132,13 @@ export default defineComponent({
     const showPrivateKey = ref(false)
     const newPrivateKey = ref('')
     const hasBackedUp = ref(false)
+    // The recovery phrase split into words for the numbered backup grid.
+    const phraseWords = computed(() => newPrivateKey.value.trim().split(/\s+/).filter(Boolean))
 
     async function createWallet() {
       await store.dispatch('createNewWallet')
-      newPrivateKey.value = store.getters.walletPrivateKeyEncoded
+      // New wallets are mnemonic-backed; show the recovery phrase as the backup.
+      newPrivateKey.value = store.getters.walletMnemonic
       showPrivateKey.value = true
     }
 
@@ -142,7 +147,7 @@ export default defineComponent({
         await store.dispatch('restoreWallet', privateKey.value)
         router.push('/')
       } catch {
-        error.value = 'Invalid private key'
+        error.value = 'Invalid recovery phrase or key'
       }
     }
 
@@ -159,7 +164,7 @@ export default defineComponent({
 
     return {
       mode, privateKey, error,
-      showPrivateKey, newPrivateKey, hasBackedUp,
+      showPrivateKey, newPrivateKey, hasBackedUp, phraseWords,
       createWallet, restoreWallet, copyKey, onConfirm,
     }
   },
@@ -473,6 +478,32 @@ export default defineComponent({
   line-height: 1.5;
 }
 
+.mnemonic-grid {
+  list-style: none;
+  counter-reset: word;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px 10px;
+  margin: 0 0 10px;
+  padding: 0;
+  text-align: left;
+}
+.mnemonic-word {
+  counter-increment: word;
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.mnemonic-word::before {
+  content: counter(word);
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  min-width: 14px;
+  text-align: right;
+}
 .key-hint {
   font-size: 0.7rem;
   color: var(--text-muted);

@@ -228,7 +228,7 @@
     <div class="casino-card section-card settings-card">
       <h3 class="section-title">Settings</h3>
       <div class="settings-row">
-        <button class="btn-outline" @click="showKey = true">Back Up Key</button>
+        <button class="btn-outline" @click="showKey = true">Back Up Wallet</button>
         <button class="btn-danger" @click="showDeleteConfirm = true">Delete Wallet</button>
       </div>
     </div>
@@ -237,10 +237,13 @@
     <transition name="fade">
       <div v-if="showKey" class="overlay" @click.self="showKey = false">
         <div class="modal-card casino-card-glow">
-          <h3 class="modal-title text-gold">Private Key</h3>
-          <p class="modal-desc text-muted">Never share this with anyone.</p>
+          <h3 class="modal-title text-gold">Wallet Backup</h3>
+          <p class="modal-desc text-muted">Your recovery phrase (or legacy key). Save it securely; never share it.</p>
           <div class="key-display" @click="copyText(privateKey)">
-            <code class="mono">{{ privateKey }}</code>
+            <ol v-if="phraseWords.length" class="mnemonic-grid">
+              <li v-for="(word, i) in phraseWords" :key="i" class="mnemonic-word">{{ word }}</li>
+            </ol>
+            <code v-else class="mono">{{ privateKey }}</code>
             <span class="address-action">Click to copy</span>
           </div>
           <button class="btn-outline" @click="showKey = false">Close</button>
@@ -294,7 +297,15 @@ export default {
     const router = useRouter()
     const usdBalance = computed(() => store.getters.usdBalance)
     const arkAddress = computed(() => store.getters['ark/address'])
-    const privateKey = computed(() => store.getters.nsecKey || store.state.wallet.privateKey)
+    // Prefer the BIP39 recovery phrase for mnemonic-backed wallets; fall back to
+    // the nsec for legacy key-only wallets (both back up the same key).
+    const privateKey = computed(() => store.getters.walletMnemonic || store.getters.nsecKey || store.state.wallet.privateKey)
+    // Render a 12/24-word recovery phrase as a numbered grid; legacy nsec/hex
+    // (any other word count) falls back to the plain code display.
+    const phraseWords = computed(() => {
+      const w = (privateKey.value || '').trim().split(/\s+/).filter(Boolean)
+      return w.length === 12 || w.length === 24 ? w : []
+    })
 
     const boardingAddress = computed(() => store.getters['ark/boardingAddress'])
     const boardingBalance = computed(() => Number(store.getters['ark/boardingBalance'] || BigInt(0)))
@@ -536,7 +547,7 @@ export default {
     })
 
     return {
-      store, usdBalance, arkAddress, privateKey,
+      store, usdBalance, arkAddress, privateKey, phraseWords,
       boardingAddress, boardingBalance, boardingUtxos,
       depositMethod, withdrawMethod,
       fees, limits,
@@ -557,6 +568,32 @@ export default {
 </script>
 
 <style scoped>
+.mnemonic-grid {
+  list-style: none;
+  counter-reset: word;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px 10px;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+}
+.mnemonic-word {
+  counter-increment: word;
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.mnemonic-word::before {
+  content: counter(word);
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  min-width: 14px;
+  text-align: right;
+}
 .wallet-page {
   max-width: 500px;
   margin: 0 auto;

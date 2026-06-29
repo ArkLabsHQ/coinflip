@@ -106,11 +106,14 @@ export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<App
   // here (rather than relying on the lib's separate SDK copy) avoids the
   // dueling-instance "No handler registered for type coinflip-escrow" failure.
   registerCoinflipContracts(contractHandlers)
-  // Default the SDK's auto-renewal loop OFF (settlementConfig:false). It fires a
-  // settle every ~30s that arkd rejects with INTENT_INSUFFICIENT_FEE, churning
-  // and slowly degrading the house VTXO pool. Renewal is instead driven by the
-  // gated `startRenewalTimer` (long cadence, only when VTXOs are expiring or
-  // boarding needs confirming). Callers (tests) may override.
+  // Keep the SDK's auto-renewal poll-loop OFF (settlementConfig:false). NB: the
+  // installed SDK's `runPeriodicSettle` is now gated (returns early unless VTXOs
+  // are near-expiry or boarding needs confirming) and fee-aware, so the old
+  // "~30s INTENT_INSUFFICIENT_FEE churn" no longer describes it. We still drive
+  // renewal ourselves via the gated `startRenewalTimer` so it stays coupled to
+  // `/play`'s 30-min selection buffer — the SDK's 3-day default vtxoThreshold +
+  // a background loop `/play` can't observe could let it race a not-yet-renewed
+  // VTXO. Callers (tests) may override.
   const { wallet, identity, arkInfo } = await initHouseWallet(repos, {
     settlementConfig: options.walletSettlementConfig ?? false,
   })
@@ -165,8 +168,8 @@ async function main() {
   // reconciles its game eagerly (the failsafe timer above still backstops it).
   startContractWatch(deps)
 
-  // Renew expiring VTXOs + confirm boarding deposits on a long cadence (only
-  // when there's something to do — no per-poll batch-fee drain).
+  // Renew expiring VTXOs + confirm boarding deposits on a long cadence (only when
+  // there's something to do — the same gate the SDK's own poll-loop applies).
   startRenewalTimer(deps)
 
   // Public API server

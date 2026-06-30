@@ -1061,7 +1061,14 @@ const ark: Module<ArkState, RootState> = {
      * survive the clear AND a page reload, since they reload from this DB).
      */
     async purgeStashes() {
-      await Promise.all([saveAllRefunds([]), saveV4Forfeits([])])
+      // Best-effort per store: clear BOTH stash stores even if one rejects, and
+      // never throw — clearWallet must not be blocked from dropping the wallet key
+      // by a single stash-store write failing. Log a rejection so a persistent
+      // failure stays visible.
+      const results = await Promise.allSettled([saveAllRefunds([]), saveV4Forfeits([])])
+      for (const r of results) {
+        if (r.status === 'rejected') console.warn('[purgeStashes] a stash store failed to clear:', r.reason)
+      }
     },
 
     /**

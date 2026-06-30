@@ -115,22 +115,31 @@ const wallet: Module<WalletState, RootState> = {
     },
 
     async clearWallet({ commit, dispatch }) {
-      // Purge the SDK's persisted IndexedDB store BEFORE dropping the key, else
-      // a restored same-key wallet keeps showing the old balance (the VTXO store
-      // outlives the localStorage keys). `purgeLocalData` lives in the
-      // namespaced `ark` module, so it must be dispatched with the `ark/` prefix
-      // and `{ root: true }` from this (non-namespaced) wallet module.
-      await dispatch('ark/purgeLocalData', null, { root: true })
-      // Also wipe the trustless stalled-bet stashes. They live in a SEPARATE
-      // IndexedDB (`coinflip-stashes`) that purgeLocalData/resyncWallet leave
-      // intact on purpose — but a deliberate wallet clear should drop them too,
-      // else stale "Reclaim stalled bets" rows survive the clear (and a reload).
-      await dispatch('ark/purgeStashes', null, { root: true })
+      // Drop the wallet key + identity FIRST. This is the load-bearing part of a
+      // clear and must ALWAYS run. It used to come AFTER the IndexedDB purges
+      // below — but a real-browser IndexedDB write can reject (fake-indexeddb never
+      // does, so the unit suite missed it), and a rejected awaited purge aborted
+      // clearWallet before this point: the key survived and the app reloaded the
+      // old wallet's VTXOs/balance on the next boot. Removing the key is
+      // synchronous and can't fail, so do it up front.
       localStorage.removeItem('wallet_privkey')
       localStorage.removeItem('wallet_pubkey')
       localStorage.removeItem('wallet_mnemonic')
-
       commit('SET_WALLET', { privateKey: null, publicKey: null, mnemonic: null })
+
+      // Best-effort cleanup AFTER the key is gone:
+      //  - purgeLocalData clears the SDK's persisted IndexedDB store (so a restored
+      //    same-key wallet is fresh — the VTXO store outlives the localStorage keys);
+      //  - purgeStashes wipes the trustless stalled-bet stashes (a separate
+      //    `coinflip-stashes` DB) so stale "Reclaim stalled bets" rows don't survive.
+      // Both live in the namespaced `ark` module (`ark/` prefix + `{ root: true }`).
+      // A failure here must NOT propagate — the key is already cleared.
+      try {
+        await dispatch('ark/purgeLocalData', null, { root: true })
+        await dispatch('ark/purgeStashes', null, { root: true })
+      } catch (e) {
+        console.warn('[clearWallet] local-data purge failed (wallet key already cleared):', e)
+      }
     }
   }
 }

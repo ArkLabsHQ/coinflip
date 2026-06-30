@@ -2,8 +2,14 @@ import { Router, Request, Response } from 'express'
 import path from 'path'
 import { isVtxoExpiringSoon } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
-import { reservations, ensureHouseVtxoPool } from '../vtxo-pool.js'
+import { houseVtxoCache, reservations, ensureHouseVtxoPool } from '../vtxo-pool.js'
 import { makeSettlementHandler } from '../settlement-events.js'
+import {
+  collapsedTtlRead,
+  timeoutReject,
+  ADMIN_WALLET_READ_TTL_MS,
+  ADMIN_WALLET_READ_TIMEOUT_MS,
+} from './cached-wallet-reads.js'
 
 /** Same buffer the game-engine uses to treat a VTXO as "expiring soon". */
 const VTXO_EXPIRING_BUFFER_MS = 30 * 60_000
@@ -25,6 +31,26 @@ function withTimeout<T>(
 export function createAdminRoutes(deps: AppDeps): Router {
   const router = Router()
 
+  // The dashboard polls these wallet reads on a short interval. Each underlying
+  // SDK read forces a full re-sync of the house's VTXO history, so without
+  // collapsing concurrent polls + a short snapshot they pile up and the page
+  // "loads forever" (see cached-wallet-reads.ts). VTXO reads reuse the pool
+  // snapshot (houseVtxoCache, kept warm by pool maintenance); all are timeout-
+  // bounded so a stalled sync returns an error instead of hanging the request.
+  const readBalance = collapsedTtlRead(
+    () => deps.wallet.getBalance(),
+    ADMIN_WALLET_READ_TTL_MS,
+    ADMIN_WALLET_READ_TIMEOUT_MS,
+    'getBalance',
+  )
+  const readHistory = collapsedTtlRead(
+    () => deps.wallet.getTransactionHistory(),
+    ADMIN_WALLET_READ_TTL_MS,
+    ADMIN_WALLET_READ_TIMEOUT_MS,
+    'getTransactionHistory',
+  )
+  const readVtxos = () => timeoutReject(houseVtxoCache.get(deps), ADMIN_WALLET_READ_TIMEOUT_MS, 'getVtxos')
+
   // GET / — serve dashboard
   router.get('/', (_req: Request, res: Response) => {
     res.sendFile(path.join(__dirname, 'dashboard.html'))
@@ -42,7 +68,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
     try {
       const [stats, balance, pubkeyBytes] = await Promise.all([
         deps.repos.games.stats(),
-        deps.wallet.getBalance(),
+        readBalance(),
         deps.identity.compressedPublicKey(),
       ])
       res.json({
@@ -177,9 +203,9 @@ export function createAdminRoutes(deps: AppDeps): Router {
       const [address, boardingAddress, balance, pubkeyBytes, vtxos] = await Promise.all([
         deps.wallet.getAddress(),
         deps.wallet.getBoardingAddress(),
-        deps.wallet.getBalance(),
+        readBalance(),
         deps.identity.compressedPublicKey(),
-        deps.wallet.getVtxos(),
+        readVtxos(),
       ])
       res.json({
         address,
@@ -213,7 +239,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
   // GET /api/wallet/history — house wallet transaction history (Ark + boarding combined)
   router.get('/api/wallet/history', async (_req: Request, res: Response) => {
     try {
-      const history = await deps.wallet.getTransactionHistory()
+      const history = await readHistory()
       res.json(history.map((tx) => ({
         txid: tx.key.arkTxid || tx.key.commitmentTxid || tx.key.boardingTxid,
         type: tx.type,
@@ -231,7 +257,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
   // currently reserves each one (cross-referenced against the in-memory ledger).
   router.get('/api/vtxos', async (_req: Request, res: Response) => {
     try {
-      const vtxos = await deps.wallet.getVtxos()
+      const vtxos = await readVtxos()
       const outpointToGame = new Map<string, string>()
       for (const r of reservations.snapshot()) {
         for (const op of r.outpoints) outpointToGame.set(op, r.gameId)

@@ -38,6 +38,9 @@ import { StageTwoScript } from '../joint-pot-stage2'
 import type { CoinflipJointPotOptions } from '../joint-pot'
 import { fullWinAsm, payToAsm, splitAsm } from './covenants'
 
+// Local alias — the SDK's arkade-namespace type re-export changed in 0.4.41.
+type ArkadeParamValue = Uint8Array | bigint | number
+
 /** SHA256 hash-check (no trailing VERIFY — Condition* tapscripts append it). */
 function buildHashCheckScript(hash: Uint8Array): Uint8Array {
   return new Uint8Array([OP.SHA256, 0x20, ...hash, OP.EQUAL])
@@ -112,7 +115,7 @@ export function buildJointPotArtifactContract(
   })
 
   // Contract-wide bind map for the artifact `$param` placeholders.
-  const args: Record<string, arkade.ArkadeParamValue> = {
+  const args: Record<string, ArkadeParamValue> = {
     creatorHash,
     playerHash,
     oddsN,

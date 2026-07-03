@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@arkade-os/boltz-swap": "^0.3.42",
-    "@arkade-os/sdk": "file:../../vendor/arkade-os-sdk-0.4.36-arkade-script-e5e4c1c.tgz",
+    "@arkade-os/sdk": "file:../../vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz",
     "@arklabshq/contract-workflows-prototype": "file:../contract-workflows-prototype",
     "@scure/base": "^1.2.1",
     "arkade-coinflip": "file:../lib",
@@ -17,7 +17,7 @@
     "eventsource": "^4.1.0"
   },
   "overrides": {
-    "@arkade-os/sdk": "file:../../vendor/arkade-os-sdk-0.4.36-arkade-script-e5e4c1c.tgz"
+    "@arkade-os/sdk": "file:../../vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz"
   },
   "devDependencies": {
     "@types/express": "^5.0.2",

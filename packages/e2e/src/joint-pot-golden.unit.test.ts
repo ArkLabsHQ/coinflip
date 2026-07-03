@@ -16,6 +16,7 @@
  */
 
 /* eslint-disable @typescript-eslint/no-require-imports */
+export {} // module scope: avoid TS2451 cross-file const redeclare under CI's fresh ts-jest compile
 const { CoinflipJointPotScript, buildJointPotArtifactContract } = require('arkade-coinflip')
 const { schnorr } = require('@noble/curves/secp256k1.js')
 

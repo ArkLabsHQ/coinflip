@@ -12,6 +12,7 @@
  */
 
 /* eslint-disable @typescript-eslint/no-require-imports */
+export {} // module scope: avoid TS2451 cross-file const redeclare under CI's fresh ts-jest compile
 const { hex } = require('@scure/base')
 const { schnorr } = require('@noble/curves/secp256k1.js')
 const { arkade } = require('@arkade-os/sdk')

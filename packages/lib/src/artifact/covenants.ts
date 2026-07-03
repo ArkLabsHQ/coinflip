@@ -16,7 +16,9 @@
  * hashes) bind to `Uint8Array`; numeric pushes (amounts) bind to `bigint`.
  */
 
-import { arkade } from '@arkade-os/sdk'
+// `AsmToken` is a stable union; define it locally rather than depend on the SDK's
+// arkade-namespace type re-export, whose shape changed in 0.4.41 (ts-sdk #319).
+type AsmToken = string | number | bigint | Uint8Array
 
 /**
  * `payTo(receiver, amount)` — assert the output at the witness-supplied index
@@ -29,7 +31,7 @@ import { arkade } from '@arkade-os/sdk'
  * Mirrors `covenants.payTo` and the SDK HTLC test's `payTo` helper exactly.
  * `receiver`/`amount` are placeholder names (e.g. `'$playerWp'`, `'$pot'`).
  */
-export function payToAsm(receiver: string, amount: string): arkade.AsmToken[] {
+export function payToAsm(receiver: string, amount: string): AsmToken[] {
   return [
     'DUP',
     'INSPECTOUTPUTSCRIPTPUBKEY',
@@ -60,8 +62,8 @@ const REVEAL_CREATOR_PACKET_TYPE = 17 // 0x11
  *
  *   Exit stack: [..covenant args.., 1] if the named party wins, else fails/0.
  */
-export function winPredicateAsm(forPlayerWin: boolean): arkade.AsmToken[] {
-  const tokens: arkade.AsmToken[] = [
+export function winPredicateAsm(forPlayerWin: boolean): AsmToken[] {
+  const tokens: AsmToken[] = [
     // Phase 1: pull both reveal packets.
     REVEAL_PLAYER_PACKET_TYPE, 'INSPECTPACKET', 'VERIFY',
     REVEAL_CREATOR_PACKET_TYPE, 'INSPECTPACKET', 'VERIFY',
@@ -96,7 +98,7 @@ export function fullWinAsm(
   forPlayerWin: boolean,
   winner: string,
   amount: string,
-): arkade.AsmToken[] {
+): AsmToken[] {
   return [...winPredicateAsm(forPlayerWin), 'VERIFY', ...payToAsm(winner, amount)]
 }
 
@@ -113,7 +115,7 @@ export function splitAsm(
   playerAmount: string,
   houseWp: string,
   houseAmount: string,
-): arkade.AsmToken[] {
+): AsmToken[] {
   const houseBody = payToAsm(houseWp, houseAmount)
   return [
     ...houseBody.slice(0, -1), // drop the trailing EQUAL...

@@ -122,6 +122,24 @@ export {
   type CoinflipEscrowOptionsV3,
 } from './script-v3'
 
+// v4 artifact-JSON covenant fragments — asm-token templates that reproduce
+// the v4 covenant bytecode for the SDK's artifact model (ts-sdk PR #319).
+// See artifact/covenants.ts module header.
+export {
+  payToAsm,
+  winPredicateAsm,
+  fullWinAsm,
+  splitAsm,
+} from './artifact/covenants'
+
+// v4 joint-pot contract assembled from the artifact fragments — byte-identical
+// drop-in for CoinflipJointPotScript. See artifact/joint-pot.ts module header.
+export {
+  buildJointPotArtifactContract,
+  type JointPotArtifactContract,
+  type JointPotArkadeScripts,
+} from './artifact/joint-pot'
+
 // v0.4 joint-pot taptree — see joint-pot.ts module header.
 export {
   CoinflipJointPotScript,

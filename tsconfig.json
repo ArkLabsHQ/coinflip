@@ -23,9 +23,6 @@
       ],
       "@arkade-os/sdk/adapters/indexedDB": [
         "node_modules/@arkade-os/sdk/dist/adapters/indexedDB.d.ts"
-      ],
-      "arkade-coinflip/contract": [
-        "node_modules/arkade-coinflip/dist/contract.d.ts"
       ]
     },
     "lib": [

@@ -6,7 +6,7 @@
  */
 
 /* eslint-disable @typescript-eslint/no-require-imports */
-const { computeHouseStake } = require('arkade-coinflip-server/dist/trustless-game.js')
+const { computeHouseStake } = require('arkade-coinflip-server/dist/house-economics.js')
 
 describe('computeHouseStake (variable-odds house stake with edge)', () => {
   it('fair (0 edge): house stakes playerStake·(n−win)/win, win = target−lo', () => {

@@ -79,7 +79,7 @@
 import { defineComponent, ref, computed, onMounted, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import type { StashedRefund, ClaimingInfo } from '@/store/modules/ark/ark'
-import { hasStashedForfeit } from '@/store/modules/ark/forfeitStash'
+import { hasStashedForfeit } from '@/store/modules/ark/ark'
 import type { StashedV4Forfeit } from '@/store/modules/ark/v4ForfeitStash'
 import { pickV4ClaimPath } from '@/store/modules/ark/v4SelfRefund'
 import { isCltvMatured } from '@/utils/cltv'

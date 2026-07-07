@@ -32,10 +32,10 @@
     bip68 "1.0.4"
     light-bolt11-decoder "3.2.0"
 
-"@arkade-os/sdk@file:../../vendor/arkade-os-sdk-0.4.36-arkade-script-e5e4c1c.tgz", "@arkade-os/sdk@file:./vendor/arkade-os-sdk-0.4.36-arkade-script-e5e4c1c.tgz":
-  version "0.4.36"
-  resolved "file:vendor/arkade-os-sdk-0.4.36-arkade-script-e5e4c1c.tgz"
-  integrity sha512-VmpM7ui4TnQq0CYGEnh8k4MTonsZ7No/GG1OvrkA0lcXMOaufYffdHOXWd2sijb9JAvGECHv1BIy69YBkAW9kA==
+"@arkade-os/sdk@file:../../vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz", "@arkade-os/sdk@file:./vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz":
+  version "0.4.41"
+  resolved "file:vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz"
+  integrity sha512-kZPIYB3u3+pVtl5NSg9t2lpsrWL4JKEmG88UGKIzE3sZpR0o0K2TMBr7FOhDi0qEgYL+YJS6Ij04cek62weyQQ==
   dependencies:
     "@bitcoinerlab/descriptors-scure" "3.1.7"
     "@marcbachmann/cel-js" "7.3.1"
@@ -51,7 +51,7 @@
   version "0.0.1"
   resolved "file:packages/contract-workflows-prototype"
   dependencies:
-    "@arkade-os/sdk" "file:../../vendor/arkade-os-sdk-0.4.32-arkade-script-1c02fac.tgz"
+    "@arkade-os/sdk" "file:../../vendor/arkade-os-sdk-0.4.36-arkade-script-e5e4c1c.tgz"
     "@noble/curves" "^1.6.0"
     "@scure/base" "^1.2.1"
     "@scure/btc-signer" "^2.0.1"
@@ -2566,7 +2566,7 @@ argparse@^2.0.1:
   version "0.3.20"
   resolved "file:packages/lib"
   dependencies:
-    "@arkade-os/sdk" "file:../../vendor/arkade-os-sdk-0.4.32-arkade-script-1c02fac.tgz"
+    "@arkade-os/sdk" "file:../../vendor/arkade-os-sdk-0.4.36-arkade-script-e5e4c1c.tgz"
     "@arklabshq/contract-workflows-prototype" "file:../contract-workflows-prototype"
     "@noble/curves" "^1.6.0"
     "@scure/base" "^1.2.1"
@@ -3976,6 +3976,11 @@ express@^4.17.3:
     type-is "~1.6.18"
     utils-merge "1.0.1"
     vary "~1.1.2"
+
+fake-indexeddb@^6.2.5:
+  version "6.2.5"
+  resolved "https://registry.npmjs.org/fake-indexeddb/-/fake-indexeddb-6.2.5.tgz"
+  integrity sha512-CGnyrvbhPlWYMngksqrSSUT1BAVP49dZocrHuK0SvtR0D5TMs5wP0o3j7jexDJW01KSadjBp1M/71o/KR3nD1w==
 
 fast-deep-equal@^3.1.1, fast-deep-equal@^3.1.3:
   version "3.1.3"

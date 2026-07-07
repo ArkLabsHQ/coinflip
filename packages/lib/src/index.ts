@@ -34,38 +34,6 @@ export {
   isResolveEvent,
 } from './events'
 
-// Tapscript definitions
-export {
-  CoinflipEscrowScript,
-  VARIABLE_ODDS_BASE_LEN,
-  type CoinflipEscrowOptions,
-} from './script'
-
-// Transaction building
-export {
-  getPlayerEscrowScript,
-  getHouseEscrowScript,
-  getPlayerEscrowAddress,
-  getHouseEscrowAddress,
-  getHouseEscrowOptions,
-  getPlayerEscrowOptions,
-  getPotAmount,
-  buildForfeitClaimTransaction,
-  buildCovenantSweepTransaction,
-  buildRefundTransaction,
-  type EscrowInput,
-  type ForfeitClaimArgs,
-  type CovenantSweepArgs,
-  type RefundArgs,
-  determineWinner,
-  generateSecret,
-  generateRandomCoinSecret,
-  determineVariableWinner,
-  generateVariableSecret,
-  computeVariableRoll,
-  type BuiltOffchainTx,
-} from './transactions'
-
 // Version-neutral game math — CSPRNG + winner/roll, relocated out of the
 // v2/v3 tx modules so v4 keeps a stable import. See game-math.ts.
 export { randomUniformInt, determineWinnerV3, computeRollV3 } from './game-math'
@@ -84,46 +52,23 @@ export { coinSelect } from './coinselect'
 // package node_modules trees.
 export { contractHandlers } from '@arkade-os/sdk'
 
-// Coinflip escrow registered as a first-class SDK contract type — lets the
-// ContractManager/ContractWatcher track each game's escrow and emit
-// vtxo_received / vtxo_spent events.
-export {
-  COINFLIP_ESCROW_TYPE,
-  CoinflipEscrowContractHandler,
-  COINFLIP_ESCROW_V3_TYPE,
-  CoinflipEscrowV3ContractHandler,
-  registerCoinflipContracts,
-  type CoinflipContractRegistry,
-} from './contract'
-
 // Arkade-script forfeit support — see arkade-forfeit.ts module header.
 export {
-  ARKADE_OP,
   arkadeScriptHash,
   computeArkadeScriptPublicKey,
   buildForfeitArkadeScript,
-  buildSplitArkadeScript,
-  buildForfeitLeafSpec,
-  type ForfeitLeafSpec,
   encodeEmulatorWitness,
   encodeOutputIndexWitness,
   addEmulatorPacket,
 } from './arkade-forfeit'
 
-// Arkade-script win-condition (v0.3) — see arkade-win.ts module header.
+// Arkade-script win-condition — see arkade-win.ts module header.
 export {
   buildVariableOddsWinPredicate,
-  buildVariableOddsWinArkadeScript,
   commitDigit,
   digitHash,
   type DigitCommit,
 } from './arkade-win'
-
-// v0.3 escrow taptree — see script-v3.ts module header.
-export {
-  CoinflipEscrowScriptV3,
-  type CoinflipEscrowOptionsV3,
-} from './script-v3'
 
 // v4 artifact-JSON covenant fragments — asm-token templates that reproduce
 // the v4 covenant bytecode for the SDK's artifact model (ts-sdk PR #319).
@@ -174,20 +119,3 @@ export {
   type SerializedHouseInput,
   type PlayResponseForCofund,
 } from './joint-pot-tx'
-
-// v0.3 transaction-building helpers — see transactions-v3.ts module header.
-export {
-  getPlayerEscrowScriptV3,
-  getHouseEscrowScriptV3,
-  getPlayerEscrowAddressV3,
-  getHouseEscrowAddressV3,
-  getPlayerEscrowOptionsV3,
-  getHouseEscrowOptionsV3,
-  buildCovenantSweepTransactionV3,
-  buildRefundTransactionV3,
-  buildForfeitClaimTransactionV3,
-  type EscrowInputV3,
-  type CovenantSweepArgsV3,
-  type RefundArgsV3,
-  type ForfeitClaimArgsV3,
-} from './transactions-v3'

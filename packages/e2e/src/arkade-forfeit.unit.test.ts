@@ -14,14 +14,22 @@
 const { hex } = require('@scure/base')
 const { schnorr } = require('@noble/curves/secp256k1.js')
 const {
-  ARKADE_OP,
   arkadeScriptHash,
   computeArkadeScriptPublicKey,
   buildForfeitArkadeScript,
-  buildForfeitLeafSpec,
   encodeEmulatorWitness,
   encodeOutputIndexWitness,
 } = require('arkade-coinflip')
+
+// Arkade-extension opcode bytes exercised by the forfeit covenant. The
+// ARKADE_OP catalog was removed from the lib's public surface with the
+// v2/v3 consolidation; the byte encoding under test is unchanged, so the
+// values are inlined here (full catalog: arkade-os/emulator opcode.go).
+const ARKADE_OP = {
+  INSPECTINPUTVALUE: 0xc9,
+  INSPECTOUTPUTVALUE: 0xcf,
+  INSPECTOUTPUTSCRIPTPUBKEY: 0xd1,
+} as const
 
 // Test vector: a fixed P2TR pkScript (v1 segwit, 32-byte witness program).
 // 0x51 = OP_1, 0x20 = push 32, then 32 deterministic bytes.
@@ -120,20 +128,6 @@ describe('arkade-forfeit: tagged hash + key tweak', () => {
     const otherScript = buildForfeitArkadeScript(PLAYER_PKSCRIPT, 20_000n)
     const otherTweaked = computeArkadeScriptPublicKey(pubkey, otherScript)
     expect(hex.encode(otherTweaked)).not.toBe(hex.encode(tweaked))
-  })
-
-  it('buildForfeitLeafSpec returns matching script/hash/tweaked-pubkey', () => {
-    const emulatorPubkey = schnorr.getPublicKey(new Uint8Array(32).fill(0x02))
-    const spec = buildForfeitLeafSpec({
-      recipientPkScript: PLAYER_PKSCRIPT,
-      payAmount: 12_345n,
-      emulatorPubkey,
-    })
-    expect(spec.arkadeScript.length).toBeGreaterThan(0)
-    expect(spec.arkadeScriptHash).toEqual(arkadeScriptHash(spec.arkadeScript))
-    expect(spec.emulatorTweakedPubkey).toEqual(
-      computeArkadeScriptPublicKey(emulatorPubkey, spec.arkadeScript),
-    )
   })
 })
 

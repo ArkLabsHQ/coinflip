@@ -207,7 +207,10 @@ export interface GameDetailsResponse {
   rakeAmount: number
   createdAt: string
   resolvedAt: string | null
-  contractVersion: 'v2' | 'v3'
+  /** Fair roll `(digitHouse + digitPlayer) mod n`, terminal-only; null for the
+   *  cheat-penalty path, for pre-terminal games, and for legacy v2. */
+  roll: number | null
+  contractVersion: 'v2' | 'v3' | 'v4'
   playerHash: string
   playerChoice?: string
   finalExpiration: number | null

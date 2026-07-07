@@ -34,6 +34,34 @@ const toXOnly = (b: Uint8Array): Uint8Array => (b.length === 33 ? b.slice(1) : b
 const COIN_ODDS = { oddsN: 2, oddsTarget: 1, oddsLo: 0 } as const
 
 /**
+ * The display roll for a terminal v3/v4 game — `(digitHouse + digitPlayer) mod n`,
+ * or null when a secret is missing/malformed/out-of-range (a cheat-penalty
+ * decided the winner, not a fair roll). Reveals are `[digit] || salt`
+ * (packets.encodeReveal), so byte 0 is the digit; the coin (no client odds)
+ * maps to n=2. v2 encoded the digit in the reveal LENGTH — no roll here. This
+ * mirrors the reveal-time computation in handleV4Reveal so /details can echo
+ * the same value from the persisted secrets.
+ */
+export function computeGameRoll(
+  houseSecretHex: string | null,
+  playerSecretHex: string | null,
+  oddsN: number | null,
+): number | null {
+  if (!houseSecretHex || !playerSecretHex) return null
+  try {
+    const hs = hex.decode(houseSecretHex)
+    const ps = hex.decode(playerSecretHex)
+    return computeRollV3(
+      { digit: hs[0], salt: hs.slice(1) },
+      { digit: ps[0], salt: ps.slice(1) },
+      oddsN ?? COIN_ODDS.oddsN,
+    )
+  } catch {
+    return null
+  }
+}
+
+/**
  * Which protocol NEW games use — 'v4' (joint pot, the default) or 'v3'
  * (per-party escrow). v0.4 is the default; set PROTOCOL_VERSION=v3 to fall back
  * to the per-party-escrow flow. The client reads the result from /api/network

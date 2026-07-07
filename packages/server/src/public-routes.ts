@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express'
 import type { AppDeps } from './deps.js'
 import { loadEmulatorConfig } from './emulator.js'
-import { newGameProtocolVersion, type V4State } from './trustless-game-v4.js'
+import { newGameProtocolVersion, computeGameRoll, type V4State } from './trustless-game-v4.js'
 import { issueChallenge, verifyChallenge } from './restore-auth.js'
 import { RateLimiter } from './rate-limit.js'
 
@@ -180,6 +180,13 @@ export function createPublicRoutes(deps: AppDeps): Router {
     const houseEscrow = (state.houseEscrow as { txid?: string; vout?: number; value?: number } | undefined) ?? undefined
     const playerEscrow = (state.playerEscrow as { txid?: string; vout?: number; value?: number } | undefined) ?? undefined
     const arkadeForfeit = (state.arkadeForfeit as { houseStake?: number; playerStake?: number; emulatorPubkeyHex?: string; exitDelay?: number } | undefined) ?? undefined
+    const contractVersion = (state.contractVersion as string | undefined) ?? 'v2'
+    // Fair roll (v3/v4 reveal format), terminal-only — both secrets are public
+    // knowledge on-chain by then. Null for the cheat-penalty path and for v2
+    // (which length-encoded the digit rather than storing it in byte 0).
+    const roll = terminal && (contractVersion === 'v3' || contractVersion === 'v4')
+      ? computeGameRoll(game.house_secret_hex, game.player_secret_hex, (state.oddsN as number | undefined) ?? null)
+      : null
     res.json({
       id: game.id,
       tier: game.tier,
@@ -189,8 +196,9 @@ export function createPublicRoutes(deps: AppDeps): Router {
       rakeAmount: game.rake_amount,
       createdAt: game.created_at,
       resolvedAt: game.resolved_at,
+      roll,
       // Contract parameters
-      contractVersion: (state.contractVersion as string | undefined) ?? 'v2',
+      contractVersion,
       playerHash: game.player_hash,
       playerChoice: terminal ? game.player_choice : undefined,
       finalExpiration: state.finalExpiration ?? null,

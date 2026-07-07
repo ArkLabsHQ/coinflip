@@ -457,9 +457,9 @@ const EVOLUTION_BY: Record<Evolution, EvolutionCard> = {
   v4: {
     version: 'v0.4',
     title: 'Joint pot — atomic co-fund, 2 on-chain txs',
-    badge: { label: 'opt-in · wired', cls: 'badge-prev' },
+    badge: { label: 'current', cls: 'badge-prev' },
     summary:
-      "Collapses the two per-party escrows into ONE joint-pot VTXO funded by a single atomic two-party co-fund, then settled by paying the whole pot to the winner — 2 on-chain txs (co-fund + settle) instead of v0.3's three, with the same commit–reveal fairness and emulator covenant. Library, house server, and web client are all wired and proven on regtest; v0.4 is opt-in (server PROTOCOL_VERSION=v4), v0.3 stays the default, and only the happy path is wired client-side so far.",
+      "Collapses the two per-party escrows into ONE joint-pot VTXO funded by a single atomic two-party co-fund, then settled by paying the whole pot to the winner — 2 on-chain txs (co-fund + settle) instead of v0.3's three, with the same commit–reveal fairness and emulator covenant. This is the only version the client, house server, and library run: the legacy v0.2/v0.3 per-party escrow paths have been removed.",
     how: [
       'One co-fund tx spends BOTH stake VTXOs (player + house) into a single joint pot — a 2-round signing handshake the API orchestrates, where each party signs only its OWN input + checkpoint (proven feasible on regtest; v0.3 deliberately avoided this).',
       'The pot is an 8-leaf taptree whose win leaves pay the WHOLE pot to the winner via `payTo(winner, pot)` on the one VTXO — vs v0.3\'s two-escrow `atomicSweep`. Same arkade-script win-predicate + `OP_INSPECTPACKET` reveals.',
@@ -473,19 +473,20 @@ const EVOLUTION_BY: Record<Evolution, EvolutionCard> = {
     ],
   },
 }
-const evolution = ref<Evolution>('v3')
+const evolution = ref<Evolution>('v4')
 
 // Reflect the protocol version the server actually serves (from /api/network):
 // open the page on that version and tailor the "what this client plays" copy.
-// Falls back to v0.3 if the network can't be reached.
-const activeVersion = ref<'v3' | 'v4'>('v3')
+// The client is v0.4-only now, so v4 is the default; fall back to it if the
+// network can't be reached.
+const activeVersion = ref<'v3' | 'v4'>('v4')
 onMounted(async () => {
   try {
     const net = await getNetwork()
     activeVersion.value = net.protocolVersion === 'v4' ? 'v4' : 'v3'
     evolution.value = activeVersion.value
   } catch {
-    /* keep the v0.3 default */
+    /* keep the v0.4 default */
   }
 })
 
@@ -514,6 +515,13 @@ const FLOW_STEPS: Record<Evolution, FlowStep[]> = {
     { num: '3', title: 'Reveal (via extension packet)', body: 'You send <span class="mono">[digit] ‖ salt</span> to the server. The server attaches BOTH reveals as <strong>typed extension packets</strong> (0x10 player, 0x11 creator) to the sweep tx — the emulator reads them on-chain via <span class="mono">OP_INSPECTPACKET</span>.' },
     { num: '4', title: 'Arkade-script settlement', body: 'The emulator runs the <em>win predicate</em>: pulls both reveal packets, verifies their hashes, extracts the digits, and decides via <span class="mono">(dC + dP) mod n ∈ [lo, target)</span>. If the predicate passes, the atomic-sweep covenant pays the full pot to the winner. <strong>The winner signs nothing.</strong>' },
     { num: '!', title: 'If the operator goes dark', body: 'Same three recovery leaves as v0.2 — <span class="mono">playerForfeit</span> (post-reveal stall), <span class="mono">refund</span> (pre-reveal stall), and <span class="mono">*Exit</span> mirrors (operator censoring). v0.3 also adds a <span class="mono">cooperativeSpend</span> leaf so player + creator can settle without the emulator if it disappears.', cls: 'recovery' },
+  ],
+  v4: [
+    { num: '1', title: 'Play & commit', body: 'You commit a <strong>digit + 16-byte salt</strong> (the digit picks your coin face for n=2; the salt blinds it). Only <span class="mono">SHA256(digit‖salt)</span> goes on-chain. The server returns the <strong>joint-pot</strong> covenant params — one pot address, not two per-party escrows.' },
+    { num: '2', title: 'Co-fund the pot', body: 'A <strong>single atomic transaction</strong> spends BOTH stake VTXOs — yours and the house\'s — into <em>one joint-pot VTXO</em>. A 2-round signing handshake the API orchestrates, where each side signs only its OWN input, so neither can move the pot alone.' },
+    { num: '3', title: 'Reveal (via extension packet)', body: 'You send <span class="mono">[digit] ‖ salt</span> to the server. Both reveals ride the settle tx as <strong>typed extension packets</strong> the emulator reads on-chain via <span class="mono">OP_INSPECTPACKET</span> — same commit–reveal fairness as v0.3.' },
+    { num: '4', title: 'Covenant settlement', body: 'The emulator runs the <em>win predicate</em> on the 8-leaf pot, verifies both reveal hashes, and decides via <span class="mono">(dC + dP) mod n ∈ [lo, target)</span>. A win leaf pays the <strong>whole pot</strong> to the winner via <span class="mono">payTo(winner, pot)</span> — 2 on-chain txs (co-fund + settle) instead of v0.3\'s three. <strong>The winner signs nothing.</strong>' },
+    { num: '!', title: 'If the operator goes dark', body: 'A pre-signed <span class="mono">cooperativeSpend</span>, a CLTV <span class="mono">refund</span> (pre-reveal stall), and a staged <span class="mono">playerForfeit</span> → <span class="mono">StageTwo</span> take-all (post-reveal stall, after the CSV delay) keep it non-custodial — the house stays a counterparty, never a permissionless taker.', cls: 'recovery' },
   ],
 }
 

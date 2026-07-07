@@ -60,12 +60,15 @@ export {
   determineWinner,
   generateSecret,
   generateRandomCoinSecret,
-  randomUniformInt,
   determineVariableWinner,
   generateVariableSecret,
   computeVariableRoll,
   type BuiltOffchainTx,
 } from './transactions'
+
+// Version-neutral game math — CSPRNG + winner/roll, relocated out of the
+// v2/v3 tx modules so v4 keeps a stable import. See game-math.ts.
+export { randomUniformInt, determineWinnerV3, computeRollV3 } from './game-math'
 
 // ConditionWitness PSBT-field helpers — split out of transactions.ts (crypto-free,
 // so the browser bundle can import them via joint-pot-tx without Node `crypto`).
@@ -183,8 +186,6 @@ export {
   buildCovenantSweepTransactionV3,
   buildRefundTransactionV3,
   buildForfeitClaimTransactionV3,
-  determineWinnerV3,
-  computeRollV3,
   type EscrowInputV3,
   type CovenantSweepArgsV3,
   type RefundArgsV3,

@@ -26,7 +26,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { hashSecret, networkHrpFromArkInfo, ARK_SERVER_URL } from './house-wallet.js'
 import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyError, BetExceedsCapacityError, KeyedMutex } from './vtxo-pool.js'
 import { loadEmulatorConfig } from './emulator.js'
-import { computeHouseStake } from './trustless-game.js'
+import { computeHouseStake } from './house-economics.js'
 import type { AppDeps } from './deps.js'
 
 const toXOnly = (b: Uint8Array): Uint8Array => (b.length === 33 ? b.slice(1) : b)

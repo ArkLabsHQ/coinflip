@@ -1,11 +1,10 @@
 /**
  * Server HTTP e2e: spin up the coinflip server in-process against the live
- * arkade-regtest stack, hit the public API as a real client would, and
- * assert that
- *   1. GET /api/tiers reflects the funded house wallet
- *   2. POST /api/play returns signed setup/final txs + creates active contracts
- *   3. POST /api/game/:id/sign resolves the game, pays out, and inactivates
- *      the contracts
+ * arkade-regtest stack, hit the public API as a real client would, and assert
+ * that GET /api/tiers reflects the funded house wallet. The v4 game lifecycle
+ * (play → co-fund → reveal) is covered end-to-end by v4-server-play.test.ts;
+ * this file also unit-tests the house-VTXO expiry filter, the reservation
+ * ledger, and the select+reserve mutex.
  *
  * Exercises the full DI chain (AppDeps, repos, contract-manager, game-engine)
  * end-to-end without re-running the boot logic in every test.
@@ -16,14 +15,7 @@ import request from 'supertest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { createHash } from 'crypto'
-import { hex } from '@scure/base'
-import {
-  Wallet,
-  SingleKey,
-  InMemoryWalletRepository,
-  InMemoryContractRepository,
-} from '@arkade-os/sdk'
+import { Wallet } from '@arkade-os/sdk'
 import { faucet, settleWithRetry } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
@@ -34,11 +26,6 @@ const BET_AMOUNT = 1000
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
-
-function toXOnly(b: Uint8Array): Uint8Array {
-  return b.length === 33 ? b.slice(1) : b
-}
-
 
 async function waitForBoarding(wallet: Wallet, minSats: number, timeoutMs = 30_000): Promise<void> {
   const start = Date.now()
@@ -125,45 +112,6 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
     expect(resp.body.maxAvailable).toBeGreaterThanOrEqual(BET_AMOUNT)
   })
 
-  it('POST /api/play starts a trustless game and returns the pot economics', async () => {
-    if (!arkAvailable) return
-
-    // A funded player wallet, used only to commit a hash + change address.
-    // The full play→escrow→commit→sweep flow is covered by trustless-api.test.ts.
-    const playerIdentity = SingleKey.fromRandomBytes()
-    const playerWallet = await Wallet.create({
-      identity: playerIdentity,
-      arkServerUrl: ARK_SERVER_URL,
-      esploraUrl: ESPLORA_URL,
-      storage: {
-        walletRepository: new InMemoryWalletRepository(),
-        contractRepository: new InMemoryContractRepository(),
-      },
-      settlementConfig: false,
-    })
-    const playerChangeAddress = await playerWallet.getAddress()
-    const playerPub = toXOnly(await playerIdentity.compressedPublicKey())
-    const playerSecret = new Uint8Array(16)
-    crypto.getRandomValues(playerSecret)
-    const playerHash = createHash('sha256').update(playerSecret).digest('hex')
-
-    const playRes = await request(app)
-      .post('/api/play')
-      .send({ tier: BET_AMOUNT, playerPubkey: hex.encode(playerPub), playerHash, playerChangeAddress })
-
-    if (playRes.status !== 200) {
-      console.error('POST /api/play unexpected response:', playRes.status, playRes.body)
-    }
-    expect(playRes.status).toBe(200)
-    expect(playRes.body.gameId).toBeTruthy()
-    expect(playRes.body.escrowAddress).toBeTruthy()
-    expect(playRes.body.pot - playRes.body.betAmount).toBe(BET_AMOUNT)
-    expect(playRes.body.houseHash).toMatch(/^[0-9a-f]{64}$/i)
-
-    const row = await serverDeps!.repos.games.get(playRes.body.gameId)
-    expect(row?.status).toBe('pending')
-  }, 180_000)
-
   it('GET /api/tiers rejects bets above maxAvailable', async () => {
     if (!arkAvailable) return
     const resp = await request(app).get('/api/tiers').expect(200)
@@ -171,21 +119,6 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
     expect(resp.body.maxAvailable).toBeLessThanOrEqual(
       resp.body.tiers.reduce((m: number, t: number) => Math.max(m, t), 0),
     )
-  })
-
-  it('POST /api/play 400 on missing fields', async () => {
-    if (!arkAvailable) return
-    const resp = await request(app).post('/api/play').send({})
-    expect(resp.status).toBe(400)
-    expect(resp.body.error).toMatch(/Missing required fields/i)
-  })
-
-  it('POST /api/game/:id/commit 404 on unknown game', async () => {
-    if (!arkAvailable) return
-    const resp = await request(app)
-      .post('/api/game/nonexistent-id/commit')
-      .send({ playerSecretHex: '00'.repeat(16), playerEscrow: { txid: 'a'.repeat(64), vout: 0, value: 1000 } })
-    expect(resp.status).toBe(404)
   })
 })
 

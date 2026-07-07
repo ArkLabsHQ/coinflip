@@ -9,7 +9,7 @@
  *   - POST /api/wallet/fragment  — split the pool into uniform pieces
  *
  * The reserved-VTXO→game mapping is the headline feature, so it's proven two
- * ways: a deterministic ledger reservation, and a real handleTrustlessPlay.
+ * ways: a deterministic ledger reservation, and a real v4 joint-pot play.
  */
 
 import express from 'express'
@@ -20,6 +20,7 @@ import path from 'path'
 import { createHash } from 'crypto'
 import { hex } from '@scure/base'
 import { SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository } from '@arkade-os/sdk'
+import { packets } from '@arklabshq/contract-workflows-prototype'
 import { faucet, settleWithRetry } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
@@ -146,7 +147,7 @@ describe('admin HTTP API: operator endpoints', () => {
     expect(after.body.activeGames).toBe(0)
   })
 
-  it('a real trustless play shows up in the reservation ledger', async () => {
+  it('a real v4 play shows up in the reservation ledger', async () => {
     if (!arkAvailable) return
     const id = SingleKey.fromRandomBytes()
     const w = await Wallet.create({
@@ -154,12 +155,18 @@ describe('admin HTTP API: operator endpoints', () => {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
-    const secret = Buffer.from(new Uint8Array(16)); crypto.getRandomValues(secret)
-    const play = await server.handleTrustlessPlay({
+    // v4 /play reserves the house side of the joint pot; the player funds their
+    // side later at co-fund, so no player funding is needed to create the ledger
+    // reservation this test asserts on.
+    const playerReveal = packets.encodeReveal(0, crypto.getRandomValues(new Uint8Array(16)))
+    const playerHash = createHash('sha256').update(playerReveal).digest('hex')
+    const addr = await w.getAddress()
+    const play = await server.handleV4Play({
       tier: BET,
       playerPubkey: hex.encode(toXOnly(await id.compressedPublicKey())),
-      playerHash: createHash('sha256').update(secret).digest('hex'),
-      playerChangeAddress: await w.getAddress(),
+      playerHash,
+      playerPayoutAddress: addr,
+      playerChangeAddress: addr,
     }, deps)
 
     const res = await request(app).get('/api/reservations').expect(200)

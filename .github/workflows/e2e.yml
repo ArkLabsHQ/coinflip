@@ -99,7 +99,7 @@ jobs:
         # filtered by test NAME to the stack-free ones. Path anchored to the
         # exact file — the broader `coinflip` substring matches every test file
         # because the working directory itself contains "coinflip".
-        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="src/coinflip\\.test\\.ts$" -t "gameFromEvents|determineWinner|generateSecret|CoinflipEscrowScript|coinSelect|event type guards"
+        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="src/coinflip\\.test\\.ts$" -t "gameFromEvents|coinSelect|event type guards"
 
   e2e-tests:
     name: E2E Integration Tests
@@ -181,22 +181,24 @@ jobs:
         # the probe runs ISOLATED on a fresh stack below (issue #40). Exclude it here.
         run: npx jest --runInBand --forceExit --testTimeout=300000 --ci --testPathIgnorePatterns "/node_modules/" "v4-staged-forfeit-probe"
 
-      - name: Concurrent load test (100 games / 5 wallets)
+      - name: Concurrent load test (100 v4 joint-pot games / 5 wallets)
         working-directory: packages/e2e
-        # Gated behind LOAD_TEST (skipped in the run above). Its own DATA_DIR
-        # isolates the house wallet from the main suite. Proves the trustless
-        # flow sustains real concurrent play: distinct house-VTXO reservations,
-        # per-game commit locking, covenant settlement, and the VTXO_NOT_FOUND
-        # sweep-retry — none of which a unit test can cover. Scale via
-        # LOAD_WALLETS / LOAD_GAMES (defaults 5 × 20 = 100).
+        # The v4 successor to the retired v2/v3 load test. Proves the joint-pot
+        # flow sustains real concurrent play at scale: distinct house-VTXO
+        # reservations under contention, covenant co-fund + settle, emulator
+        # cosigning, and per-phase throughput — none of which a unit test covers.
+        # v4-scale also runs at its small default (3×2) in the main e2e pass
+        # above; this step drives it at 100 games. Scale via LOAD_WALLETS /
+        # LOAD_GAMES / LOAD_CONC.
         env:
-          DATA_DIR: ./data-load
-          LOAD_TEST: '1'
+          LOAD_WALLETS: '5'
+          LOAD_GAMES: '20'
+          LOAD_CONC: '6'
           ARK_SERVER_URL: http://localhost:7070
           ESPLORA_URL: http://localhost:3000/api
           EMULATOR_URL: http://localhost:7073
           EMULATOR_PUBLIC_URL: http://localhost:7073
-        run: npx jest --runInBand --forceExit --testTimeout=600000 src/load-100-games.test.ts
+        run: npx jest --runInBand --forceExit --testTimeout=600000 src/v4-scale.test.ts
 
       - name: Restart regtest before the clock-sensitive staged-forfeit probe
         # The setChainTime tests above advance the regtest MTP ~1h to mature CLTV

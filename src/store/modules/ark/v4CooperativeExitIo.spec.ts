@@ -44,8 +44,17 @@ function makeIo(over: {
 afterEach(() => vi.restoreAllMocks())
 
 describe('makeCooperativeExitIo — potOnchainStatus mapping', () => {
-  it('returns null while the pot tx is not yet mined (not-found or in mempool)', async () => {
+  it('returns null while the pot tx is in the mempool (getTxStatus resolves {confirmed:false})', async () => {
     const { io } = makeIo({ getTxStatus: async () => ({ confirmed: false }) })
+    expect(await io.potOnchainStatus()).toBeNull()
+  })
+
+  it('returns null (NOT throws) when the pot tx is not broadcast yet — EsploraProvider 404s', async () => {
+    // The real EsploraProvider.getTxStatus THROWS a 404 for a txid esplora has never
+    // seen (the pot tx before the unroll broadcasts it). potOnchainStatus must swallow
+    // that as null so the step machine drives unrollPot — a throw here would stall the
+    // whole flow (the unroll would never start).
+    const { io } = makeIo({ getTxStatus: async () => { throw new Error('Not Found') } })
     expect(await io.potOnchainStatus()).toBeNull()
   })
 

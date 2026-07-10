@@ -1603,7 +1603,7 @@ const ark: Module<ArkState, RootState> = {
      * dispatch manually (e.g. immediately after connect so a stash
      * past expiry doesn't wait one full tick).
      */
-    async runAutoClaim({ state, rootState, dispatch }) {
+    async runAutoClaim({ state, rootState, commit, dispatch }) {
       if (!sdkWallet) return
       const stashes = await loadRefunds()
       if (!stashes.length) return
@@ -1685,6 +1685,16 @@ const ark: Module<ArkState, RootState> = {
           // reached AFTER the cheaper self-refund is exhausted, so it can't regress it.
           // ⚠️ The unroll's multi-tick browser stepping is LIVE-UNVERIFIED — see
           // v4CooperativeExitIo. Any glue bug stalls the flow visibly, never mis-sends.
+          //
+          // Hold the per-game claim mutex for the duration of the step — same as the
+          // sibling claim paths (claimV4Forfeit etc). The 15s auto-claim interval does
+          // NOT await the prior tick, and a single step fans out to several network
+          // round-trips (balance / tx-status / unroll broadcast / co-sign), so without
+          // this two overlapping ticks could double-unroll / double-broadcast the exit
+          // for the same game. The loop-top `claimingGames` guard + this SET make it a
+          // true cross-tick mutex; it's cleared each tick so it never holds across the
+          // multi-tick wait.
+          commit('SET_CLAIMING', { gameId: v4.gameId, info: { kind: 'forfeit', mode: 'auto' } })
           try {
             const { wallet, privateKey } = requireWalletAndKey(rootState)
             const io = makeCooperativeExitIo({
@@ -1705,6 +1715,8 @@ const ark: Module<ArkState, RootState> = {
             console.info(`[auto-claim:v4-exit] ${v4.gameId}: ${progress.stage}${progress.detail ? ` — ${progress.detail}` : ''}`)
           } catch (e) {
             console.warn(`[auto-claim:v4-exit] ${v4.gameId} exit step failed (will retry):`, getErrorMessage(e))
+          } finally {
+            commit('CLEAR_CLAIMING', v4.gameId)
           }
           continue
         }

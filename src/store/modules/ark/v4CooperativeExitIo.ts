@@ -88,11 +88,23 @@ export function makeCooperativeExitIo(deps: CooperativeExitIoDeps): CooperativeE
     },
 
     async potOnchainStatus() {
-      // getTxStatus collapses "not broadcast yet" and "in mempool" to {confirmed:false};
-      // return null for BOTH (the step machine then (re)drives the idempotent unroll)
-      // and a confirmed status only once the pot tx is mined. blockTime is the confirming
-      // block's time — the basis the exit CSV (relative, seconds) is measured from.
-      const st = await explorer.getTxStatus(potOutpoint.txid)
+      // Map the provider to the step machine's null / confirmed contract, treating
+      // "not yet on-chain" (BOTH not-broadcast AND in-mempool) as null so the machine
+      // (re)drives the idempotent unroll, and a confirmed status only once mined.
+      // NB: EsploraProvider.getTxStatus THROWS (404) for a txid esplora has never seen
+      // — i.e. the pot tx BEFORE the unroll broadcasts it — and only resolves
+      // {confirmed:false} once the tx is in the mempool. Catch the throw as null (not
+      // yet broadcast); without this the very first tick that reaches here stalls the
+      // whole flow, never calling unrollPot. The SDK's own Unroll.Session.next wraps
+      // this same call in try/catch for exactly this reason.
+      let st: Awaited<ReturnType<OnchainProvider['getTxStatus']>>
+      try {
+        st = await explorer.getTxStatus(potOutpoint.txid)
+      } catch {
+        return null
+      }
+      // blockTime is the confirming block's time — the basis the exit CSV (relative,
+      // seconds) is measured from.
       return st.confirmed ? { confirmed: true, confirmedAt: st.blockTime } : null
     },
 

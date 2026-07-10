@@ -6,7 +6,7 @@ import {
   ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
   RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
   type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity, type ArkTxInput,
-  type Activity,
+  type Activity, type NetworkName,
 } from '@arkade-os/sdk'
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
 // Subpath import (not the package root) so the browser bundle doesn't pull in
@@ -17,7 +17,7 @@ import { initSwaps, destroySwaps } from '@/services/boltz'
 import { singleFlight } from '@/utils/singleFlight'
 import {
   getNetwork, getGame as apiGetGame,
-  v4Play, v4Cofund, v4CofundFinalize, v4Reveal,
+  v4Play, v4Cofund, v4CofundFinalize, v4Reveal, v4CooperativeExit,
   getRestoreChallenge, restoreGamesFromServer,
   type Outpoint, type V4CovenantParams,
   type GameSummary, type V4ReclaimHint,
@@ -26,6 +26,8 @@ import { signChallenge } from '@/utils/signChallenge'
 import { resolveV4ForfeitStash, hasClaimableV4Forfeit, v4ClaimStage, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
 import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits, saveV4Forfeits } from './v4ForfeitStashStore'
 import { buildV4SelfRefund, pickV4ClaimPath, rebuildJointPot, isAlreadySpentError, isTransientSelfRefundError, rearmV4ReclaimHint } from './v4SelfRefund'
+import { stepCooperativeExit } from './v4CooperativeExit'
+import { makeCooperativeExitIo, V4_EXIT_FEE_SATS, V4_EXIT_BUMPER_MIN_SATS } from './v4CooperativeExitIo'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
 import { getErrorMessage } from '@/utils/errors'
@@ -420,6 +422,14 @@ let reconnectAttempts = 0
 // so a click during a background tick (or vice versa) can't double-spend.
 let autoClaimTimer: ReturnType<typeof setInterval> | null = null
 const AUTO_CLAIM_INTERVAL_MS = 15_000
+
+// Feature flag (build-time): the emulator-free ON-CHAIN cooperative-exit escalation
+// in runAutoClaim ships DORMANT. Its multi-tick unroll is not yet verified against a
+// live regtest/browser, so it stays off unless the operator explicitly opts in by
+// building the client with VUE_APP_COOPERATIVE_EXIT_ENABLED=true. Off ⇒ the exhausted
+// self-refund path behaves exactly as before (give up; the stake still recovers via
+// the server's own refund timer). See v4CooperativeExitIo.
+const COOPERATIVE_EXIT_ENABLED = process.env.VUE_APP_COOPERATIVE_EXIT_ENABLED === 'true'
 // Stop fn for the SDK's incoming-funds watcher: one SSE stream over the
 // wallet's active contracts + the SDK's own 60s failsafe poll. Push-based
 // balance updates replace our manual refreshBalance polling.
@@ -1601,7 +1611,7 @@ const ark: Module<ArkState, RootState> = {
      * dispatch manually (e.g. immediately after connect so a stash
      * past expiry doesn't wait one full tick).
      */
-    async runAutoClaim({ state, dispatch }) {
+    async runAutoClaim({ state, rootState, commit, dispatch }) {
       if (!sdkWallet) return
       const stashes = await loadRefunds()
       if (!stashes.length) return
@@ -1671,7 +1681,58 @@ const ark: Module<ArkState, RootState> = {
         // already-spent case clears the stash inside claimV4Forfeit; this catches
         // OTHER permanent failures. The staged-forfeit path is intentionally never
         // backed off (keep retrying a take-the-whole-pot claim).
-        if (selfRefund && hasExhaustedReclaim(v4.claimFailures)) continue
+        if (selfRefund && hasExhaustedReclaim(v4.claimFailures)) {
+          // Gated OFF by default (COOPERATIVE_EXIT_ENABLED) — when disabled we give up
+          // on the exhausted self-refund exactly as before (the stake still recovers via
+          // the server's refund timer). Only when the operator opts in does the on-chain
+          // escalation below run. Keeps the not-yet-live-verified path dormant in prod.
+          if (!COOPERATIVE_EXIT_ENABLED) continue
+          // ESCALATION: the emulator-based self-refund has permanently failed (the
+          // emulator is unreachable / the covenant keeps getting rejected). Fall to
+          // the EMULATOR-FREE on-chain cooperative exit (leaf 7): unroll the pot
+          // on-chain, then spend `cooperativeSpendExit`, the house co-signing via
+          // POST /api/v4/game/:id/cooperative-exit. Fail-safe by construction
+          // (stepCooperativeExit moves NOTHING until the player funds the on-chain
+          // bumper AND the exit CSV matures AND the house co-signs); it re-derives its
+          // stage from the chain each tick, so we just step it once per pass. Only
+          // reached AFTER the cheaper self-refund is exhausted, so it can't regress it.
+          // ⚠️ The unroll's multi-tick browser stepping is LIVE-UNVERIFIED — see
+          // v4CooperativeExitIo. Any glue bug stalls the flow visibly, never mis-sends.
+          //
+          // Hold the per-game claim mutex for the duration of the step — same as the
+          // sibling claim paths (claimV4Forfeit etc). The 15s auto-claim interval does
+          // NOT await the prior tick, and a single step fans out to several network
+          // round-trips (balance / tx-status / unroll broadcast / co-sign), so without
+          // this two overlapping ticks could double-unroll / double-broadcast the exit
+          // for the same game. The loop-top `claimingGames` guard + this SET make it a
+          // true cross-tick mutex; it's cleared each tick so it never holds across the
+          // multi-tick wait.
+          commit('SET_CLAIMING', { gameId: v4.gameId, info: { kind: 'forfeit', mode: 'auto' } })
+          try {
+            const { wallet, privateKey } = requireWalletAndKey(rootState)
+            const io = makeCooperativeExitIo({
+              identity: SingleKey.fromHex(privateKey),
+              explorer: wallet.onchainProvider,
+              indexer: new RestIndexerProvider(state.server),
+              network: state.networkPreset as NetworkName,
+              gameId: v4.gameId,
+              stash: v4,
+              exitFeeSats: V4_EXIT_FEE_SATS,
+              cosign: v4CooperativeExit,
+            })
+            const progress = await stepCooperativeExit({
+              exitDelaySeconds: Number(v4.covenant.exitDelay),
+              minFeeSats: V4_EXIT_BUMPER_MIN_SATS,
+              io,
+            })
+            console.info(`[auto-claim:v4-exit] ${v4.gameId}: ${progress.stage}${progress.detail ? ` — ${progress.detail}` : ''}`)
+          } catch (e) {
+            console.warn(`[auto-claim:v4-exit] ${v4.gameId} exit step failed (will retry):`, getErrorMessage(e))
+          } finally {
+            commit('CLEAR_CLAIMING', v4.gameId)
+          }
+          continue
+        }
         // Positive GC ONLY: if the server settled this game normally, drop the
         // stale stash. We must NOT infer "settled" from a claim-error string —
         // a transient emulator rejection can carry "spent"/"not found" and would

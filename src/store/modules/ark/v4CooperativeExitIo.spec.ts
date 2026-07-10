@@ -10,8 +10,16 @@
  * network/wallet is needed.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { OnchainWallet, Unroll } from '@arkade-os/sdk'
+import { OnchainWallet, Unroll, SingleKey, Transaction } from '@arkade-os/sdk'
+import { hex, base64 } from '@scure/base'
+import { schnorr } from '@noble/curves/secp256k1.js'
 import { makeCooperativeExitIo, type CooperativeExitIoDeps } from './v4CooperativeExitIo'
+import { stepCooperativeExit, type CooperativeExitRequest } from './v4CooperativeExit'
+import type { StashedV4Forfeit } from './v4ForfeitStash'
+
+const xonlyOf = (b: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(b))
+const p2tr = (b: number): Uint8Array => new Uint8Array([0x51, 0x20, ...xonlyOf(b)])
+const h = (b: number): string => hex.encode(new Uint8Array(32).fill(b))
 
 const POT = { txid: 'ab'.repeat(32), vout: 0, value: 2000 }
 
@@ -120,5 +128,92 @@ describe('makeCooperativeExitIo — unrollPot stepping', () => {
 
     const { io } = makeIo()
     await expect(io.unrollPot()).resolves.toBeUndefined()
+  })
+})
+
+describe('makeCooperativeExitIo — end-to-end composition with stepCooperativeExit', () => {
+  // The real IO factory driving the real state machine over faithful mock providers:
+  // proves the multi-tick flow COMPOSES through every stage, exercising the exact
+  // IO↔state-machine seam that Finding 1 (getTxStatus throwing) lived in. Grounded in
+  // the CORRECTED SDK contract (getTxStatus throws a 404 while the pot is unbroadcast).
+  it('drives needs-fee → unrolling → awaiting-csv → done, ending in a broadcast exit', async () => {
+    const STAKE = 50_000
+    const EXIT_DELAY = 86_528
+    const BLOCK_TIME = 5_000
+    const player = SingleKey.fromRandomBytes()
+    const house = SingleKey.fromRandomBytes()
+    const housePub = await house.xOnlyPublicKey()
+    const playerPub = await player.xOnlyPublicKey()
+
+    // creatorPubkey = the house key, so houseCosign can sign leaf 7's creator slot and
+    // the split-back finalizes (2-of-2 [player, creator]).
+    const covenant = {
+      creatorPubkey: hex.encode(housePub), playerPubkey: hex.encode(playerPub), serverPubkey: hex.encode(xonlyOf(3)),
+      creatorHash: h(0xc0), playerHash: h(0xd0),
+      finalExpiration: 1_900_000_000, cancelDelay: 1_800_000_000, exitDelay: EXIT_DELAY,
+      oddsN: 2, oddsTarget: 1, oddsLo: 0, emulatorPubkey: hex.encode(xonlyOf(4)),
+      playerPayoutPkScript: hex.encode(p2tr(0xa0)), housePayoutPkScript: hex.encode(p2tr(0xb0)),
+      playerStake: String(STAKE), houseStake: String(STAKE),
+    }
+    const stash = {
+      covenant, potOutpoint: { txid: 'cc'.repeat(32), vout: 0, value: 2 * STAKE },
+    } as unknown as Pick<StashedV4Forfeit, 'covenant' | 'potOutpoint'>
+
+    // Mutable mock chain state, advanced by the test between ticks.
+    const chain = { bumperBalance: 0, potConfirmed: false, now: 1_000 }
+
+    const explorer = {
+      async getTxStatus() {
+        // Faithful to the real EsploraProvider: 404-throw while the pot is unbroadcast.
+        if (!chain.potConfirmed) throw new Error('Not Found')
+        return { confirmed: true, blockTime: BLOCK_TIME, blockHeight: 1 }
+      },
+      async getChainTip() { return { height: 1, time: chain.now, hash: 'h' } },
+      broadcastTransaction: vi.fn(async () => 'EXITTXID'),
+    }
+    vi.spyOn(OnchainWallet, 'create').mockResolvedValue(
+      { getBalance: async () => chain.bumperBalance } as unknown as OnchainWallet,
+    )
+    const unrollDo = vi.fn(async () => {})
+    vi.spyOn(Unroll.Session, 'create').mockImplementation(async () => {
+      let i = 0 // one UNROLL wave then WAIT, per session
+      return { next: async () => (i++ === 0
+        ? { type: Unroll.StepType.UNROLL, do: unrollDo }
+        : { type: Unroll.StepType.WAIT, do: vi.fn() }) } as unknown as Unroll.Session
+    })
+    // House co-sign = sign input 0 of the player-signed exit with the house key.
+    const houseCosign = vi.fn(async (_g: string, req: CooperativeExitRequest) => {
+      const signed = await house.sign(Transaction.fromPSBT(base64.decode(req.exitTxPsbt)), [0])
+      return { exitTxPsbt: base64.encode(signed.toPSBT()) }
+    })
+
+    const io = makeCooperativeExitIo({
+      identity: player,
+      explorer: explorer as unknown as CooperativeExitIoDeps['explorer'],
+      indexer: {} as CooperativeExitIoDeps['indexer'],
+      network: 'regtest', gameId: 'g1', stash, exitFeeSats: 1_000, cosign: houseCosign,
+    })
+    const tick = () => stepCooperativeExit({ exitDelaySeconds: EXIT_DELAY, minFeeSats: 20_000, io })
+
+    // 1. No bumper funds → needs-fee.
+    expect((await tick()).stage).toBe('needs-fee')
+
+    // 2. Fund the bumper; pot still unbroadcast (getTxStatus 404s → null) → unroll runs.
+    chain.bumperBalance = 20_000
+    expect((await tick()).stage).toBe('unrolling')
+    expect(unrollDo).toHaveBeenCalled() // the UNROLL wave actually broadcast
+
+    // 3. Pot confirms on-chain but the exit CSV hasn't matured → awaiting-csv.
+    chain.potConfirmed = true
+    chain.now = BLOCK_TIME + 10
+    expect((await tick()).stage).toBe('awaiting-csv')
+
+    // 4. Chain time passes the exit CSV → build + house co-sign + broadcast → done.
+    chain.now = BLOCK_TIME + EXIT_DELAY + 10
+    const final = await tick()
+    expect(final.stage).toBe('done')
+    expect(final.exitTxid).toBe('EXITTXID')
+    expect(houseCosign).toHaveBeenCalledOnce()
+    expect(explorer.broadcastTransaction).toHaveBeenCalledOnce()
   })
 })

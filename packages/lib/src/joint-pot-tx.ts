@@ -16,6 +16,7 @@ import {
   CSVMultisigTapscript,
   Transaction,
   ArkAddress,
+  timelockToSequence,
   type ArkTxInput,
   type TapLeafScript,
 } from '@arkade-os/sdk'
@@ -320,6 +321,65 @@ export function buildJointPotRefundTx(args: {
   return built
 }
 
+/**
+ * A built (unsigned) ON-CHAIN exit tx. Unlike the offchain builders, the CSV
+ * `*Exit` leaves can only be spent on-chain (arkd rejects relative CSV offchain),
+ * so this is a raw taproot spend of the UNROLLED pot UTXO — the caller signs it
+ * (player + creator for leaf 7) and broadcasts it to the mempool.
+ */
+export interface BuiltExitTx {
+  tx: Transaction
+}
+
+/**
+ * Build the leaf-7 `cooperativeSpendExit` on-chain spend: after the pot VTXO is
+ * unrolled on-chain (SDK `Unroll`) and its exit CSV (`{value: exitDelay, type:
+ * 'seconds'}`) has matured, split the WHOLE pot back to both funders' payout
+ * scripts, minus the on-chain fee. Leaf 7 is `CSVMultisig[player, creator]` —
+ * NO covenant, NO emulator — so the returned tx MUST be signed by BOTH the
+ * player and the creator (house) before broadcast.
+ *
+ * The fee is split across both funders (each pays half) so the split-back stays
+ * fair. Spike-validated end-to-end on regtest (v4-cooperative-exit probe): the
+ * unrolled pot spent via this construction confirmed on-chain.
+ */
+export function buildCooperativeSpendExitTx(args: {
+  pot: CoinflipJointPotScript
+  potOnchain: Outpoint
+  playerStake: bigint
+  houseStake: bigint
+  playerPayoutPkScript: Uint8Array
+  housePayoutPkScript: Uint8Array
+  exitDelay: bigint
+  feeSats: bigint
+}): BuiltExitTx {
+  const { pot, potOnchain, playerStake, houseStake, feeSats } = args
+  if (playerStake <= 0n || houseStake <= 0n) {
+    throw new Error('buildCooperativeSpendExitTx: both stakes must be positive')
+  }
+  if (playerStake + houseStake !== BigInt(potOnchain.value)) {
+    throw new Error(
+      `buildCooperativeSpendExitTx: stakes (${playerStake} + ${houseStake}) must equal the pot value ${potOnchain.value}`,
+    )
+  }
+  if (feeSats <= 0n) throw new Error('buildCooperativeSpendExitTx: feeSats must be positive')
+  const playerFee = feeSats / 2n
+  const houseFee = feeSats - playerFee
+  if (playerFee >= playerStake || houseFee >= houseStake) {
+    throw new Error('buildCooperativeSpendExitTx: fee exceeds a funder stake')
+  }
+  const tx = new Transaction()
+  tx.addInput({
+    txid: potOnchain.txid,
+    index: potOnchain.vout,
+    witnessUtxo: { script: pot.pkScript, amount: BigInt(potOnchain.value) },
+    tapLeafScript: [pot.cooperativeSpendExit()],
+    sequence: timelockToSequence({ value: args.exitDelay, type: 'seconds' }),
+  })
+  tx.addOutput({ script: args.playerPayoutPkScript, amount: playerStake - playerFee })
+  tx.addOutput({ script: args.housePayoutPkScript, amount: houseStake - houseFee })
+  return { tx }
+}
 
 /** Serialize a built tx for an emulator `/v1/tx` POST body. */
 export function encodeSettleForEmulator(built: BuiltJointPotTx): { arkTx: string; checkpointTxs: string[] } {

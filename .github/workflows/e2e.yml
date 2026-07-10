@@ -179,7 +179,7 @@ jobs:
         # The v4-staged-forfeit probe is clock-sensitive (spends fresh VTXOs), and the
         # setChainTime tests in this pass advance the regtest MTP ~1h irreversibly — so
         # the probe runs ISOLATED on a fresh stack below (issue #40). Exclude it here.
-        run: npx jest --runInBand --forceExit --testTimeout=300000 --ci --testPathIgnorePatterns "/node_modules/" "v4-staged-forfeit-probe"
+        run: npx jest --runInBand --forceExit --testTimeout=300000 --ci --testPathIgnorePatterns "/node_modules/" "v4-staged-forfeit-probe" "v4-cooperative-exit-probe"
 
       - name: Concurrent load test (100 v4 joint-pot games / 5 wallets)
         working-directory: packages/e2e

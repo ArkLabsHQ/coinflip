@@ -207,6 +207,21 @@ export function v4Reveal(gameId: string, playerSecretHex: string): Promise<V4Rev
   })
 }
 
+/** /api/v4/game/:id/cooperative-exit — the house co-signs the client's leaf-7
+ *  on-chain split-back (emulator-free recovery). The client sends its
+ *  player-signed exit PSBT + the unrolled pot outpoint; the house verifies the
+ *  split is exactly what it expects and returns the co-signed PSBT. */
+export interface V4CooperativeExitResponse { exitTxPsbt: string }
+export function v4CooperativeExit(
+  gameId: string,
+  body: { exitTxPsbt: string; potOnchain: { txid: string; vout: number; value: number }; feeSats: number },
+): Promise<V4CooperativeExitResponse> {
+  return request(`/api/v4/game/${gameId}/cooperative-exit`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 /** /api/game/:id/details — full game state (txids, params, preimages).
  *  The server gates on the playerPubkey query param matching the game's
  *  recorded pubkey, so this only returns data to the owning player.

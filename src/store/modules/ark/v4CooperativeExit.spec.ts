@@ -1,8 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { SingleKey, Transaction } from '@arkade-os/sdk'
 import { hex, base64 } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { buildCooperativeExitRequest } from './v4CooperativeExit'
+import { buildCooperativeExitRequest, stepCooperativeExit, type CooperativeExitIo } from './v4CooperativeExit'
 import type { StashedV4Forfeit } from './v4ForfeitStash'
 
 const xonlyOf = (b: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(b))
@@ -68,5 +68,70 @@ describe('buildCooperativeExitRequest', () => {
     const a = await buildCooperativeExitRequest({ stash, feeSats: 1000n, signInput0: noSign })
     const b = await buildCooperativeExitRequest({ stash, feeSats: 1000n, signInput0: noSign })
     expect(a.exitTxPsbt).toBe(b.exitTxPsbt)
+  })
+})
+
+function mockIo(over: Partial<CooperativeExitIo> = {}): CooperativeExitIo {
+  return {
+    bumperBalanceSats: vi.fn(async () => 100_000),
+    potOnchainStatus: vi.fn(async () => null),
+    unrollPot: vi.fn(async () => {}),
+    chainTime: vi.fn(async () => 2_000_000_000),
+    buildRequest: vi.fn(async () => ({ exitTxPsbt: 'psbt', potOnchain: { txid: 'x', vout: 0, value: 1 }, feeSats: 1 })),
+    houseCosign: vi.fn(async () => 'cosigned'),
+    broadcast: vi.fn(async () => 'exittxid'),
+    ...over,
+  }
+}
+const ARGS = (io: CooperativeExitIo) => ({ exitDelaySeconds: 86_528, minFeeSats: 1000, io })
+
+describe('stepCooperativeExit (state machine, fail-safe)', () => {
+  it('needs-fee when the bumper is underfunded — and NEVER unrolls', async () => {
+    const io = mockIo({ bumperBalanceSats: vi.fn(async () => 500) })
+    const p = await stepCooperativeExit(ARGS(io))
+    expect(p.stage).toBe('needs-fee')
+    expect(io.unrollPot).not.toHaveBeenCalled()
+  })
+
+  it('unrolling: funded + not on-chain → kicks the unroll', async () => {
+    const io = mockIo({ potOnchainStatus: vi.fn(async () => null) })
+    const p = await stepCooperativeExit(ARGS(io))
+    expect(p.stage).toBe('unrolling')
+    expect(io.unrollPot).toHaveBeenCalledOnce()
+  })
+
+  it('unrolling: on-chain but unconfirmed → waits, does NOT re-unroll or proceed', async () => {
+    const io = mockIo({ potOnchainStatus: vi.fn(async () => ({ confirmed: false, confirmedAt: 0 })) })
+    const p = await stepCooperativeExit(ARGS(io))
+    expect(p.stage).toBe('unrolling')
+    expect(io.unrollPot).not.toHaveBeenCalled()
+    expect(io.broadcast).not.toHaveBeenCalled()
+  })
+
+  it('awaiting-csv: confirmed but CSV not matured → NEVER builds/cosigns/broadcasts', async () => {
+    const confirmedAt = 2_000_000_000
+    const io = mockIo({
+      potOnchainStatus: vi.fn(async () => ({ confirmed: true, confirmedAt })),
+      chainTime: vi.fn(async () => confirmedAt + 100), // < confirmedAt + exitDelay
+    })
+    const p = await stepCooperativeExit(ARGS(io))
+    expect(p.stage).toBe('awaiting-csv')
+    expect(io.buildRequest).not.toHaveBeenCalled()
+    expect(io.houseCosign).not.toHaveBeenCalled()
+    expect(io.broadcast).not.toHaveBeenCalled()
+  })
+
+  it('done: funded + confirmed + CSV matured → build → house co-sign → broadcast', async () => {
+    const confirmedAt = 2_000_000_000
+    const io = mockIo({
+      potOnchainStatus: vi.fn(async () => ({ confirmed: true, confirmedAt })),
+      chainTime: vi.fn(async () => confirmedAt + 86_528 + 10), // matured
+    })
+    const p = await stepCooperativeExit(ARGS(io))
+    expect(p.stage).toBe('done')
+    expect(p.exitTxid).toBe('exittxid')
+    expect(io.buildRequest).toHaveBeenCalledOnce()
+    expect(io.houseCosign).toHaveBeenCalledOnce()
+    expect(io.broadcast).toHaveBeenCalledOnce()
   })
 })

@@ -61,3 +61,83 @@ export async function buildCooperativeExitRequest(args: {
     feeSats: Number(args.feeSats),
   }
 }
+
+/** Progress of the multi-tick cooperative-exit flow (persisted so it resumes). */
+export type CooperativeExitStage =
+  | 'needs-fee' // the on-chain bumper wallet must be funded before the unroll can CPFP the anchors
+  | 'unrolling' // unroll broadcast in flight / awaiting on-chain confirmation
+  | 'awaiting-csv' // pot confirmed on-chain; waiting for the exit CSV to mature
+  | 'done' // exit tx broadcast
+
+export interface CooperativeExitProgress {
+  stage: CooperativeExitStage
+  /** Human detail for the UI (fee needed, time remaining, the exit txid). */
+  detail?: string
+  /** Set once stage === 'done'. */
+  exitTxid?: string
+}
+
+/**
+ * The thin, injected LIVE edge (SDK unroll / esplora / api). Isolated behind an
+ * interface so `stepCooperativeExit`'s orchestration is fully unit-testable; the
+ * underlying mechanism (unroll → leaf-7 spend) is validated by the
+ * v4-cooperative-exit probe.
+ */
+export interface CooperativeExitIo {
+  /** Spendable on-chain (mainchain) sats of the unroll fee-bumper wallet. */
+  bumperBalanceSats(): Promise<number>
+  /** The pot VTXO's on-chain status after (attempting) an unroll: null = not yet
+   *  on-chain; else confirmed + the time (unix seconds) it confirmed at. */
+  potOnchainStatus(): Promise<{ confirmed: boolean; confirmedAt: number } | null>
+  /** Start / continue the SDK unroll of the pot (idempotent per call). */
+  unrollPot(): Promise<void>
+  /** Chain median-time-past (unix seconds), for the CSV gate. */
+  chainTime(): Promise<number>
+  /** Build the player-signed leaf-7 request (buildCooperativeExitRequest bound to the wallet). */
+  buildRequest(): Promise<CooperativeExitRequest>
+  /** House co-signs the request (api.v4CooperativeExit) → the co-signed PSBT. */
+  houseCosign(req: CooperativeExitRequest): Promise<string>
+  /** Finalize + broadcast the co-signed PSBT → the on-chain txid. */
+  broadcast(cosignedPsbt: string): Promise<string>
+}
+
+/**
+ * One tick of the cooperative-exit state machine. Drive it from runAutoClaim,
+ * persist the returned stage, resume next tick. Advances at most one on-chain
+ * step per tick and NEVER proceeds without the fee source AND a matured CSV —
+ * fail-safe like the rest of the recovery. Pure orchestration over `io`, so it's
+ * fully unit-testable; `io` is the thin, probe-validated live edge.
+ *
+ * The exit CSV is relative to the pot's ON-CHAIN confirmation, so it's gated on
+ * `confirmedAt + exitDelaySeconds` against the chain's MTP — not the wall clock.
+ */
+export async function stepCooperativeExit(args: {
+  exitDelaySeconds: number
+  minFeeSats: number
+  io: CooperativeExitIo
+}): Promise<CooperativeExitProgress> {
+  const { io, minFeeSats, exitDelaySeconds } = args
+  // 1. Fee source: the unroll must CPFP the tree anchors from mainchain sats.
+  if ((await io.bumperBalanceSats()) < minFeeSats) {
+    return { stage: 'needs-fee', detail: `Fund the on-chain exit-fee address (~${minFeeSats} sats needed).` }
+  }
+  // 2. Land the pot on-chain (idempotent unroll; wait for confirmation).
+  const onchain = await io.potOnchainStatus()
+  if (!onchain) {
+    await io.unrollPot()
+    return { stage: 'unrolling', detail: 'Broadcasting the unilateral exit…' }
+  }
+  if (!onchain.confirmed) return { stage: 'unrolling', detail: 'Waiting for the unroll to confirm…' }
+  // 3. Wait the exit CSV (relative to the pot's on-chain confirmation, MTP-gated).
+  const matureAt = onchain.confirmedAt + exitDelaySeconds
+  const now = await io.chainTime()
+  if (now < matureAt) {
+    const mins = Math.max(1, Math.ceil((matureAt - now) / 60))
+    return { stage: 'awaiting-csv', detail: `Exit timelock matures in ~${mins} min (chain time).` }
+  }
+  // 4. Build → house co-sign → broadcast. Only reached with funds + a matured CSV.
+  const req = await io.buildRequest()
+  const cosigned = await io.houseCosign(req)
+  const exitTxid = await io.broadcast(cosigned)
+  return { stage: 'done', detail: exitTxid, exitTxid }
+}

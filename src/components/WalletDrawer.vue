@@ -898,6 +898,7 @@ export default defineComponent({
         const response = await fetch('https://faucet.mutinynet.arkade.sh/faucet', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(20_000),
           body: JSON.stringify({ address: arkAddress.value, amount: 1000 }),
         })
         if (!response.ok) throw new Error('Failed')

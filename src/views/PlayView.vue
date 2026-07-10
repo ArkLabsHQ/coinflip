@@ -592,9 +592,9 @@ export default defineComponent({
           status: 'resolved',
           createdAt: new Date().toISOString(),
           resolvedAt: new Date().toISOString(),
-          // On-chain txids this game touched (v4 co-fund + settle, or v3 sweep),
-          // so the activity history can group its wallet transactions into one
-          // "Dice game" row. See src/utils/activityHistory.ts.
+          // On-chain txids this game touched (v4 co-fund + settle), so the
+          // SDK activity history can group its wallet transactions into one
+          // "Dice game" row via the resolver registered in store/modules/ark.
           txids: [result.cofundTxid, result.settleTxid, result.txid].filter(Boolean),
         }
         const history = JSON.parse(localStorage.getItem('gameHistory') || '[]')

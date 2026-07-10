@@ -79,10 +79,11 @@
 import { defineComponent, ref, computed, onMounted, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import type { StashedRefund, ClaimingInfo } from '@/store/modules/ark/ark'
-import { hasStashedForfeit } from '@/store/modules/ark/forfeitStash'
+import { hasStashedForfeit } from '@/store/modules/ark/ark'
 import type { StashedV4Forfeit } from '@/store/modules/ark/v4ForfeitStash'
 import { pickV4ClaimPath } from '@/store/modules/ark/v4SelfRefund'
 import { isCltvMatured } from '@/utils/cltv'
+import { hasExhaustedReclaim } from '@/utils/reclaimBackoff'
 
 export default defineComponent({
   name: 'StalledBets',
@@ -134,7 +135,13 @@ export default defineComponent({
     /** Forfeit readiness — chain time has reached the absolute forfeit CLTV. */
     const isForfeitReady = (b: StashedRefund) => isCltvMatured(chainTime.value, forfeitClaimableAt(b))
 
+    /** A stash whose auto-claim has permanently failed (e.g. a pre-v4/rotated
+     *  escrow whose stashed refund no longer matches the server VTXO). The stake
+     *  still recovers via the operator sweep, so we reassure rather than alarm. */
+    const isExhausted = (b: StashedRefund) => hasExhaustedReclaim(b.claimFailures)
+
     function statusLabel(b: StashedRefund): string {
+      if (isExhausted(b)) return 'Recovers automatically via the operator — no action needed'
       if (isAutoClaiming(b)) return 'Auto-claiming…'
       if (chainTime.value === null) return 'Checking chain time…'
       if (isReady(b)) return 'Reclaimable now'
@@ -157,6 +164,7 @@ export default defineComponent({
     }
 
     function forfeitStatusLabel(b: StashedRefund): string {
+      if (isExhausted(b)) return 'Recovers automatically via the operator — no action needed'
       if (isAutoClaiming(b)) return 'Auto-claiming…'
       if (chainTime.value === null) return 'Checking chain time…'
       if (isForfeitReady(b)) return 'Claimable now (arkade)'

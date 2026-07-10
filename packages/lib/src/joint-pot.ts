@@ -23,22 +23,9 @@
  * (a normal tx both parties sign), not a per-funder unilateral reclaim.
  */
 
-import { OP, p2tr, TAPROOT_UNSPENDABLE_KEY } from '@scure/btc-signer'
-import { hex } from '@scure/base'
-import { assembleBtcdTaprootTree } from './btcd-taproot-tree'
-import {
-  VtxoScript,
-  ConditionCSVMultisigTapscript,
-  ConditionMultisigTapscript,
-  CLTVMultisigTapscript,
-  CSVMultisigTapscript,
-  MultisigTapscript,
-  TapLeafScript,
-  arkade,
-} from '@arkade-os/sdk'
-import { buildForfeitArkadeScript, buildSplitArkadeScript } from './arkade-forfeit'
-import { buildVariableOddsWinPredicate } from './arkade-win'
+import { VtxoScript, TapLeafScript } from '@arkade-os/sdk'
 import { StageTwoScript } from './joint-pot-stage2'
+import { buildJointPotArtifactContract } from './artifact/joint-pot'
 
 export interface CoinflipJointPotOptions {
   creatorPubkey: Uint8Array // house
@@ -67,11 +54,6 @@ export interface CoinflipJointPotOptions {
   houseStake: bigint
 }
 
-/** SHA256 hash-check (no trailing VERIFY — ConditionCSVMultisig appends its own). */
-function buildHashCheckScript(hash: Uint8Array): Uint8Array {
-  return new Uint8Array([OP.SHA256, 0x20, ...hash, OP.EQUAL])
-}
-
 export class CoinflipJointPotScript extends VtxoScript {
   readonly playerWinCovenantScriptHex: string
   readonly creatorWinCovenantScriptHex: string
@@ -92,128 +74,30 @@ export class CoinflipJointPotScript extends VtxoScript {
   readonly stageTwo: StageTwoScript
 
   constructor(readonly options: CoinflipJointPotOptions) {
-    const {
-      creatorPubkey, playerPubkey, serverPubkey,
-      creatorHash, playerHash, cancelDelay, exitDelay, finalExpiration,
-      oddsN, oddsTarget, oddsLo,
-      emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake,
-    } = options
+    // The v4 contract is assembled from the artifact-JSON covenant model
+    // (declarative asm fragments → the SDK's arkade.resolveAsm → tapscript
+    // primitives). `buildJointPotArtifactContract` is byte-identical to the
+    // former hand-rolled construction (frozen in joint-pot-golden.unit.test.ts).
+    // The SDK's VtxoScript already assembles the btcd-ordered taptree, so the
+    // old local Huffman→btcd override is no longer needed — `super(scripts)`
+    // derives the same tapkey arkd expects.
+    const c = buildJointPotArtifactContract(options)
+    super(c.scripts)
 
-    const pot = playerStake + houseStake
-
-    // Win predicates (arkade-script, emulator-evaluated) — reused from v3.
-    const playerWinPredicate = buildVariableOddsWinPredicate(creatorHash, playerHash, oddsN, oddsTarget, oddsLo, true)
-    const creatorWinPredicate = buildVariableOddsWinPredicate(creatorHash, playerHash, oddsN, oddsTarget, oddsLo, false)
-
-    // Single-pot covenants: pay the WHOLE pot to the winner (payTo, not atomicSweep).
-    // buildForfeitArkadeScript(payout, amount) with no otherStakeValue == payTo.
-    const playerPayoutCovenant = buildForfeitArkadeScript(playerPayoutPkScript, pot)
-    const creatorPayoutCovenant = buildForfeitArkadeScript(housePayoutPkScript, pot)
-
-    const playerWinFullArkadeScript = new Uint8Array([...playerWinPredicate, OP.VERIFY, ...playerPayoutCovenant])
-    const creatorWinFullArkadeScript = new Uint8Array([...creatorWinPredicate, OP.VERIFY, ...creatorPayoutCovenant])
-    // Forfeit pays the whole pot to the player (predicate-free; covenant only).
-    const forfeitArkadeScript = buildForfeitArkadeScript(playerPayoutPkScript, pot)
-    // Refund splits the pot back: playerStake → player, houseStake → house. The
-    // emulator enforces BOTH outputs, so the cooperative refund is covenant-only
-    // (no player/creator pre-sign needed — the covenant guarantees the split).
-    const splitArkadeScript = buildSplitArkadeScript(playerPayoutPkScript, playerStake, housePayoutPkScript, houseStake)
-
-    // Phase 2 staged forfeit: the player's recovery no longer takes the whole pot
-    // directly — it routes the pot into a StageTwo contest. playerReveal publishes
-    // the player's secret on-chain and pays the pot to the StageTwo covenant, where
-    // the house can settle to the ACTUAL winner OR (after finalExpiration) the player
-    // sweeps everything — closing the "house stalls on a loss" gap.
-    const stageTwo = new StageTwoScript({
-      creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash, finalExpiration,
-      oddsN, oddsTarget, oddsLo, emulatorPubkey, playerPayoutPkScript, housePayoutPkScript, playerStake, houseStake,
-    })
-    const revealArkadeScript = buildForfeitArkadeScript(stageTwo.pkScript, pot) // payTo(StageTwo, pot)
-
-    const tweakedEmuKey = (script: Uint8Array) => arkade.computeArkadeScriptPublicKey(emulatorPubkey, script)
-
-    const playerWinCovenantScript = MultisigTapscript.encode({
-      pubkeys: [serverPubkey, tweakedEmuKey(playerWinFullArkadeScript)],
-    }).script
-    const creatorWinCovenantScript = MultisigTapscript.encode({
-      pubkeys: [serverPubkey, tweakedEmuKey(creatorWinFullArkadeScript)],
-    }).script
-    // playerReveal (Phase 2 stage 1): the player publishes their secret (the SHA256
-    // condition) and the emulator enforces payTo(StageTwo, pot). No timelock — it's
-    // available immediately so the client can fire it before cancelDelay and pre-empt
-    // the refund. [player, server, emu] sign; the on-chain secret lets StageTwo
-    // settle to the actual winner.
-    const playerRevealScript = ConditionMultisigTapscript.encode({
-      conditionScript: buildHashCheckScript(playerHash),
-      pubkeys: [playerPubkey, serverPubkey, tweakedEmuKey(revealArkadeScript)],
-    }).script
-    // Cooperative split spender — the COVENANT-ONLY refund spends this leaf. The
-    // emulator enforces the split (buildSplitArkadeScript), so it needs no
-    // player/creator pre-sign: like the settle/forfeit, only [server, emu] sign,
-    // and arkd + the emulator co-sign automatically for a valid (correctly-split)
-    // tx. CLTV-gated at cancelDelay so the refund cannot confirm until then — the
-    // normal settle finishes first (a losing player can't refund-escape), and the
-    // house can still refund a never-revealed pot before the player's forfeit opens.
-    const cooperativeSpendScript = CLTVMultisigTapscript.encode({
-      absoluteTimelock: cancelDelay,
-      pubkeys: [serverPubkey, tweakedEmuKey(splitArkadeScript)],
-    }).script
-
-    const playerWinExitScript = CSVMultisigTapscript.encode({
-      timelock: { value: exitDelay, type: 'seconds' },
-      pubkeys: [playerPubkey, tweakedEmuKey(playerWinFullArkadeScript)],
-    }).script
-    const creatorWinExitScript = CSVMultisigTapscript.encode({
-      timelock: { value: exitDelay, type: 'seconds' },
-      pubkeys: [creatorPubkey, tweakedEmuKey(creatorWinFullArkadeScript)],
-    }).script
-    const playerForfeitExitScript = ConditionCSVMultisigTapscript.encode({
-      conditionScript: buildHashCheckScript(playerHash),
-      timelock: { value: exitDelay, type: 'seconds' },
-      pubkeys: [playerPubkey, tweakedEmuKey(forfeitArkadeScript)],
-    }).script
-    const cooperativeSpendExitScript = CSVMultisigTapscript.encode({
-      timelock: { value: exitDelay, type: 'seconds' },
-      pubkeys: [playerPubkey, creatorPubkey],
-    }).script
-
-    const scripts = [
-      playerWinCovenantScript,   // 0
-      creatorWinCovenantScript,  // 1
-      playerRevealScript,        // 2 (Phase 2: was playerForfeit)
-      cooperativeSpendScript,    // 3
-      playerWinExitScript,       // 4
-      creatorWinExitScript,      // 5
-      playerForfeitExitScript,   // 6
-      cooperativeSpendExitScript, // 7
-    ]
-    super(scripts)
-
-    // Override scure's Huffman taptree with btcd's, so arkd agrees on the tapkey
-    // (identical reasoning + mechanism as CoinflipEscrowScriptV3).
-    const btcdTree = assembleBtcdTaprootTree(scripts)
-    const btcdPayment = p2tr(TAPROOT_UNSPENDABLE_KEY, btcdTree, undefined, true)
-    if (!btcdPayment.tapLeafScript || btcdPayment.tapLeafScript.length !== scripts.length) {
-      throw new Error('CoinflipJointPotScript: btcd taptree produced invalid leaves')
-    }
-    ;(this as { leaves: typeof btcdPayment.tapLeafScript }).leaves = btcdPayment.tapLeafScript
-    ;(this as { tweakedPublicKey: Uint8Array }).tweakedPublicKey = btcdPayment.tweakedPubkey
-    ;(this as { pkScript: Uint8Array }).pkScript = btcdPayment.script
-
-    this.playerWinCovenantScriptHex = hex.encode(playerWinCovenantScript)
-    this.creatorWinCovenantScriptHex = hex.encode(creatorWinCovenantScript)
-    this.playerRevealScriptHex = hex.encode(playerRevealScript)
-    this.cooperativeSpendScriptHex = hex.encode(cooperativeSpendScript)
-    this.playerWinExitScriptHex = hex.encode(playerWinExitScript)
-    this.creatorWinExitScriptHex = hex.encode(creatorWinExitScript)
-    this.playerForfeitExitScriptHex = hex.encode(playerForfeitExitScript)
-    this.cooperativeSpendExitScriptHex = hex.encode(cooperativeSpendExitScript)
-    this.playerWinFullArkadeScript = playerWinFullArkadeScript
-    this.creatorWinFullArkadeScript = creatorWinFullArkadeScript
-    this.forfeitArkadeScript = forfeitArkadeScript
-    this.splitArkadeScript = splitArkadeScript
-    this.revealArkadeScript = revealArkadeScript
-    this.stageTwo = stageTwo
+    this.playerWinCovenantScriptHex = c.leafScriptsHex[0]
+    this.creatorWinCovenantScriptHex = c.leafScriptsHex[1]
+    this.playerRevealScriptHex = c.leafScriptsHex[2]
+    this.cooperativeSpendScriptHex = c.leafScriptsHex[3]
+    this.playerWinExitScriptHex = c.leafScriptsHex[4]
+    this.creatorWinExitScriptHex = c.leafScriptsHex[5]
+    this.playerForfeitExitScriptHex = c.leafScriptsHex[6]
+    this.cooperativeSpendExitScriptHex = c.leafScriptsHex[7]
+    this.playerWinFullArkadeScript = c.arkadeScripts.playerWinFull
+    this.creatorWinFullArkadeScript = c.arkadeScripts.creatorWinFull
+    this.forfeitArkadeScript = c.arkadeScripts.forfeit
+    this.splitArkadeScript = c.arkadeScripts.split
+    this.revealArkadeScript = c.arkadeScripts.reveal
+    this.stageTwo = c.stageTwo
   }
 
   playerWinCovenant(): TapLeafScript { return this.findLeaf(this.playerWinCovenantScriptHex) }

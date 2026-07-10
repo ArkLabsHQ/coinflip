@@ -3,7 +3,7 @@
  *
  * The house serves many players at once. Two concerns arise:
  *
- *   1. Reservation — `handleTrustlessPlay` picks a specific house VTXO to
+ *   1. Reservation — `handleV4Play` picks a specific house VTXO to
  *      fund a game's house escrow. Two concurrent games must NOT pick the
  *      same VTXO, or the second game's escrow tx would reference an
  *      already-spent input.

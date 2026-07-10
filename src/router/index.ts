@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
 import PlayView from '../views/PlayView.vue'
-import WalletView from '../views/WalletView.vue'
 import SetupView from '../views/SetupView.vue'
 import HistoryView from '../views/HistoryView.vue'
 import HowItWorksView from '../views/HowItWorksView.vue'
@@ -13,12 +12,9 @@ const routes: Array<RouteRecordRaw> = [
     component: PlayView,
     meta: { requiresWallet: true }
   },
-  {
-    path: '/wallet',
-    name: 'wallet',
-    component: WalletView,
-    meta: { requiresWallet: true }
-  },
+  // The full-page wallet view was superseded by WalletDrawer; the /wallet
+  // deep-link now just opens the drawer (App.vue handles `?wallet=open`).
+  { path: '/wallet', redirect: { path: '/', query: { wallet: 'open' } } },
   {
     path: '/history',
     name: 'history',

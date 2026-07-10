@@ -22,7 +22,7 @@ export default defineComponent({
   name: 'TierSelector',
   props: {
     tiers: { type: Array as PropType<number[]>, required: true },
-    selectedTier: { type: Number, default: null },
+    selectedTier: { type: Number as PropType<number | null>, default: null },
     // Tiers the house can currently cover (some odds step fits the bankroll).
     // Empty array = nothing affordable; defaults to "all affordable".
     affordableTiers: { type: Array as PropType<number[]>, default: null },

@@ -6,13 +6,9 @@
  */
 
 import { hex } from '@scure/base'
-import { createHash } from 'crypto'
 import {
   gameFromEvents,
   GameStatus,
-  determineWinner,
-  generateSecret,
-  CoinflipEscrowScript,
   isCreateEvent,
   isJoinEvent,
   coinSelect,
@@ -129,115 +125,6 @@ describe('gameFromEvents', () => {
     const game = gameFromEvents(...events)
     expect(game.status).toBe(GameStatus.Resolved)
     expect(game.player!.revealedSecret!.length).toBe(15)
-  })
-})
-
-describe('determineWinner', () => {
-  it('should return player when secrets are same size (both heads)', () => {
-    const secret1 = new Uint8Array(15).fill(1)
-    const secret2 = new Uint8Array(15).fill(2)
-    expect(determineWinner(secret1, secret2)).toBe('player')
-  })
-
-  it('should return player when secrets are same size (both tails)', () => {
-    const secret1 = new Uint8Array(16).fill(1)
-    const secret2 = new Uint8Array(16).fill(2)
-    expect(determineWinner(secret1, secret2)).toBe('player')
-  })
-
-  it('should return creator when secrets are different sizes', () => {
-    const secret1 = new Uint8Array(15).fill(1) // heads
-    const secret2 = new Uint8Array(16).fill(2) // tails
-    expect(determineWinner(secret1, secret2)).toBe('creator')
-  })
-
-  it('should return creator when secrets are different sizes (reversed)', () => {
-    const secret1 = new Uint8Array(16).fill(1) // tails
-    const secret2 = new Uint8Array(15).fill(2) // heads
-    expect(determineWinner(secret1, secret2)).toBe('creator')
-  })
-
-  it('should return player when creator secret is invalid size', () => {
-    const secret1 = new Uint8Array(10).fill(1) // invalid
-    const secret2 = new Uint8Array(15).fill(2)
-    expect(determineWinner(secret1, secret2)).toBe('player')
-  })
-
-  it('should return creator when player secret is invalid size', () => {
-    const secret1 = new Uint8Array(15).fill(1)
-    const secret2 = new Uint8Array(20).fill(2) // invalid
-    expect(determineWinner(secret1, secret2)).toBe('creator')
-  })
-})
-
-describe('generateSecret', () => {
-  it('should generate 15-byte secret for heads', () => {
-    const secret = generateSecret('heads')
-    expect(secret.length).toBe(15)
-  })
-
-  it('should generate 16-byte secret for tails', () => {
-    const secret = generateSecret('tails')
-    expect(secret.length).toBe(16)
-  })
-
-  it('should generate different secrets each time', () => {
-    const s1 = generateSecret('heads')
-    const s2 = generateSecret('heads')
-    expect(hex.encode(s1)).not.toBe(hex.encode(s2))
-  })
-})
-
-describe('CoinflipEscrowScript', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { schnorr } = require('@noble/curves/secp256k1.js')
-  // Real x-only keys: the arkade-script covenant tweaks the emulator key
-  // (computeArkadeScriptPublicKey), so it must be a valid curve point.
-  const key = (seed: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(seed))
-  const creatorPubkey = key(0x10)
-  const playerPubkey = key(0x20)
-  const serverPubkey = key(0x30)
-  const emulatorPubkey = key(0x40)
-  const creatorHash = new Uint8Array(32).fill(0xaa)
-  const playerHash = new Uint8Array(32).fill(0xbb)
-  const playerPayoutPkScript = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x77)])
-  const housePayoutPkScript = new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(0x88)])
-  const base = {
-    creatorPubkey, playerPubkey, serverPubkey, creatorHash, playerHash,
-    finalExpiration: 2000n,
-    exitDelay: 86_528n, // multiple of 512, ≥ 512 (BIP68 seconds)
-    arkadeForfeit: {
-      emulatorPubkey, playerPayoutPkScript, housePayoutPkScript,
-      playerStake: 50_000n, houseStake: 30_000n,
-    },
-  }
-
-  const playerEscrow = new CoinflipEscrowScript({ ...base, refundPubkey: playerPubkey })
-  const houseEscrow = new CoinflipEscrowScript({ ...base, refundPubkey: creatorPubkey })
-
-  it('has 8 leaves: 4 collab covenants + 4 unilateral exit mirrors', () => {
-    expect(playerEscrow.leaves.length).toBe(8)
-    expect(playerEscrow.playerWinCovenant()).toBeTruthy()
-    expect(playerEscrow.creatorWinCovenant()).toBeTruthy()
-    expect(playerEscrow.playerForfeit()).toBeTruthy()
-    expect(playerEscrow.refund()).toBeTruthy()
-    expect(playerEscrow.playerForfeitExit()).toBeTruthy()
-  })
-
-  it('player and creator win covenants are distinct covenant-gated leaves (no winner signature)', () => {
-    // Each win path is ConditionMultisig[server, emulator_tweaked]; the emulator
-    // key is tweaked by that leaf's arkade script, so the two win covenants
-    // differ. The server settles either via its covenant — the client signs
-    // nothing on a win.
-    expect(playerEscrow.playerWinCovenantScriptHex).not.toBe(playerEscrow.creatorWinCovenantScriptHex)
-    expect(playerEscrow.playerWinCovenantArkadeScript).toBeDefined()
-    expect(playerEscrow.creatorWinCovenantArkadeScript).toBeDefined()
-  })
-
-  it('owner-scopes the refund leaf — player vs house escrow addresses differ (no cross-theft)', () => {
-    // Different refund pubkey → different refund leaf → different taproot output.
-    expect(playerEscrow.refundScriptHex).not.toBe(houseEscrow.refundScriptHex)
-    expect(hex.encode(playerEscrow.pkScript)).not.toBe(hex.encode(houseEscrow.pkScript))
   })
 })
 

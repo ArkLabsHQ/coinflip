@@ -1,18 +1,16 @@
 /**
- * Deterministic unit tests for CSPRNG-based game-outcome selection (no regtest).
+ * Deterministic unit tests for CSPRNG-based uniform integer selection (no regtest).
  *
- * The house's coin side and the variable-odds digit are revealed (via the secret
- * length) at settlement. Deriving them from `Math.random()` — a non-crypto PRNG
- * whose state is recoverable from observed outputs — would let a player predict
- * and match the next house pick. These tests pin that:
- *   - the selection helpers never touch `Math.random`
- *   - `randomUniformInt` stays in range and covers the full [0, n) span
- *   - the generated secret lengths land in the protocol's valid sets
+ * The house's coin side and the variable-odds digit are revealed at settlement.
+ * Deriving them from `Math.random()` — a non-crypto PRNG whose state is
+ * recoverable from observed outputs — would let a player predict and match the
+ * next house pick. These tests pin that `randomUniformInt` (the version-neutral
+ * selector relocated into game-math) stays in range, covers the full [0, n)
+ * span, and never touches `Math.random`.
  */
 
 /* eslint-disable @typescript-eslint/no-require-imports */
-const tx = require('arkade-coinflip/dist/transactions.js')
-const { randomUniformInt, generateRandomCoinSecret, generateVariableSecret } = tx
+const { randomUniformInt } = require('arkade-coinflip/dist/game-math.js')
 
 describe('randomUniformInt (CSPRNG uniform in [0, n))', () => {
   it('returns 0 for n === 1', () => {
@@ -59,44 +57,6 @@ describe('randomUniformInt (CSPRNG uniform in [0, n))', () => {
     for (const c of counts) {
       expect(c).toBeGreaterThan(expected * 0.75)
       expect(c).toBeLessThan(expected * 1.25)
-    }
-  })
-})
-
-describe('generateRandomCoinSecret (CSPRNG coin side)', () => {
-  it('always produces a valid coin secret length (15 heads / 16 tails)', () => {
-    const lengths = new Set<number>()
-    for (let i = 0; i < 200; i++) lengths.add(generateRandomCoinSecret().length)
-    expect([...lengths].sort()).toEqual([15, 16]) // both sides occur, nothing else
-  })
-
-  it('never calls Math.random', () => {
-    const spy = jest.spyOn(Math, 'random')
-    try {
-      for (let i = 0; i < 100; i++) generateRandomCoinSecret()
-      expect(spy).not.toHaveBeenCalled()
-    } finally {
-      spy.mockRestore()
-    }
-  })
-})
-
-describe('generateVariableSecret (CSPRNG odds digit)', () => {
-  it('encodes a digit in [0, n) as length base(16)+digit', () => {
-    const n = 6
-    const lengths = new Set<number>()
-    for (let i = 0; i < n * 50; i++) lengths.add(generateVariableSecret(n).length)
-    // base 16 → lengths 16..16+n-1, every digit eventually seen.
-    expect([...lengths].sort((a, b) => a - b)).toEqual([16, 17, 18, 19, 20, 21])
-  })
-
-  it('never calls Math.random', () => {
-    const spy = jest.spyOn(Math, 'random')
-    try {
-      for (let i = 0; i < 100; i++) generateVariableSecret(6)
-      expect(spy).not.toHaveBeenCalled()
-    } finally {
-      spy.mockRestore()
     }
   })
 })

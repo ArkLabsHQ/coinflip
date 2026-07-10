@@ -82,7 +82,9 @@ export default createStore<State>({
   actions: {
     async fetchBTCPrice({ commit }) {
       try {
-        const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd')
+        const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd', {
+          signal: AbortSignal.timeout(8000),
+        })
         const data = await response.json()
         commit('SET_BTC_PRICE', data.bitcoin.usd)
       } catch (error) {

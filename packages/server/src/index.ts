@@ -20,9 +20,6 @@ import { getSqlExecutor, initDb, closeDb } from './db.js'
 import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
 import { startExpiryTimer, startRenewalTimer } from './game-engine.js'
-import { startEscrowRecoveryTimer, reconcilePendingSweeps, startContractWatch } from './trustless-game.js'
-import { contractHandlers } from '@arkade-os/sdk'
-import { registerCoinflipContracts } from 'arkade-coinflip'
 import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
 import { createV4Routes } from './v4-routes.js'
@@ -38,25 +35,6 @@ export { getSqlExecutor, initDb } from './db.js'
 export { makeRepos } from './repositories/index.js'
 export { initHouseWallet } from './house-wallet.js'
 export { startExpiryTimer, startRenewalTimer, shouldRenew } from './game-engine.js'
-export {
-  handleTrustlessPlay,
-  handleTrustlessCommit,
-  handleTrustlessRefund,
-  handleTrustlessForfeit,
-  recoverOrphanedHouseEscrows,
-  reconcilePendingSweeps,
-  startEscrowRecoveryTimer,
-  startContractWatch,
-  type TrustlessPlayRequest,
-  type TrustlessPlayResult,
-  type TrustlessCommitRequest,
-  type TrustlessCommitResult,
-  type TrustlessRefundRequest,
-  type TrustlessRefundResult,
-  type TrustlessForfeitRequest,
-  type TrustlessForfeitResult,
-  type Outpoint,
-} from './trustless-game.js'
 export {
   handleV4Play,
   handleV4Cofund,
@@ -100,12 +78,6 @@ export interface BootstrapOptions {
 export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<AppDeps> {
   await initDb()
   const repos = makeRepos(getSqlExecutor())
-  // Register the coinflip escrow contract handler into the SERVER's OWN SDK
-  // contract registry BEFORE the wallet boots. The wallet's ContractManager
-  // resolves handlers from this same module-scoped singleton, so registering
-  // here (rather than relying on the lib's separate SDK copy) avoids the
-  // dueling-instance "No handler registered for type coinflip-escrow" failure.
-  registerCoinflipContracts(contractHandlers)
   // Keep the SDK's auto-renewal poll-loop OFF (settlementConfig:false). NB: the
   // installed SDK's `runPeriodicSettle` is now gated (returns early unless VTXOs
   // are near-expiry or boarding needs confirming) and fee-aware, so the old
@@ -144,29 +116,15 @@ async function main() {
   // then keep a healthy pool of distinct house VTXOs for concurrent play.
   await rebuildReservations(deps)
 
-  // Resolve any games left `pending` by a crash mid house-win sweep (their
-  // escrow is already spent) before the expiry timer can flip them to expired.
-  await reconcilePendingSweeps(deps).catch((e) =>
-    console.error('[reconcile] boot pass failed:', e instanceof Error ? e.message : e),
-  )
-
   startPoolMaintenance(deps)
 
   // Start game expiry timer
   startExpiryTimer(deps)
 
-  // Reclaim orphaned house escrows from stalled games once their refund CLTV
-  // matures, so abandoned games don't slowly lock up house funds.
-  startEscrowRecoveryTimer(deps)
-
   // v4: refund (split the pot back) any co-funded joint-pot game whose player
   // never revealed, once past cancelDelay — the house's protection against the
   // never-reveal griefing vector, pre-empting the player's forfeit.
   startV4RefundTimer(deps)
-
-  // Subscribe to the ContractManager so a house escrow's `vtxo_spent` event
-  // reconciles its game eagerly (the failsafe timer above still backstops it).
-  startContractWatch(deps)
 
   // Renew expiring VTXOs + confirm boarding deposits on a long cadence (only when
   // there's something to do — the same gate the SDK's own poll-loop applies).

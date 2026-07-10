@@ -4,14 +4,10 @@ import type { State as RootState } from '@/store'
 import {
   Wallet, SingleKey, VtxoScript,
   ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
-  contractHandlers, RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
+  RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
   type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity, type ArkTxInput,
+  type Activity,
 } from '@arkade-os/sdk'
-import {
-  COINFLIP_ESCROW_TYPE,
-  COINFLIP_ESCROW_V3_TYPE,
-  registerCoinflipContracts,
-} from 'arkade-coinflip/contract'
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
 // Subpath import (not the package root) so the browser bundle doesn't pull in
 // the v2 transactions module, which imports Node's `crypto`.
@@ -20,30 +16,22 @@ import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import { singleFlight } from '@/utils/singleFlight'
 import {
-  getNetwork, play as apiPlay, commit as apiCommit, refund as apiRefund,
-  forfeit as apiForfeit, getGame as apiGetGame,
+  getNetwork, getGame as apiGetGame,
   v4Play, v4Cofund, v4CofundFinalize, v4Reveal,
   getRestoreChallenge, restoreGamesFromServer,
-  type Outpoint, type ForfeitResponse, type V4CovenantParams,
+  type Outpoint, type V4CovenantParams,
   type GameSummary, type V4ReclaimHint,
 } from '@/services/api'
 import { signChallenge } from '@/utils/signChallenge'
-import { resolveForfeitStash, hasStashedForfeit } from './forfeitStash'
 import { resolveV4ForfeitStash, hasClaimableV4Forfeit, v4ClaimStage, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
 import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits, saveV4Forfeits } from './v4ForfeitStashStore'
 import { buildV4SelfRefund, pickV4ClaimPath, rebuildJointPot, isAlreadySpentError, isTransientSelfRefundError, rearmV4ReclaimHint } from './v4SelfRefund'
-import { locateEscrowVtxo } from './locateEscrow'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
 import { getErrorMessage } from '@/utils/errors'
 import { isCltvMatured } from '@/utils/cltv'
-import {
-  buildActivities,
-  boardingResolver,
-  gameActivityResolver,
-  type Activity,
-  type CoinflipGameRecord,
-} from '@/utils/activityHistory'
+import { withTimeout, TIMEOUTS } from '@/utils/withTimeout'
+import { gameActivityResolver } from './gameActivityResolver'
 
 /** VtxoInput shape expected by the server's /api/play endpoint. */
 export interface VtxoInput {
@@ -168,11 +156,51 @@ export interface StashedRefund {
 import {
   loadStashes as loadRefunds,
   saveStashes as saveAllRefunds,
-  putStash as stashRefund,
   deleteStash as clearRefund,
   patchStash as updateRefundStash,
 } from '@/utils/stashStore'
 import { isPermanentReclaimError, hasExhaustedReclaim } from '@/utils/reclaimBackoff'
+
+/**
+ * The structural fields a forfeit-claim needs, read off a stashed-refund record.
+ * A loose subset of `StashedRefund` so this predicate keeps a narrow shape.
+ */
+export type ForfeitClaimable = {
+  revealed?: boolean
+  forfeitPsbt?: string
+  forfeitCheckpoints?: string[]
+  forfeitEmulatorUrl?: string
+  forfeitClaimableAt?: number
+}
+
+/**
+ * Does this stash hold a COMPLETE, revealed forfeit ready to be claimed?
+ *
+ * Single source of truth shared by the StalledBets "Claim full pot" button, the
+ * `claimForfeit` action's precondition guard, and the background auto-claim poll.
+ * Purely STRUCTURAL — it answers "is a forfeit stashed and revealed?", NOT "is
+ * the CLTV mature yet?" (that time gate is layered on by the callers). It is a
+ * TYPE GUARD, so callers that pass the check may read the forfeit fields as
+ * defined. Relocated here when the legacy per-party-escrow (v2/v3) creation flow
+ * was removed; it still backs recovery of already-escrowed stalled bets.
+ */
+export function hasStashedForfeit<T extends ForfeitClaimable>(
+  stash: T,
+): stash is T & {
+  revealed: true
+  forfeitPsbt: string
+  forfeitCheckpoints: string[]
+  forfeitEmulatorUrl: string
+  forfeitClaimableAt: number
+} {
+  return (
+    stash.revealed === true &&
+    !!stash.forfeitPsbt &&
+    Array.isArray(stash.forfeitCheckpoints) && stash.forfeitCheckpoints.length > 0 &&
+    !!stash.forfeitEmulatorUrl &&
+    stash.forfeitClaimableAt !== undefined
+  )
+}
 
 export interface ArkServerInfo {
   pubkey: string
@@ -211,19 +239,9 @@ export type ClaimKind = 'forfeit' | 'refund'
 export type ClaimMode = 'manual' | 'auto'
 export interface ClaimingInfo { kind: ClaimKind; mode: ClaimMode }
 
-export interface TxHistoryEntry {
-  /** Best txid we have — arkTxid first, then commitment, then boarding. */
-  txid: string
-  /** 'SENT' | 'RECEIVED' */
-  type: string
-  /** Net sats moved by this tx (positive for received, positive for sent — direction in `type`). */
-  amount: number
-  settled: boolean
-  /** Unix ms */
-  createdAt: number
-  /** True if this entry corresponds to a boarding deposit. */
-  isBoarding: boolean
-}
+// Coinflip's activity resolver lives in its own module so the game-tagging
+// logic is unit-testable without the Vuex store. See gameActivityResolver.ts.
+
 
 interface ArkState {
   server: string
@@ -237,9 +255,13 @@ interface ArkState {
   walletBalance: WalletBalance | null
   arkAddress: string | null
   boardingAddress: string | null
-  txHistory: TxHistoryEntry[]
-  /** Grouped activity view of txHistory (local engine; see utils/activityHistory). */
+  /** Grouped activity view from the SDK's `wallet.getActivityHistory()` — a
+   *  game's co-fund + settle collapse into one "Dice game" row via the resolver
+   *  registered at connect (see `gameActivityResolver`). */
   activityHistory: Activity[]
+  /** Load state for the Activity tab, so a failed/slow getActivityHistory reads
+   *  as an error the user can retry — not as a genuinely empty "No activity yet". */
+  activityStatus: 'idle' | 'loading' | 'ready' | 'error'
   claimingGames: Record<string, ClaimingInfo>
 }
 
@@ -328,9 +350,13 @@ async function submitOffchain(
 ): Promise<string> {
   if (witness) for (const i of signInputs) setArkPsbtField(arkTx, i, ConditionWitness, witness)
   const signed = await identity.sign(arkTx, signInputs)
-  const { arkTxid, signedCheckpointTxs } = await arkProvider.submitTx(
-    base64.encode(signed.toPSBT()),
-    checkpoints.map((c) => base64.encode(c.toPSBT())),
+  const { arkTxid, signedCheckpointTxs } = await withTimeout(
+    arkProvider.submitTx(
+      base64.encode(signed.toPSBT()),
+      checkpoints.map((c) => base64.encode(c.toPSBT())),
+    ),
+    TIMEOUTS.submit,
+    'submit transaction',
   )
   const finals: string[] = []
   for (const c of signedCheckpointTxs) {
@@ -340,7 +366,7 @@ async function submitOffchain(
     if (witness) for (const i of idx) setArkPsbtField(tx, i, ConditionWitness, witness)
     finals.push(base64.encode((await identity.sign(tx, idx)).toPSBT()))
   }
-  await arkProvider.finalizeTx(arkTxid, finals)
+  await withTimeout(arkProvider.finalizeTx(arkTxid, finals), TIMEOUTS.submit, 'finalize transaction')
   return arkTxid
 }
 
@@ -352,10 +378,35 @@ let sdkWallet: Wallet | null = null
 // calls register competing intents for the same boarding UTXO; arkd settles one and
 // the other hangs forever (the button awaiting it never clears). singleFlight funnels
 // both through one round so a second caller reuses it instead of racing.
-const settleOnce = singleFlight((eventCallback?: (event: unknown) => void): Promise<string> => {
+const settleOnce = singleFlight(async (eventCallback?: (event: unknown) => void): Promise<string> => {
   const w = sdkWallet
-  if (!w) return Promise.reject(new Error('Wallet not connected'))
-  return w.settle(undefined, eventCallback as never)
+  if (!w) throw new Error('Wallet not connected')
+  // Mirror the server's renewal guard (game-engine `migrateDeprecatedSigners`):
+  // after the operator rotates its signing key, settle() rejects deprecated-signer
+  // inputs with INVALID_VTXO_SCRIPT and a client boarding-settle would jam. Migrate
+  // them first — best-effort and a no-op when nothing is deprecated, so a hiccup
+  // here must never block a normal settle.
+  try {
+    // Bound BOTH awaits — getVtxoManager() memoizes but its first call still
+    // hits the network, and it's the one un-timed await that could otherwise
+    // wedge this singleFlight slot before we even reach settle().
+    await withTimeout(
+      (async () => {
+        const vm = await w.getVtxoManager()
+        await vm.migrateDeprecatedSignerVtxos()
+      })(),
+      TIMEOUTS.submit,
+      'signer migration',
+    )
+  } catch (e) {
+    console.warn('pre-settle deprecated-signer migration failed (continuing):', e)
+  }
+  // Bound the settle: a known SDK edge (settle(undefined) re-selecting a swept
+  // boarding coin) can hang 90s+. Without a ceiling the singleFlight slot never
+  // frees, wedging BOTH the manual "Settle" button and every future auto-settle
+  // for the session. The timeout rejects → the slot frees → the next attempt
+  // (or the SDK's own coalesce, once upstream) can proceed.
+  return withTimeout(w.settle(undefined, eventCallback as never), TIMEOUTS.settle, 'settle')
 })
 // Auto-reconnect backoff: a failed connect (slow load, arkd blip, reconnect
 // after a redeploy) schedules a retry with capped exponential backoff so the
@@ -373,14 +424,6 @@ const AUTO_CLAIM_INTERVAL_MS = 15_000
 // wallet's active contracts + the SDK's own 60s failsafe poll. Push-based
 // balance updates replace our manual refreshBalance polling.
 let incomingFundsStop: (() => void) | null = null
-// Stop fn for the coinflip-escrow contract-event subscription. The
-// ContractManager fires `vtxo_spent` for a player escrow the instant the
-// atomic sweep settles (house OR player win — both spend both escrows), so we
-// clear the stalled-bet stash + refresh eagerly. The SDK's ContractWatcher
-// carries its own 60s failsafe poll + auto-reconnect, so no separate getGame
-// poll is needed. Lives only while the wallet is connected (see connect wiring
-// and the disconnect cleanup, like incomingFundsStop).
-let escrowEventStop: (() => void) | null = null
 // Coalesce watcher-driven refreshes. A single settlement (e.g. a game's sweep)
 // emits several vtxo_spent / vtxo_received events spread over a few seconds; a
 // naive per-event refresh hammers the indexer. Leading edge fires immediately
@@ -412,90 +455,7 @@ export function getSDKWallet(): Wallet | null {
 }
 
 /**
- * Register a player escrow as an ACTIVE `coinflip-escrow` contract so the SDK
- * ContractManager/ContractWatcher tracks it and emits `vtxo_spent` when the
- * atomic sweep settles. The serialized params (from /api/play) reproduce the
- * exact on-chain script; we pass the pkScript derived from the escrow address
- * as the contract key so the watcher matches the real VTXO. Labelled with the
- * gameId so the event handler can clear the right stash.
- *
- * Idempotent: a duplicate re-register (e.g. on reload) is swallowed. Entirely
- * best-effort — a failure here must NOT break play or the refund/forfeit safety
- * net; the stash + auto-claim still cover a stalled game.
- */
-async function registerEscrowContract(stash: StashedRefund): Promise<void> {
-  if (!sdkWallet || !stash.escrowContractParams || !stash.escrowAddress) return
-  try {
-    const cm = await sdkWallet.getContractManager()
-    await cm.createContract({
-      type: stash.contractVersion === 'v3' ? COINFLIP_ESCROW_V3_TYPE : COINFLIP_ESCROW_TYPE,
-      params: stash.escrowContractParams,
-      script: addressToPkScriptHex(stash.escrowAddress),
-      address: stash.escrowAddress,
-      state: 'active',
-      label: stash.gameId,
-    })
-  } catch (e) {
-    const msg = getErrorMessage(e)
-    if (/already exists|duplicate/i.test(msg)) return // re-register is fine
-    console.warn('[contract] could not register player escrow (continuing):', msg)
-  }
-}
-
-/**
- * Best-effort R1 forfeit recovery, attempted ONLY after a `/commit` failure.
- *
- * Why here, why now: the joint pot the forfeit leaf sweeps exists only once the
- * house has escrowed, which — under lazy funding (v0.3.5+) — happens at the
- * START of `/commit`, before the covenant sweep. So a FAILED `/commit` is the
- * single window in which a funded-but-unswept pot can linger; that is exactly
- * the state the arkade-script `playerForfeit` leaf recovers. We probe
- * `/forfeit`: the server returns a claim PSBT iff that pot exists, otherwise it
- * refuses (surfaced here as an undefined `forfeit`) and the player still has the
- * self-refund stash for their own stake.
- *
- * The security decision — emulator present? pot present? payout bound to OUR
- * change address? — lives in the pure, unit-tested `resolveForfeitStash`; this
- * wrapper is only the network/storage glue around it. It NEVER throws: a forfeit
- * that can't be stashed must not disturb the "still settling" path that follows.
- */
-async function stashForfeitRecovery(
-  gameId: string,
-  playerEscrow: Outpoint,
-  expectedPayoutAddress: string,
-  playerSecretHex: string,
-): Promise<void> {
-  let emulatorUrl: string | undefined
-  let forfeit: ForfeitResponse | undefined
-  try {
-    const net = await getNetwork()
-    emulatorUrl = net.emulator?.url
-    // Only probe the server when an emulator exists — without the covenant
-    // co-signer the forfeit leaf is unspendable, so the call would be wasted.
-    if (emulatorUrl) {
-      try {
-        forfeit = await apiForfeit(gameId, playerEscrow)
-      } catch (e) {
-        // Expected whenever there is no joint pot yet (house never funded), the
-        // game already resolved, or it is a legacy non-arkade game. Not an error:
-        // `resolveForfeitStash` maps the undefined `forfeit` to a 'no-pot' skip.
-        console.warn('[trustless] /forfeit probe found no claimable pot (continuing):', getErrorMessage(e))
-      }
-    }
-  } catch (e) {
-    console.warn('[trustless] could not reach /api/network for forfeit (continuing):', getErrorMessage(e))
-  }
-
-  const decision = resolveForfeitStash({ emulatorUrl, forfeit, expectedPayoutAddress, playerSecretHex })
-  if (decision.kind === 'stash') {
-    await updateRefundStash(gameId, decision.patch)
-  } else {
-    console.warn(`[trustless] forfeit not stashed (${decision.reason})`)
-  }
-}
-
-/**
- * v0.4 analogue of `stashForfeitRecovery`. After the joint pot is co-funded,
+ * After the joint pot is co-funded,
  * persist everything the client needs to reclaim it via the `playerForfeit`
  * leaf should the server never settle. The claim is CLIENT-built from the
  * covenant params, so all we need is the pot outpoint + covenant + the emulator
@@ -676,37 +636,6 @@ function decodeCheckpointTxs(checkpointsHex: string[]): Transaction[] {
 }
 
 /**
- * Subscribe to the ContractManager so a player escrow being spent on-Ark clears
- * its stalled-bet stash EAGERLY — the atomic sweep (house OR player win) spends
- * both escrows, so a `vtxo_spent` on the player's `coinflip-escrow` means the
- * game settled and the stash is no longer needed. Also deactivates the contract
- * (best-effort) and refreshes the balance. The handler body is wrapped so a bad
- * event never tears down the subscription. Returns the unsubscribe fn (no-op
- * when there's no wallet).
- */
-async function startEscrowContractWatch(dispatch: (type: string, payload?: unknown) => Promise<unknown>): Promise<() => void> {
-  if (!sdkWallet) return () => {}
-  const cm = await sdkWallet.getContractManager()
-  return cm.onContractEvent((event) => {
-    if (
-      event.type !== 'vtxo_spent' ||
-      (event.contract.type !== COINFLIP_ESCROW_TYPE && event.contract.type !== COINFLIP_ESCROW_V3_TYPE)
-    ) return
-    void (async () => {
-      try {
-        const gameId = event.contract.label
-        if (gameId) await clearRefund(gameId)
-        scheduleRefresh(dispatch)
-        // Bet done → stop watching this escrow.
-        await cm.setContractState(event.contract.script, 'inactive').catch(() => { /* best-effort */ })
-      } catch (e) {
-        console.error('[contract] vtxo_spent handler failed:', getErrorMessage(e))
-      }
-    })()
-  })
-}
-
-/**
  * The chain's block time — BIP113 median-time-past of the tip block, exactly
  * what arkd enforces CLTV timelocks (escrow refunds) against. This LAGS the
  * user's wall-clock whenever blocks are sparse (idle regtest, slow networks),
@@ -750,8 +679,8 @@ const ark: Module<ArkState, RootState> = {
     walletBalance: null,
     arkAddress: null,
     boardingAddress: null,
-    txHistory: [],
     activityHistory: [],
+    activityStatus: 'idle',
     claimingGames: {},
   },
 
@@ -798,11 +727,11 @@ const ark: Module<ArkState, RootState> = {
     SET_BOARDING_ADDRESS(state, address: string | null) {
       state.boardingAddress = address
     },
-    SET_TX_HISTORY(state, history: TxHistoryEntry[]) {
-      state.txHistory = history
-    },
     SET_ACTIVITY_HISTORY(state, activities: Activity[]) {
       state.activityHistory = activities
+    },
+    SET_ACTIVITY_STATUS(state, status: ArkState['activityStatus']) {
+      state.activityStatus = status
     },
     SET_CLAIMING(state, { gameId, info }: { gameId: string; info: ClaimingInfo }) {
       state.claimingGames = { ...state.claimingGames, [gameId]: info }
@@ -890,6 +819,13 @@ const ark: Module<ArkState, RootState> = {
 
         sdkWallet = wallet
 
+        // Register the coinflip game activity resolver so getActivityHistory()
+        // collapses a dice game's co-fund + settle txs into one "Dice game" row.
+        // Idempotent — `use()` overwrites by id, so reconnects don't stack
+        // duplicates. Boarding deposits are already labeled by the SDK's default
+        // registry, so this is the only resolver we add.
+        wallet.activity.use(gameActivityResolver())
+
         // Force a full VTXO re-scan when the wallet key or Ark server changes.
         // The SDK's sync cursor is GLOBAL, so a stale cursor left by a previous
         // wallet (or a different network) makes this connection skip the indexer
@@ -944,25 +880,6 @@ const ark: Module<ArkState, RootState> = {
           console.warn('[watcher] notifyIncomingFunds unavailable; relying on action-driven refresh:', e)
         }
 
-        // Coinflip-escrow contract tracking. Register the handler against OUR
-        // SDK's contractHandlers singleton (the lib re-exports the same one,
-        // but pass it explicitly to be robust to multi-copy installs), then
-        // RE-REGISTER every active stash's player escrow so a page reload
-        // re-arms the watcher, and start the vtxo_spent subscription that
-        // clears the stash the instant the sweep settles. All best-effort —
-        // the stash + auto-claim remain the trustless safety net regardless.
-        // Stop any prior subscription first (this runs again on every reconnect).
-        if (escrowEventStop) { try { escrowEventStop() } catch { /* already gone */ } escrowEventStop = null }
-        try {
-          registerCoinflipContracts(contractHandlers)
-          for (const stash of await loadRefunds()) {
-            if (stash.escrowContractParams && stash.escrowAddress) await registerEscrowContract(stash)
-          }
-          escrowEventStop = await startEscrowContractWatch(dispatch)
-        } catch (e) {
-          console.warn('[contract] escrow contract watch unavailable; relying on stash + auto-claim:', getErrorMessage(e))
-        }
-
         // Background stalled-bet auto-claim. Fire once now so a stash
         // already past expiry doesn't have to wait one full tick, then
         // poll on the interval. The action itself short-circuits when
@@ -990,7 +907,6 @@ const ark: Module<ArkState, RootState> = {
         sdkWallet = null
         if (autoClaimTimer) { clearInterval(autoClaimTimer); autoClaimTimer = null }
         if (incomingFundsStop) { try { incomingFundsStop() } catch { /* already gone */ } incomingFundsStop = null }
-        if (escrowEventStop) { try { escrowEventStop() } catch { /* already gone */ } escrowEventStop = null }
         commit('SET_STATUS', 'error')
         commit('SET_ERROR', new Error(`Failed to connect: ${(error as Error).message}`))
         commit('SET_INFO', null)
@@ -1131,62 +1047,33 @@ const ark: Module<ArkState, RootState> = {
     },
 
     /**
-     * Fetch the wallet's transaction history (Ark + boarding). HEAVY — the SDK
-     * re-derives it from live on-chain state (an esplora /tx/:id/outspends per
-     * boarding tx + indexer lookups), so it is deliberately NOT part of
-     * refreshBalance. Loaded on demand when the Activity tab is viewed; the
-     * result stays cached in state.txHistory until the next Activity view.
+     * Fetch the wallet's grouped activity history. HEAVY — the SDK re-derives
+     * the flat tx history from live on-chain state (an esplora /tx/:id/outspends
+     * per boarding tx + indexer lookups), then runs the registered resolvers
+     * (boarding built-in + our game resolver) to collapse a dice game's co-fund
+     * + settle into one "Dice game" row. Deliberately NOT part of refreshBalance;
+     * loaded on demand when the Activity tab is viewed and cached in
+     * state.activityHistory until the next view.
      */
     async refreshHistory({ commit, state }) {
       if (!sdkWallet || state.status !== 'connected') return
+      // Keep the last successfully-loaded list on screen while refreshing; only
+      // show the spinner on the first load (nothing cached yet).
+      commit('SET_ACTIVITY_STATUS', state.activityHistory.length ? 'ready' : 'loading')
       try {
-        // SDK returns ArkTransaction[] with TxKey carrying arkTxid /
-        // commitmentTxid / boardingTxid — flatten to a single best-effort txid
-        // and an `isBoarding` flag for the UI.
-        const history = await sdkWallet.getTransactionHistory()
-        const entries: TxHistoryEntry[] = history.map((tx) => ({
-          txid: tx.key.arkTxid || tx.key.commitmentTxid || tx.key.boardingTxid,
-          type: tx.type,
-          amount: tx.amount,
-          settled: tx.settled,
-          createdAt: tx.createdAt,
-          isBoarding: !!tx.key.boardingTxid && !tx.key.arkTxid,
-        }))
-        commit('SET_TX_HISTORY', entries)
-        // Group the flat history into activities (a dice game's co-fund + settle
-        // collapse into one "Dice game" row) via the local engine. Replace with
-        // wallet.getActivityHistory() when the SDK ships it on coinflip's line.
-        const games: CoinflipGameRecord[] = (() => {
-          try {
-            const raw = JSON.parse(localStorage.getItem('gameHistory') || '[]')
-            return (Array.isArray(raw) ? raw : [])
-              .filter((g) => g?.id && Array.isArray(g.txids) && g.txids.length)
-              .map((g) => ({
-                id: String(g.id),
-                tier: Number(g.tier) || 0,
-                winner: g.winner ?? null,
-                txids: g.txids,
-              }))
-          } catch {
-            return []
-          }
-        })()
-        commit(
-          'SET_ACTIVITY_HISTORY',
-          await buildActivities(entries, [
-            gameActivityResolver(() => games),
-            boardingResolver(),
-          ]),
-        )
+        const activities = await withTimeout(sdkWallet.getActivityHistory(), TIMEOUTS.api, 'load activity')
+        commit('SET_ACTIVITY_HISTORY', activities)
+        commit('SET_ACTIVITY_STATUS', 'ready')
       } catch (error) {
         console.error('Failed to refresh history:', error)
+        commit('SET_ACTIVITY_STATUS', 'error')
       }
     },
 
     async sendBitcoin(_ctx, { address, amount }: { address: string; amount: number }) {
       if (!sdkWallet) throw new Error('Wallet not connected')
 
-      const txid = await sdkWallet.sendBitcoin({ address, amount })
+      const txid = await withTimeout(sdkWallet.sendBitcoin({ address, amount }), TIMEOUTS.submit, 'send')
 
       // Refresh balance after send
       await _ctx.dispatch('refreshBalance')
@@ -1227,178 +1114,6 @@ const ark: Module<ArkState, RootState> = {
         throw new Error(`Insufficient balance: have ${sum}, need ${amount}`)
       }
       return picked.map(vtxoToPlayerInput)
-    },
-
-    /**
-     * Play one trustless coin game end-to-end:
-     *   1. POST /api/play — the house escrows its stake; returns the escrow address.
-     *   2. Escrow the player's stake into that address (single-party send).
-     *   3. POST /api/game/:id/commit — reveal + resolve. House win → the server
-     *      already swept; player win → sign + submit the returned sweep PSBT.
-     * Returns the commit result { winner, payout, houseSecret, playerSecret, proof }.
-     */
-    async playTrustlessGame(
-      { state, rootState },
-      { tier, side, oddsN, oddsTarget, oddsLo }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
-    ) {
-      const { wallet, privateKey } = requireWalletAndKey(rootState)
-      const playerPubkey = rootState.wallet.publicKey
-      if (!playerPubkey) throw new Error('No wallet public key available')
-      const playerChangeAddress = state.arkAddress
-      if (!playerChangeAddress) throw new Error('No Ark address available — wallet still connecting?')
-
-      const identity = SingleKey.fromHex(privateKey)
-      void identity // kept for downstream signing helpers (refund stash)
-      const arkProvider = wallet.arkProvider
-      const arkInfo = await arkProvider.getInfo()
-      void arkInfo // ensures arkProvider is warm before /play call
-
-      // 1. Commit a secret + start the game. The escrow version is set by the
-      // server (env: ESCROW_VERSION) and published via /api/network. Generate
-      // the appropriate secret format:
-      //   v2 (legacy): random bytes whose LENGTH encodes the digit. Coin: 15B
-      //                heads / 16B tails. Variable-odds: base16 + digit bytes.
-      //   v3:          `[digitByte] ‖ salt` (= packets.encodeReveal) — a
-      //                fixed-length 17-byte reveal. Coin maps to n=2, digit
-      //                ∈ {0, 1}: side=heads → 0, side=tails → 1. Variable-
-      //                odds: digit picked uniformly in [0, oddsN).
-      const isVariable = oddsN !== undefined && oddsTarget !== undefined
-      const netInfo = await getNetwork()
-      const contractVersion: 'v2' | 'v3' = netInfo.escrowVersion === 'v3' ? 'v3' : 'v2'
-      let secretBytes: Uint8Array
-      let v3Reveal: { digit: number; salt: Uint8Array } | undefined
-      if (contractVersion === 'v3') {
-        // v3 coin → n=2, target=1, lo=0 (server applies the same default).
-        const n = isVariable ? (oddsN as number) : 2
-        const digit = isVariable
-          ? uniformRandomInt(n)
-          : (side === 'tails' ? 1 : 0)
-        v3Reveal = v3CommitDigit(digit, n)
-        secretBytes = cwpPackets.encodeReveal(v3Reveal.digit, v3Reveal.salt)
-      } else {
-        if (isVariable) {
-          const VARIABLE_ODDS_BASE_LEN = 16 // must match arkade-coinflip's constant
-          secretBytes = new Uint8Array(VARIABLE_ODDS_BASE_LEN + uniformRandomInt(oddsN as number))
-        } else {
-          secretBytes = new Uint8Array(side === 'tails' ? 16 : 15)
-        }
-        crypto.getRandomValues(secretBytes)
-      }
-      const playerSecretHex = hex.encode(secretBytes)
-      const playerHash = await createHash(secretBytes)
-
-      // Sanity check spendable balance BEFORE starting the game. Doing it after
-      // apiPlay (which creates a pending game + reserves the house stake) would
-      // strand the game on any selection failure, and stranded games count
-      // against the server's per-player cap → "Too many pending games". The
-      // actual VTXO selection happens inside wallet.send below.
-      const spendableTotal = (await wallet.getVtxos())
-        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
-        .reduce((sum: number, v: ExtendedVirtualCoin) => sum + v.value, 0)
-      if (spendableTotal < tier) {
-        throw new Error(`Insufficient spendable balance for a ${tier}-sat bet — top up or settle to consolidate, then retry.`)
-      }
-
-      const playRes = await apiPlay(
-        tier, playerPubkey, playerHash, playerChangeAddress,
-        isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number, oddsLo: oddsLo ?? 0 } : undefined,
-      )
-
-      // 2. Escrow the player's stake into the shared escrow address via the
-      // SDK's wallet.send. The SDK handles VTXO selection, multi-input
-      // funding, AND — critically — routes sub-dust change to an OP_RETURN
-      // output, which arkd accepts (a non-OP_RETURN sub-dust output is
-      // rejected with `AMOUNT_TOO_LOW`). Replaces the prior hand-rolled
-      // buildOffchainTx + submitOffchain.
-      const playerEscrowTxid = await wallet.send({ address: playRes.escrowAddress, amount: tier })
-      // Find OUR output within the send tx (vout isn't guaranteed to be 0 — the
-      // SDK adds anchor/metadata outputs) and wait out indexer lag. The matching
-      // + poll/timeout logic lives in locateEscrowVtxo (unit-tested).
-      const indexer = new RestIndexerProvider(state.server)
-      const playerEscrow: Outpoint = await locateEscrowVtxo(indexer, {
-        escrowPkHex: addressToPkScriptHex(playRes.escrowAddress),
-        txid: playerEscrowTxid,
-        amount: tier,
-      })
-
-      // 2b. Stash a self-submittable refund BEFORE revealing. If the server now
-      // stalls, the player can still reclaim the escrow after finalExpiration
-      // without trusting it. Best-effort: a stash failure shouldn't abort a game
-      // that will almost certainly resolve, but log it loudly.
-      try {
-        const r = await apiRefund(playRes.gameId, playerEscrow)
-        const stash: StashedRefund = {
-          gameId: playRes.gameId, tier, playerEscrow,
-          refundPsbt: r.refundPsbt, refundCheckpoints: r.refundCheckpoints,
-          finalExpiration: r.finalExpiration, createdAt: Date.now(),
-          // Persist the player escrow's contract params + address so a reload
-          // can re-register it and re-arm the vtxo_spent watcher.
-          escrowContractParams: playRes.escrowContractParams,
-          escrowAddress: playRes.escrowAddress,
-          // Persist the contract version + (for v3) the reveal so a page
-          // reload reconstructs the right /commit payload.
-          contractVersion: playRes.contractVersion ?? contractVersion,
-          ...(v3Reveal
-            ? { reveal: { digit: v3Reveal!.digit, salt: hex.encode(v3Reveal!.salt) } }
-            : {}),
-        }
-        await stashRefund(stash)
-        // Register the player escrow as a coinflip-escrow contract so the
-        // ContractWatcher clears this stash the instant the sweep settles.
-        // Best-effort — the stash itself is the trustless backstop.
-        await registerEscrowContract(stash)
-      } catch (e) {
-        console.warn('[trustless] could not stash refund (continuing):', getErrorMessage(e))
-      }
-
-      // NOTE: the arkade-script forfeit is intentionally NOT stashed here. The
-      // joint pot it sweeps does not exist yet — under lazy funding the house
-      // only escrows at /commit. Probing /forfeit now would always be refused
-      // ("no joint pot"). The forfeit is stashed instead in the /commit failure
-      // path below, the one window where a funded-but-unswept pot can linger.
-      // See stashForfeitRecovery().
-
-      // 3. Reveal + resolve. The server settles via the emulator-bound
-      // covenant for both win cases — no client signature needed. On
-      // failure the stash is kept so the player can claim the forfeit
-      // after `forfeitClaimableAt` or self-refund after `finalExpiration`.
-      let result: Awaited<ReturnType<typeof apiCommit>>
-      try {
-        // Mark revealed BEFORE the network call: even if /commit hangs,
-        // the player has revealed and a stalling server is now in the R1
-        // forfeit scenario. The stash records this so the UI surfaces
-        // "Claim full pot" (forfeit), not "Reclaim" (self-refund only).
-        await updateRefundStash(playRes.gameId, { revealed: true })
-        result = await apiCommit(playRes.gameId, playerSecretHex, playerEscrow)
-      } catch (e) {
-        // /commit failed AFTER the player revealed (revealed:true is stashed
-        // above). Under lazy funding the house escrow is created at the START of
-        // /commit (fundHouseEscrowOnce) — before the covenant sweep — so a
-        // failure here can leave a funded-but-unswept joint pot. That is the one
-        // state the R1 `playerForfeit` leaf recovers: probe /forfeit now (it only
-        // succeeds once that pot exists) and stash the claim so the player can
-        // sweep the FULL pot after the CLTV if the operator never re-settles.
-        // Race-free: the forfeit's CLTV opens at finalExpiration, long after a
-        // healthy operator's autonomous reconcile would have landed.
-        await stashForfeitRecovery(playRes.gameId, playerEscrow, playerChangeAddress, playerSecretHex)
-
-        // Soft messaging: a /commit failure almost always means the operator is
-        // still settling (it finishes autonomously). Surface that calmly and
-        // log the underlying error rather than steering the user straight at
-        // the reclaim path. The stash + forfeit watcher remain the backstop.
-        console.warn('[trustless] /commit failed (operator settles autonomously):', getErrorMessage(e))
-        const when = new Date(playRes.finalExpiration * 1000).toLocaleString()
-        throw new Error(
-          `Still settling — the operator finishes this automatically and it usually lands within a minute. ` +
-          `Your ${tier} sat stake is safe; if it doesn't resolve you can reclaim it after ${when} (see "Reclaim stalled bets").`,
-        )
-      }
-      // Bet resolved → drop the stash and stop watching the escrow (best-effort).
-      await finishBet(playRes.gameId, await getRefundStash(playRes.gameId))
-
-      // No manual refresh — the contract watcher fires on the sweep's vtxo
-      // events and pushes a (coalesced, light) balance update.
-      return result
     },
 
     /**
@@ -1527,19 +1242,16 @@ const ark: Module<ArkState, RootState> = {
     },
 
     /**
-     * Place a bet via whichever trustless flow the server advertises — v0.4
-     * joint pot (the default) or v0.3 per-party escrow when `protocolVersion`
-     * is 'v3' on /api/network. The single entry point the UI dispatches; pin the
-     * old flow with the server's PROTOCOL_VERSION=v3.
+     * Place a bet via the v0.4 joint-pot flow — the only trustless flow now that
+     * the legacy v0.2.x / v0.3 per-party escrow has been removed. The single
+     * entry point the UI dispatches.
      */
     async placeTrustlessBet(
       { dispatch },
       payload: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
     ) {
       const net = await getNetwork()
-      return net.protocolVersion === 'v4'
-        ? dispatch('playV4Game', { ...payload, emulatorUrl: net.emulator?.url })
-        : dispatch('playTrustlessGame', payload)
+      return dispatch('playV4Game', { ...payload, emulatorUrl: net.emulator?.url })
     },
 
     /** Locally-stashed stalled bets (escrows reclaimable if the server stalled). */
@@ -1676,6 +1388,7 @@ const ark: Module<ArkState, RootState> = {
         const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(TIMEOUTS.emulator),
           body: JSON.stringify({
             arkTx: base64.encode(signed.toPSBT()),
             checkpointTxs: cps.map((c) => base64.encode(c.toPSBT())),
@@ -1770,6 +1483,7 @@ const ark: Module<ArkState, RootState> = {
           const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(TIMEOUTS.emulator),
             body: JSON.stringify(encodeSettleForEmulator(refund)),
           })
           if (!resp.ok) {
@@ -1816,6 +1530,7 @@ const ark: Module<ArkState, RootState> = {
           const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(TIMEOUTS.emulator),
             body: JSON.stringify({ arkTx: base64.encode(signed.toPSBT()), checkpointTxs }),
           })
           if (!resp.ok) {
@@ -2088,8 +1803,8 @@ const ark: Module<ArkState, RootState> = {
       return state.boardingUtxos.reduce((sum, u) => sum + BigInt(u.amount), BigInt(0))
     },
     walletBalance: (state) => state.walletBalance,
-    txHistory: (state) => state.txHistory,
     activityHistory: (state) => state.activityHistory,
+    activityStatus: (state) => state.activityStatus,
     networkPreset: (state) => state.networkPreset,
     networkPresets: () => NETWORK_PRESETS,
   }

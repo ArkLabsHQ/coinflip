@@ -67,7 +67,7 @@
 
 import { sha256 } from '@scure/btc-signer/utils.js'
 import { OP } from '@scure/btc-signer'
-import { packets, covenants } from '@arklabshq/contract-workflows-prototype'
+import { packets } from '@arklabshq/contract-workflows-prototype'
 
 /** Arkade-extension opcodes (not in @scure/btc-signer's OP enum). */
 const OP_INSPECTPACKET = 0xf4
@@ -210,32 +210,5 @@ export function buildVariableOddsWinPredicate(
 
     // ── For creatorWin leaf: invert the predicate result ───────────────
     ...(forPlayerWin ? [] : [OP.NOT]),
-  ])
-}
-
-/**
- * Build the win-condition arkade-script body.
- *
- * Composes: `<predicate> <OP_VERIFY> <atomicSweep covenant>` so the leaf's
- * full arkade-script atomically enforces (a) the winner is who the leaf
- * claims AND (b) the payout output structure of the spending tx.
- */
-export function buildVariableOddsWinArkadeScript(
-  creatorHash: Uint8Array,
-  playerHash: Uint8Array,
-  n: number,
-  target: number,
-  lo: number,
-  forPlayerWin: boolean,
-  payoutPkScript: Uint8Array,
-  potAmount: bigint,
-  otherStakeValue: bigint,
-): Uint8Array {
-  const predicate = buildVariableOddsWinPredicate(creatorHash, playerHash, n, target, lo, forPlayerWin)
-  const covenant = covenants.atomicSweep(payoutPkScript, potAmount, otherStakeValue)
-  return new Uint8Array([
-    ...predicate,
-    OP.VERIFY,
-    ...covenant,
   ])
 }

@@ -26,12 +26,40 @@ import { v4 as uuidv4 } from 'uuid'
 import { hashSecret, networkHrpFromArkInfo, ARK_SERVER_URL } from './house-wallet.js'
 import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyError, BetExceedsCapacityError, KeyedMutex } from './vtxo-pool.js'
 import { loadEmulatorConfig } from './emulator.js'
-import { computeHouseStake } from './trustless-game.js'
+import { computeHouseStake } from './house-economics.js'
 import type { AppDeps } from './deps.js'
 
 const toXOnly = (b: Uint8Array): Uint8Array => (b.length === 33 ? b.slice(1) : b)
 /** The coin (no client odds) maps to n=2,target=1,lo=0 — player wins iff roll==0. */
 const COIN_ODDS = { oddsN: 2, oddsTarget: 1, oddsLo: 0 } as const
+
+/**
+ * The display roll for a terminal v3/v4 game — `(digitHouse + digitPlayer) mod n`,
+ * or null when a secret is missing/malformed/out-of-range (a cheat-penalty
+ * decided the winner, not a fair roll). Reveals are `[digit] || salt`
+ * (packets.encodeReveal), so byte 0 is the digit; the coin (no client odds)
+ * maps to n=2. v2 encoded the digit in the reveal LENGTH — no roll here. This
+ * mirrors the reveal-time computation in handleV4Reveal so /details can echo
+ * the same value from the persisted secrets.
+ */
+export function computeGameRoll(
+  houseSecretHex: string | null,
+  playerSecretHex: string | null,
+  oddsN: number | null,
+): number | null {
+  if (!houseSecretHex || !playerSecretHex) return null
+  try {
+    const hs = hex.decode(houseSecretHex)
+    const ps = hex.decode(playerSecretHex)
+    return computeRollV3(
+      { digit: hs[0], salt: hs.slice(1) },
+      { digit: ps[0], salt: ps.slice(1) },
+      oddsN ?? COIN_ODDS.oddsN,
+    )
+  } catch {
+    return null
+  }
+}
 
 /**
  * Which protocol NEW games use — 'v4' (joint pot, the default) or 'v3'
@@ -824,17 +852,31 @@ export async function reconcileV4StageTwo(deps: AppDeps): Promise<string[]> {
  * can't be refunded, so stage-2 settle runs first.
  */
 export function startV4RefundTimer(deps: AppDeps, intervalMs = 120_000): NodeJS.Timeout {
+  // Re-entrancy guard: a tick's work (many stalled games × up-to-10 emulator
+  // retries with backoff) can exceed the interval. Without this, ticks overlap
+  // and two can attempt a refund/settle for the same game at once — wasted work
+  // (arkd rejects the double-spend, and broadcastV4Refund isn't under revealLocks).
+  let running = false
   const tick = async () => {
-    const settled = await reconcileV4StageTwo(deps).catch((e) => {
-      console.error('[v4-stage2] tick failed:', e instanceof Error ? e.message : e)
-      return [] as string[]
-    })
-    if (settled.length > 0) console.log(`[v4-stage2] settled ${settled.length} contested game(s)`)
-    const txids = await reconcileV4Refunds(deps).catch((e) => {
-      console.error('[v4-refund] tick failed:', e instanceof Error ? e.message : e)
-      return [] as string[]
-    })
-    if (txids.length > 0) console.log(`[v4-refund] reconciled ${txids.length} stalled game(s)`)
+    if (running) {
+      console.warn('[v4-reconcile] previous tick still running — skipping this interval')
+      return
+    }
+    running = true
+    try {
+      const settled = await reconcileV4StageTwo(deps).catch((e) => {
+        console.error('[v4-stage2] tick failed:', e instanceof Error ? e.message : e)
+        return [] as string[]
+      })
+      if (settled.length > 0) console.log(`[v4-stage2] settled ${settled.length} contested game(s)`)
+      const txids = await reconcileV4Refunds(deps).catch((e) => {
+        console.error('[v4-refund] tick failed:', e instanceof Error ? e.message : e)
+        return [] as string[]
+      })
+      if (txids.length > 0) console.log(`[v4-refund] reconciled ${txids.length} stalled game(s)`)
+    } finally {
+      running = false
+    }
   }
   setTimeout(tick, 7_000)
   return setInterval(tick, intervalMs)

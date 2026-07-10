@@ -202,7 +202,17 @@
 
         <!-- ── Activity ───────────────────────────────────────────── -->
         <section v-if="tab === 'activity'" class="activity-section">
-          <div v-if="activityHistory.length === 0" class="empty-state">
+          <div v-if="activityStatus === 'loading' && activityHistory.length === 0" class="empty-state">
+            <div class="spinner"></div>
+            <div class="empty-text">Loading activity…</div>
+          </div>
+          <div v-else-if="activityStatus === 'error' && activityHistory.length === 0" class="empty-state">
+            <div class="empty-icon">&#9888;</div>
+            <div class="empty-text">Couldn't load activity</div>
+            <div class="hint">The wallet history didn't load. Check your connection and try again.</div>
+            <button class="btn-outline" @click="retryActivity">Retry</button>
+          </div>
+          <div v-else-if="activityHistory.length === 0" class="empty-state">
             <div class="empty-icon">&#9728;</div>
             <div class="empty-text">No activity yet</div>
             <div class="hint">Your wallet activity will appear here</div>
@@ -233,8 +243,8 @@
                 <div v-if="act.txs.length > 1" class="tx-id mono">
                   {{ act.txs.length }} transactions grouped
                 </div>
-                <div v-else-if="act.txs[0]" class="tx-id mono" @click="copyText(act.txs[0].txid)">
-                  {{ act.txs[0].txid.slice(0, 12) }}…{{ act.txs[0].txid.slice(-8) }}
+                <div v-else-if="act.txs[0]" class="tx-id mono" @click="copyText(txidOf(act.txs[0]))">
+                  {{ txidOf(act.txs[0]).slice(0, 12) }}…{{ txidOf(act.txs[0]).slice(-8) }}
                 </div>
               </div>
             </div>
@@ -332,7 +342,7 @@
 import { defineComponent, computed, ref, watch, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
-import { isValidArkAddress } from '@arkade-os/sdk'
+import { isValidArkAddress, type ArkTransaction } from '@arkade-os/sdk'
 import {
   getSwaps,
   createLnDeposit as doLnDeposit,
@@ -506,8 +516,13 @@ export default defineComponent({
       return 'Settle'
     })
     const isMutinyTestnet = computed(() => arkServer.value === 'https://mutinynet.arkade.sh')
-    const txHistory = computed(() => store.getters['ark/txHistory'] || [])
     const activityHistory = computed(() => store.getters['ark/activityHistory'] || [])
+    const activityStatus = computed(() => store.getters['ark/activityStatus'] || 'idle')
+    // Best-effort txid for an activity's member tx — the SDK's ArkTransaction
+    // carries a composite key (arkTxid / commitmentTxid / boardingTxid), not a
+    // flat txid; pick the most specific one for the copy-to-clipboard row.
+    const txidOf = (tx: ArkTransaction): string =>
+      tx.key.arkTxid || tx.key.commitmentTxid || tx.key.boardingTxid
 
     // ── LNURL session (amountless Lightning Address receive) ──────────
     // Mirrors the wallet's behaviour: open an SSE session against the
@@ -615,7 +630,7 @@ export default defineComponent({
 
     // The Activity tab's history is heavy (the SDK re-derives it from chain —
     // an esplora /outspends per boarding tx), so load it lazily, only when that
-    // tab is actually viewed. The cached list (state.txHistory) renders
+    // tab is actually viewed. The cached list (state.activityHistory) renders
     // instantly; this refreshes it. Receive / Send / Settings cost nothing.
     function loadActivityIfViewing() {
       if (tab.value === 'activity' && ready.value) {
@@ -623,6 +638,10 @@ export default defineComponent({
       }
     }
     watch(tab, loadActivityIfViewing)
+    // Manual retry from the Activity error state.
+    function retryActivity() {
+      store.dispatch('ark/refreshHistory').catch(() => { /* surfaced via activityStatus */ })
+    }
 
     // Live Activity: the SDK contract-watcher commits a new walletBalance on
     // every vtxo_received / vtxo_spent. When that happens while the Activity
@@ -679,6 +698,7 @@ export default defineComponent({
                 depositStatusText.value = 'Invoice expired'
               }
             }).then((unsub) => { depositCleanup = unsub })
+              .catch((err) => console.warn('LN swap subscription failed:', err))
           }
         }
       } catch (err) {
@@ -878,6 +898,7 @@ export default defineComponent({
         const response = await fetch('https://faucet.mutinynet.arkade.sh/faucet', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(20_000),
           body: JSON.stringify({ address: arkAddress.value, amount: 1000 }),
         })
         if (!response.ok) throw new Error('Failed')
@@ -917,7 +938,7 @@ export default defineComponent({
       hasUnsettledFunds, settleReasonLabel,
       hasUnconfirmedBoarding, unconfirmedBoardingAmount,
       hasRecoverable, recoverableAmount,
-      isMutinyTestnet, txHistory, activityHistory, formatRelative,
+      isMutinyTestnet, activityHistory, activityStatus, retryActivity, txidOf, formatRelative,
       tab,
       depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
       showAmountForm, copySheetOpen, copyOptions,

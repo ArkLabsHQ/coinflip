@@ -40,6 +40,7 @@ export {
   handleV4Cofund,
   handleV4CofundFinalize,
   handleV4Reveal,
+  handleV4CooperativeExit,
   broadcastV4Refund,
   reconcileV4Refunds,
   settleV4StageTwo,
@@ -55,6 +56,8 @@ export {
   type V4CofundFinalizeResult,
   type V4RevealRequest,
   type V4RevealResult,
+  type V4CooperativeExitRequest,
+  type V4CooperativeExitResult,
 } from './trustless-game-v4.js'
 export { rebuildReservations, startPoolMaintenance, ensureHouseVtxoPool } from './vtxo-pool.js'
 export { createPublicRoutes } from './public-routes.js'

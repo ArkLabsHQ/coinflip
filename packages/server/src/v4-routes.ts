@@ -17,10 +17,12 @@ import {
   handleV4Cofund,
   handleV4CofundFinalize,
   handleV4Reveal,
+  handleV4CooperativeExit,
   type V4PlayRequest,
   type V4CofundRequest,
   type V4CofundFinalizeRequest,
   type V4RevealRequest,
+  type V4CooperativeExitRequest,
 } from './trustless-game-v4.js'
 import { HouseBusyError, BetExceedsCapacityError } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
@@ -45,7 +47,8 @@ function sendError(res: Response, err: unknown, logLabel: string): void {
     message.includes('already') ||
     message.includes('not co-funded') ||
     message.includes('not submitted') ||
-    message.includes('must have')
+    message.includes('must have') ||
+    message.includes('cooperative-exit')
   ) {
     res.status(400).json({ error: message })
   } else {
@@ -110,6 +113,22 @@ export function createV4Routes(deps: AppDeps): Router {
       res.json(await handleV4Reveal(String(req.params.id), body, deps))
     } catch (err) {
       sendError(res, err, 'v4/reveal')
+    }
+  })
+
+  // POST /api/v4/game/:id/cooperative-exit — house co-signs the client's leaf-7
+  // on-chain split-back (emulator-free recovery). Client sends its player-signed
+  // exit PSBT + the unrolled pot outpoint; house returns the co-signed PSBT.
+  router.post('/api/v4/game/:id/cooperative-exit', async (req: Request, res: Response) => {
+    try {
+      const body = req.body as V4CooperativeExitRequest
+      if (!body.exitTxPsbt || !body.potOnchain?.txid || typeof body.feeSats !== 'number') {
+        res.status(400).json({ error: 'Missing required fields: exitTxPsbt, potOnchain{txid,vout,value}, feeSats' })
+        return
+      }
+      res.json(await handleV4CooperativeExit(String(req.params.id), body, deps))
+    } catch (err) {
+      sendError(res, err, 'v4/cooperative-exit')
     }
   })
 

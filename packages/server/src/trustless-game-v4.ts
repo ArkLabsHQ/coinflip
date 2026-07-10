@@ -18,7 +18,7 @@ import { ArkAddress, Transaction, decodeTapscript, CSVMultisigTapscript, RestInd
 import {
   CoinflipJointPotScript, commitDigit, randomUniformInt,
   determineWinnerV3, computeRollV3, buildJointPotSettleTx, buildStageTwoSettleTx, buildJointPotRefundTx,
-  encodeSettleForEmulator, getConditionWitness,
+  buildCooperativeSpendExitTx, encodeSettleForEmulator, getConditionWitness,
   serializeTapLeaf, type SerializedTapLeaf, type SerializedHouseInput, type BuiltJointPotTx,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
@@ -515,6 +515,79 @@ function rebuildCovenant(cv: V4CovenantParams): CoinflipJointPotScript {
     housePayoutPkScript: hex.decode(cv.housePayoutPkScript),
     playerStake: BigInt(cv.playerStake), houseStake: BigInt(cv.houseStake),
   })
+}
+
+export interface V4CooperativeExitRequest {
+  /** The client's player-signed leaf-7 (cooperativeSpendExit) split-back PSBT, base64. */
+  exitTxPsbt: string
+  /** The UNROLLED pot UTXO's on-chain outpoint (the client unrolled it via SDK Unroll). */
+  potOnchain: { txid: string; vout: number; value: number }
+  /** The on-chain fee the split-back pays (must match the client's build). */
+  feeSats: number
+}
+export interface V4CooperativeExitResult {
+  /** The exit PSBT co-signed by the house (creator) — the client finalizes + broadcasts. */
+  exitTxPsbt: string
+}
+
+/** Fail-closed: the house co-signs ONLY a tx byte-shape-identical to the split-back
+ *  it rebuilt (single input at the pot outpoint + CSV sequence, exact split outputs).
+ *  Any deviation → refuse (never sign a tx that pays somewhere/something else). */
+function assertSameExitShape(got: Transaction, want: Transaction): void {
+  if (got.inputsLength !== 1 || got.outputsLength !== want.outputsLength) {
+    throw new Error('cooperative-exit: tx shape mismatch')
+  }
+  const gi = got.getInput(0), wi = want.getInput(0)
+  if (
+    !gi.txid || !wi.txid || hex.encode(gi.txid) !== hex.encode(wi.txid) ||
+    gi.index !== wi.index || gi.sequence !== wi.sequence
+  ) {
+    throw new Error('cooperative-exit: input outpoint/sequence mismatch — refusing to co-sign')
+  }
+  for (let i = 0; i < want.outputsLength; i++) {
+    const go = got.getOutput(i), wo = want.getOutput(i)
+    if (go.amount !== wo.amount || !go.script || !wo.script || hex.encode(go.script) !== hex.encode(wo.script)) {
+      throw new Error(`cooperative-exit: output ${i} mismatch — the house co-signs only the exact split-back`)
+    }
+  }
+}
+
+/**
+ * POST /api/v4/game/:id/cooperative-exit — the HOUSE co-signs the client's leaf-7
+ * `cooperativeSpendExit` split-back. The emulator-free recovery path: when the
+ * emulator is unreachable after co-fund, the player unrolls the pot on-chain and
+ * builds the split-back (leaf 7 = `CSVMultisig[player, creator]`, both must sign);
+ * the house verifies the tx is EXACTLY the split-back it expects (fail-closed) and
+ * adds its signature so the pot returns to both funders. The client broadcasts.
+ */
+export async function handleV4CooperativeExit(
+  gameId: string,
+  req: V4CooperativeExitRequest,
+  deps: AppDeps,
+): Promise<V4CooperativeExitResult> {
+  const game = await deps.repos.games.get(gameId)
+  if (!game) throw new Error('Game not found')
+  const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
+  if (state.protocolVersion !== 'v4' || !state.cofundTxid) {
+    throw new Error('Not a co-funded v4 game — nothing to cooperatively exit')
+  }
+  const cv = state.covenant
+  const pot = rebuildCovenant(cv)
+  const { tx: expected } = buildCooperativeSpendExitTx({
+    pot,
+    potOnchain: { txid: req.potOnchain.txid, vout: req.potOnchain.vout, value: req.potOnchain.value },
+    playerStake: BigInt(cv.playerStake),
+    houseStake: BigInt(cv.houseStake),
+    playerPayoutPkScript: hex.decode(cv.playerPayoutPkScript),
+    housePayoutPkScript: hex.decode(cv.housePayoutPkScript),
+    exitDelay: BigInt(cv.exitDelay),
+    feeSats: BigInt(req.feeSats),
+  })
+  const clientTx = Transaction.fromPSBT(base64.decode(req.exitTxPsbt))
+  assertSameExitShape(clientTx, expected)
+  // Co-sign input 0 with the house (creator) key; the client already signed the player slot.
+  const signed = await deps.identity.sign(clientTx, [0])
+  return { exitTxPsbt: base64.encode(signed.toPSBT()) }
 }
 
 export interface V4RevealRequest {

@@ -387,8 +387,17 @@ const settleOnce = singleFlight(async (eventCallback?: (event: unknown) => void)
   // them first — best-effort and a no-op when nothing is deprecated, so a hiccup
   // here must never block a normal settle.
   try {
-    const vm = await w.getVtxoManager()
-    await withTimeout(vm.migrateDeprecatedSignerVtxos(), TIMEOUTS.submit, 'signer migration')
+    // Bound BOTH awaits — getVtxoManager() memoizes but its first call still
+    // hits the network, and it's the one un-timed await that could otherwise
+    // wedge this singleFlight slot before we even reach settle().
+    await withTimeout(
+      (async () => {
+        const vm = await w.getVtxoManager()
+        await vm.migrateDeprecatedSignerVtxos()
+      })(),
+      TIMEOUTS.submit,
+      'signer migration',
+    )
   } catch (e) {
     console.warn('pre-settle deprecated-signer migration failed (continuing):', e)
   }

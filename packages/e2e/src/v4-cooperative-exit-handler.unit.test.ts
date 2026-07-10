@@ -23,8 +23,9 @@ const FEE = 1_000
 const POT_ONCHAIN = { txid: 'bb'.repeat(32), vout: 0, value: Number(2n * STAKE) }
 
 /** Build a game whose covenant uses the given player/house x-only keys, a
- *  client-built exit tx already signed by the PLAYER, and mock deps. */
-async function fixture() {
+ *  client-built exit tx already signed by the PLAYER, and mock deps. Pass a
+ *  `status` to exercise the terminal-state guard (default: undefined = pending). */
+async function fixture(status?: string) {
   const player = SingleKey.fromRandomBytes()
   const house = SingleKey.fromRandomBytes()
   const playerPub = await player.xOnlyPublicKey()
@@ -51,7 +52,7 @@ async function fixture() {
   const playerSigned = await player.sign(tx, [0])
 
   const state = { protocolVersion: 'v4', cofundTxid: POT_ONCHAIN.txid, covenant }
-  const deps = { repos: { games: { get: async () => ({ house_vtxos_json: JSON.stringify(state) }) } }, identity: house }
+  const deps = { repos: { games: { get: async () => ({ house_vtxos_json: JSON.stringify(state), status }) } }, identity: house }
   return { deps, playerSigned, pot }
 }
 
@@ -85,5 +86,44 @@ describe('handleV4CooperativeExit (house co-sign, fail-closed)', () => {
     await expect(server.handleV4CooperativeExit('nope', {
       exitTxPsbt: 'x', potOnchain: POT_ONCHAIN, feeSats: FEE,
     }, deps)).rejects.toThrow(/Game not found/)
+  })
+
+  it('REFUSES once the game is resolved (pot already spent)', async () => {
+    // The pot was already settled/refunded — matching the reveal + refund
+    // siblings, the exit must refuse rather than co-sign a doomed double-spend.
+    const { deps, playerSigned } = await fixture('resolved')
+    await expect(server.handleV4CooperativeExit('g1', {
+      exitTxPsbt: base64.encode(playerSigned.toPSBT()), potOnchain: POT_ONCHAIN, feeSats: FEE,
+    }, deps)).rejects.toThrow(/already resolved/)
+  })
+
+  it('REFUSES a tx whose input witnessUtxo value disagrees with the pot', async () => {
+    // Outpoint, sequence, and outputs all stay honest; only the declared input
+    // value is inflated. The house co-sign commits to the spent amount via the
+    // taproot sighash, so it must refuse the internally-inconsistent input.
+    const { deps, pot } = await fixture()
+    const { tx } = buildCooperativeSpendExitTx({
+      pot, potOnchain: POT_ONCHAIN, playerStake: STAKE, houseStake: STAKE,
+      playerPayoutPkScript: p2tr(0xa0), housePayoutPkScript: p2tr(0xb0), exitDelay: 86_528n, feeSats: BigInt(FEE),
+    })
+    tx.updateInput(0, { witnessUtxo: { script: pot.pkScript, amount: BigInt(POT_ONCHAIN.value) + 10_000n } })
+    await expect(server.handleV4CooperativeExit('g1', {
+      exitTxPsbt: base64.encode(tx.toPSBT()), potOnchain: POT_ONCHAIN, feeSats: FEE,
+    }, deps)).rejects.toThrow(/witnessUtxo mismatch/)
+  })
+
+  it('REFUSES a tx that swaps in a different covenant leaf', async () => {
+    // Same outpoint/sequence/witnessUtxo/outputs, but the input satisfies the
+    // refund leaf (cooperativeSpend) instead of leaf 7 (cooperativeSpendExit).
+    // The house co-sign commits to the tapleaf hash, so it must refuse.
+    const { deps, pot } = await fixture()
+    const { tx } = buildCooperativeSpendExitTx({
+      pot, potOnchain: POT_ONCHAIN, playerStake: STAKE, houseStake: STAKE,
+      playerPayoutPkScript: p2tr(0xa0), housePayoutPkScript: p2tr(0xb0), exitDelay: 86_528n, feeSats: BigInt(FEE),
+    })
+    tx.updateInput(0, { tapLeafScript: [pot.cooperativeSpend()] })
+    await expect(server.handleV4CooperativeExit('g1', {
+      exitTxPsbt: base64.encode(tx.toPSBT()), potOnchain: POT_ONCHAIN, feeSats: FEE,
+    }, deps)).rejects.toThrow(/tapLeafScript mismatch/)
   })
 })

@@ -544,6 +544,32 @@ function assertSameExitShape(got: Transaction, want: Transaction): void {
   ) {
     throw new Error('cooperative-exit: input outpoint/sequence mismatch — refusing to co-sign')
   }
+  // The house signs input 0, so its taproot signature commits (via the sighash's
+  // sha_amounts/sha_scriptpubkeys) to the spent output's amount + scriptPubKey,
+  // and (via the tapleaf hash) to the leaf being satisfied. Pin both to `want`
+  // so we only ever co-sign a spend of the real pot UTXO through the exact
+  // cooperativeSpendExit leaf — never a substituted input value or leaf.
+  if (
+    !gi.witnessUtxo || !wi.witnessUtxo ||
+    gi.witnessUtxo.amount !== wi.witnessUtxo.amount ||
+    hex.encode(gi.witnessUtxo.script) !== hex.encode(wi.witnessUtxo.script)
+  ) {
+    throw new Error('cooperative-exit: input witnessUtxo mismatch — refusing to co-sign')
+  }
+  // btc-signer stores tapLeafScript as an array of [controlBlock, scriptBytes]
+  // tuples; the script bytes (element [1]) are raw Bytes in both a freshly-built
+  // and a deserialized PSBT, so compare those. The control block's merkle path is
+  // derived from the taptree already pinned by witnessUtxo.script above, so the
+  // script bytes are what fix which leaf is spent.
+  const gl = gi.tapLeafScript ?? [], wl = wi.tapLeafScript ?? []
+  if (wl.length === 0 || gl.length !== wl.length) {
+    throw new Error('cooperative-exit: input tapLeafScript mismatch — refusing to co-sign')
+  }
+  for (let k = 0; k < wl.length; k++) {
+    if (hex.encode(gl[k][1]) !== hex.encode(wl[k][1])) {
+      throw new Error('cooperative-exit: input tapLeafScript mismatch — refusing to co-sign')
+    }
+  }
   for (let i = 0; i < want.outputsLength; i++) {
     const go = got.getOutput(i), wo = want.getOutput(i)
     if (go.amount !== wo.amount || !go.script || !wo.script || hex.encode(go.script) !== hex.encode(wo.script)) {
@@ -570,6 +596,14 @@ export async function handleV4CooperativeExit(
   const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
   if (state.protocolVersion !== 'v4' || !state.cofundTxid) {
     throw new Error('Not a co-funded v4 game — nothing to cooperatively exit')
+  }
+  // Terminal-state guard, matching the reveal-settle (handleV4RevealInner) and
+  // refund (broadcastV4Refund) siblings: once the game is resolved the pot was
+  // already spent (settled to the winner or split back), so there is nothing
+  // left on-chain for the leaf-7 exit to claim — refuse rather than co-sign a
+  // doomed double-spend.
+  if (game.status === 'resolved') {
+    throw new Error('Game already resolved — nothing to cooperatively exit')
   }
   const cv = state.covenant
   const pot = rebuildCovenant(cv)

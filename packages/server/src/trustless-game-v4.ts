@@ -852,17 +852,31 @@ export async function reconcileV4StageTwo(deps: AppDeps): Promise<string[]> {
  * can't be refunded, so stage-2 settle runs first.
  */
 export function startV4RefundTimer(deps: AppDeps, intervalMs = 120_000): NodeJS.Timeout {
+  // Re-entrancy guard: a tick's work (many stalled games × up-to-10 emulator
+  // retries with backoff) can exceed the interval. Without this, ticks overlap
+  // and two can attempt a refund/settle for the same game at once — wasted work
+  // (arkd rejects the double-spend, and broadcastV4Refund isn't under revealLocks).
+  let running = false
   const tick = async () => {
-    const settled = await reconcileV4StageTwo(deps).catch((e) => {
-      console.error('[v4-stage2] tick failed:', e instanceof Error ? e.message : e)
-      return [] as string[]
-    })
-    if (settled.length > 0) console.log(`[v4-stage2] settled ${settled.length} contested game(s)`)
-    const txids = await reconcileV4Refunds(deps).catch((e) => {
-      console.error('[v4-refund] tick failed:', e instanceof Error ? e.message : e)
-      return [] as string[]
-    })
-    if (txids.length > 0) console.log(`[v4-refund] reconciled ${txids.length} stalled game(s)`)
+    if (running) {
+      console.warn('[v4-reconcile] previous tick still running — skipping this interval')
+      return
+    }
+    running = true
+    try {
+      const settled = await reconcileV4StageTwo(deps).catch((e) => {
+        console.error('[v4-stage2] tick failed:', e instanceof Error ? e.message : e)
+        return [] as string[]
+      })
+      if (settled.length > 0) console.log(`[v4-stage2] settled ${settled.length} contested game(s)`)
+      const txids = await reconcileV4Refunds(deps).catch((e) => {
+        console.error('[v4-refund] tick failed:', e instanceof Error ? e.message : e)
+        return [] as string[]
+      })
+      if (txids.length > 0) console.log(`[v4-refund] reconciled ${txids.length} stalled game(s)`)
+    } finally {
+      running = false
+    }
   }
   setTimeout(tick, 7_000)
   return setInterval(tick, intervalMs)

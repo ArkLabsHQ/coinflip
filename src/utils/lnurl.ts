@@ -97,7 +97,7 @@ export async function fetchLnurlPayParams(input: LnurlInput): Promise<LnurlPayPa
   if (input.kind === 'lnaddr') url = lnAddrToUrl(input.raw)
   else if (input.kind === 'lnurl') url = decodeLnurlBech32(input.raw)
   else url = input.raw
-  const resp = await fetch(url, { method: 'GET' })
+  const resp = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(15_000) })
   if (!resp.ok) throw new Error(`LNURL endpoint returned ${resp.status}: ${await resp.text().catch(() => '')}`)
   const body = (await resp.json()) as Partial<LnurlPayParams> & { status?: string; reason?: string }
   if (body.status === 'ERROR') throw new Error(`LNURL error: ${body.reason || 'unknown'}`)
@@ -129,7 +129,7 @@ export async function requestLnurlInvoice(params: LnurlPayParams, amountSats: nu
   }
   const callback = new URL(params.callback)
   callback.searchParams.set('amount', String(amountMsat))
-  const resp = await fetch(callback.toString(), { method: 'GET' })
+  const resp = await fetch(callback.toString(), { method: 'GET', signal: AbortSignal.timeout(15_000) })
   if (!resp.ok) {
     throw new Error(`LNURL callback returned ${resp.status}: ${await resp.text().catch(() => '')}`)
   }

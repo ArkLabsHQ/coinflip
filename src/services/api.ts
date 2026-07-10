@@ -34,14 +34,32 @@ export interface GameResponse {
   resolvedAt: string | null
 }
 
+/** Ceiling for a single server round-trip. The play chain (play → co-fund →
+ *  reveal) makes several of these in sequence, each of which can fan out to the
+ *  emulator + arkd server-side; 60s bounds a dead/hung connection without
+ *  tripping a legitimately-slow reveal. Without it a stalled server freezes the
+ *  flip on "FLIPPING…" forever (fetch has no default timeout). */
+const REQUEST_TIMEOUT_MS = 60_000
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  })
+  let response: Response
+  try {
+    response = await fetch(`${BASE_URL}${path}`, {
+      ...options,
+      signal: options?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+    })
+  } catch (e) {
+    // AbortSignal.timeout rejects with a TimeoutError DOMException; give it a
+    // message the UI can show instead of a bare "signal is aborted".
+    if (e instanceof DOMException && e.name === 'TimeoutError') {
+      throw new Error(`Request to ${path} timed out — the server may be busy. Please try again.`)
+    }
+    throw e
+  }
 
   if (!response.ok) {
     const text = await response.text()
@@ -66,14 +84,10 @@ export interface NetworkResponse {
     signerPubkey: string
     version: string
   }
-  /** Escrow contract version the server mints NEW games with. v2 = legacy
-   *  length-encoded predicate; v3 = arkade-script + packet-borne reveals.
-   *  Drives client secret format: v2 = raw bytes; v3 = `[digit] ‖ salt`. */
-  escrowVersion?: 'v2' | 'v3'
-  /** Game protocol the client should drive — 'v4' (joint pot, /api/v4 flow,
-   *  the default) or 'v3' (per-party escrow). Set the server's PROTOCOL_VERSION=v3
-   *  to fall back; the play flow routes to playV4Game when this is 'v4'. */
-  protocolVersion?: 'v3' | 'v4'
+  /** Game protocol the client should drive. The v4-only server always returns
+   *  'v4' (joint pot, /api/v4 flow); the field is retained for forward-compat
+   *  and the client falls back gracefully if it's ever absent. */
+  protocolVersion?: 'v4'
 }
 export async function getNetwork(): Promise<NetworkResponse> {
   const resp = await request<NetworkResponse>('/api/network')

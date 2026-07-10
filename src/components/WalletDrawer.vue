@@ -202,7 +202,17 @@
 
         <!-- ── Activity ───────────────────────────────────────────── -->
         <section v-if="tab === 'activity'" class="activity-section">
-          <div v-if="activityHistory.length === 0" class="empty-state">
+          <div v-if="activityStatus === 'loading' && activityHistory.length === 0" class="empty-state">
+            <div class="spinner"></div>
+            <div class="empty-text">Loading activity…</div>
+          </div>
+          <div v-else-if="activityStatus === 'error' && activityHistory.length === 0" class="empty-state">
+            <div class="empty-icon">&#9888;</div>
+            <div class="empty-text">Couldn't load activity</div>
+            <div class="hint">The wallet history didn't load. Check your connection and try again.</div>
+            <button class="btn-outline" @click="retryActivity">Retry</button>
+          </div>
+          <div v-else-if="activityHistory.length === 0" class="empty-state">
             <div class="empty-icon">&#9728;</div>
             <div class="empty-text">No activity yet</div>
             <div class="hint">Your wallet activity will appear here</div>
@@ -507,6 +517,7 @@ export default defineComponent({
     })
     const isMutinyTestnet = computed(() => arkServer.value === 'https://mutinynet.arkade.sh')
     const activityHistory = computed(() => store.getters['ark/activityHistory'] || [])
+    const activityStatus = computed(() => store.getters['ark/activityStatus'] || 'idle')
     // Best-effort txid for an activity's member tx — the SDK's ArkTransaction
     // carries a composite key (arkTxid / commitmentTxid / boardingTxid), not a
     // flat txid; pick the most specific one for the copy-to-clipboard row.
@@ -627,6 +638,10 @@ export default defineComponent({
       }
     }
     watch(tab, loadActivityIfViewing)
+    // Manual retry from the Activity error state.
+    function retryActivity() {
+      store.dispatch('ark/refreshHistory').catch(() => { /* surfaced via activityStatus */ })
+    }
 
     // Live Activity: the SDK contract-watcher commits a new walletBalance on
     // every vtxo_received / vtxo_spent. When that happens while the Activity
@@ -683,6 +698,7 @@ export default defineComponent({
                 depositStatusText.value = 'Invoice expired'
               }
             }).then((unsub) => { depositCleanup = unsub })
+              .catch((err) => console.warn('LN swap subscription failed:', err))
           }
         }
       } catch (err) {
@@ -921,7 +937,7 @@ export default defineComponent({
       hasUnsettledFunds, settleReasonLabel,
       hasUnconfirmedBoarding, unconfirmedBoardingAmount,
       hasRecoverable, recoverableAmount,
-      isMutinyTestnet, activityHistory, txidOf, formatRelative,
+      isMutinyTestnet, activityHistory, activityStatus, retryActivity, txidOf, formatRelative,
       tab,
       depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
       showAmountForm, copySheetOpen, copyOptions,

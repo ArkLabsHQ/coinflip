@@ -30,6 +30,7 @@ import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
 import { getErrorMessage } from '@/utils/errors'
 import { isCltvMatured } from '@/utils/cltv'
+import { withTimeout, TIMEOUTS } from '@/utils/withTimeout'
 import { gameActivityResolver } from './gameActivityResolver'
 
 /** VtxoInput shape expected by the server's /api/play endpoint. */
@@ -258,6 +259,9 @@ interface ArkState {
    *  game's co-fund + settle collapse into one "Dice game" row via the resolver
    *  registered at connect (see `gameActivityResolver`). */
   activityHistory: Activity[]
+  /** Load state for the Activity tab, so a failed/slow getActivityHistory reads
+   *  as an error the user can retry — not as a genuinely empty "No activity yet". */
+  activityStatus: 'idle' | 'loading' | 'ready' | 'error'
   claimingGames: Record<string, ClaimingInfo>
 }
 
@@ -346,9 +350,13 @@ async function submitOffchain(
 ): Promise<string> {
   if (witness) for (const i of signInputs) setArkPsbtField(arkTx, i, ConditionWitness, witness)
   const signed = await identity.sign(arkTx, signInputs)
-  const { arkTxid, signedCheckpointTxs } = await arkProvider.submitTx(
-    base64.encode(signed.toPSBT()),
-    checkpoints.map((c) => base64.encode(c.toPSBT())),
+  const { arkTxid, signedCheckpointTxs } = await withTimeout(
+    arkProvider.submitTx(
+      base64.encode(signed.toPSBT()),
+      checkpoints.map((c) => base64.encode(c.toPSBT())),
+    ),
+    TIMEOUTS.submit,
+    'submit transaction',
   )
   const finals: string[] = []
   for (const c of signedCheckpointTxs) {
@@ -358,7 +366,7 @@ async function submitOffchain(
     if (witness) for (const i of idx) setArkPsbtField(tx, i, ConditionWitness, witness)
     finals.push(base64.encode((await identity.sign(tx, idx)).toPSBT()))
   }
-  await arkProvider.finalizeTx(arkTxid, finals)
+  await withTimeout(arkProvider.finalizeTx(arkTxid, finals), TIMEOUTS.submit, 'finalize transaction')
   return arkTxid
 }
 
@@ -370,10 +378,26 @@ let sdkWallet: Wallet | null = null
 // calls register competing intents for the same boarding UTXO; arkd settles one and
 // the other hangs forever (the button awaiting it never clears). singleFlight funnels
 // both through one round so a second caller reuses it instead of racing.
-const settleOnce = singleFlight((eventCallback?: (event: unknown) => void): Promise<string> => {
+const settleOnce = singleFlight(async (eventCallback?: (event: unknown) => void): Promise<string> => {
   const w = sdkWallet
-  if (!w) return Promise.reject(new Error('Wallet not connected'))
-  return w.settle(undefined, eventCallback as never)
+  if (!w) throw new Error('Wallet not connected')
+  // Mirror the server's renewal guard (game-engine `migrateDeprecatedSigners`):
+  // after the operator rotates its signing key, settle() rejects deprecated-signer
+  // inputs with INVALID_VTXO_SCRIPT and a client boarding-settle would jam. Migrate
+  // them first — best-effort and a no-op when nothing is deprecated, so a hiccup
+  // here must never block a normal settle.
+  try {
+    const vm = await w.getVtxoManager()
+    await withTimeout(vm.migrateDeprecatedSignerVtxos(), TIMEOUTS.submit, 'signer migration')
+  } catch (e) {
+    console.warn('pre-settle deprecated-signer migration failed (continuing):', e)
+  }
+  // Bound the settle: a known SDK edge (settle(undefined) re-selecting a swept
+  // boarding coin) can hang 90s+. Without a ceiling the singleFlight slot never
+  // frees, wedging BOTH the manual "Settle" button and every future auto-settle
+  // for the session. The timeout rejects → the slot frees → the next attempt
+  // (or the SDK's own coalesce, once upstream) can proceed.
+  return withTimeout(w.settle(undefined, eventCallback as never), TIMEOUTS.settle, 'settle')
 })
 // Auto-reconnect backoff: a failed connect (slow load, arkd blip, reconnect
 // after a redeploy) schedules a retry with capped exponential backoff so the
@@ -647,6 +671,7 @@ const ark: Module<ArkState, RootState> = {
     arkAddress: null,
     boardingAddress: null,
     activityHistory: [],
+    activityStatus: 'idle',
     claimingGames: {},
   },
 
@@ -695,6 +720,9 @@ const ark: Module<ArkState, RootState> = {
     },
     SET_ACTIVITY_HISTORY(state, activities: Activity[]) {
       state.activityHistory = activities
+    },
+    SET_ACTIVITY_STATUS(state, status: ArkState['activityStatus']) {
+      state.activityStatus = status
     },
     SET_CLAIMING(state, { gameId, info }: { gameId: string; info: ClaimingInfo }) {
       state.claimingGames = { ...state.claimingGames, [gameId]: info }
@@ -1020,18 +1048,23 @@ const ark: Module<ArkState, RootState> = {
      */
     async refreshHistory({ commit, state }) {
       if (!sdkWallet || state.status !== 'connected') return
+      // Keep the last successfully-loaded list on screen while refreshing; only
+      // show the spinner on the first load (nothing cached yet).
+      commit('SET_ACTIVITY_STATUS', state.activityHistory.length ? 'ready' : 'loading')
       try {
-        const activities = await sdkWallet.getActivityHistory()
+        const activities = await withTimeout(sdkWallet.getActivityHistory(), TIMEOUTS.api, 'load activity')
         commit('SET_ACTIVITY_HISTORY', activities)
+        commit('SET_ACTIVITY_STATUS', 'ready')
       } catch (error) {
         console.error('Failed to refresh history:', error)
+        commit('SET_ACTIVITY_STATUS', 'error')
       }
     },
 
     async sendBitcoin(_ctx, { address, amount }: { address: string; amount: number }) {
       if (!sdkWallet) throw new Error('Wallet not connected')
 
-      const txid = await sdkWallet.sendBitcoin({ address, amount })
+      const txid = await withTimeout(sdkWallet.sendBitcoin({ address, amount }), TIMEOUTS.submit, 'send')
 
       // Refresh balance after send
       await _ctx.dispatch('refreshBalance')
@@ -1346,6 +1379,7 @@ const ark: Module<ArkState, RootState> = {
         const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(TIMEOUTS.emulator),
           body: JSON.stringify({
             arkTx: base64.encode(signed.toPSBT()),
             checkpointTxs: cps.map((c) => base64.encode(c.toPSBT())),
@@ -1440,6 +1474,7 @@ const ark: Module<ArkState, RootState> = {
           const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(TIMEOUTS.emulator),
             body: JSON.stringify(encodeSettleForEmulator(refund)),
           })
           if (!resp.ok) {
@@ -1486,6 +1521,7 @@ const ark: Module<ArkState, RootState> = {
           const resp = await fetch(`${stash.forfeitEmulatorUrl}/v1/tx`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(TIMEOUTS.emulator),
             body: JSON.stringify({ arkTx: base64.encode(signed.toPSBT()), checkpointTxs }),
           })
           if (!resp.ok) {
@@ -1759,6 +1795,7 @@ const ark: Module<ArkState, RootState> = {
     },
     walletBalance: (state) => state.walletBalance,
     activityHistory: (state) => state.activityHistory,
+    activityStatus: (state) => state.activityStatus,
     networkPreset: (state) => state.networkPreset,
     networkPresets: () => NETWORK_PRESETS,
   }

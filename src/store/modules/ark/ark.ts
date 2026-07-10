@@ -422,6 +422,14 @@ let reconnectAttempts = 0
 // so a click during a background tick (or vice versa) can't double-spend.
 let autoClaimTimer: ReturnType<typeof setInterval> | null = null
 const AUTO_CLAIM_INTERVAL_MS = 15_000
+
+// Feature flag (build-time): the emulator-free ON-CHAIN cooperative-exit escalation
+// in runAutoClaim ships DORMANT. Its multi-tick unroll is not yet verified against a
+// live regtest/browser, so it stays off unless the operator explicitly opts in by
+// building the client with VUE_APP_COOPERATIVE_EXIT_ENABLED=true. Off ⇒ the exhausted
+// self-refund path behaves exactly as before (give up; the stake still recovers via
+// the server's own refund timer). See v4CooperativeExitIo.
+const COOPERATIVE_EXIT_ENABLED = process.env.VUE_APP_COOPERATIVE_EXIT_ENABLED === 'true'
 // Stop fn for the SDK's incoming-funds watcher: one SSE stream over the
 // wallet's active contracts + the SDK's own 60s failsafe poll. Push-based
 // balance updates replace our manual refreshBalance polling.
@@ -1674,6 +1682,11 @@ const ark: Module<ArkState, RootState> = {
         // OTHER permanent failures. The staged-forfeit path is intentionally never
         // backed off (keep retrying a take-the-whole-pot claim).
         if (selfRefund && hasExhaustedReclaim(v4.claimFailures)) {
+          // Gated OFF by default (COOPERATIVE_EXIT_ENABLED) — when disabled we give up
+          // on the exhausted self-refund exactly as before (the stake still recovers via
+          // the server's refund timer). Only when the operator opts in does the on-chain
+          // escalation below run. Keeps the not-yet-live-verified path dormant in prod.
+          if (!COOPERATIVE_EXIT_ENABLED) continue
           // ESCALATION: the emulator-based self-refund has permanently failed (the
           // emulator is unreachable / the covenant keeps getting rejected). Fall to
           // the EMULATOR-FREE on-chain cooperative exit (leaf 7): unroll the pot

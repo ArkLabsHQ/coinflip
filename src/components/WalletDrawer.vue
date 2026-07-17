@@ -828,6 +828,13 @@ export default defineComponent({
 
     async function deleteWallet() {
       await store.dispatch('clearWallet')
+      // Reset the confirm-modal state before the drawer closes. The drawer is
+      // mounted for the app's lifetime, so a leftover `showDeleteConfirm` would
+      // re-render the Delete modal the next time the drawer is shown — which
+      // `forceWalletOpen` (App.vue) does automatically once the fresh, zero-balance
+      // wallet the user generates next connects.
+      showDeleteConfirm.value = false
+      deleteConfirmText.value = ''
       emit('update:open', false)
       router.push('/setup')
     }

@@ -13,7 +13,7 @@
  */
 
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from '@scure/bip39'
-import { wordlist } from '@scure/bip39/wordlists/english'
+import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { HDKey } from '@scure/bip32'
 import { hex } from '@scure/base'
 

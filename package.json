@@ -16,15 +16,15 @@
   "dependencies": {
     "@3d-dice/dice-box-threejs": "^0.0.12",
     "@arkade-os/boltz-swap": "^0.3.42",
-    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz",
+    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.46-arkade-script-c1eb74f4.tgz",
     "@noble/secp256k1": "^2.1.0",
     "@scure/base": "^1.2.1",
+    "@scure/bip39": "^2.0.1",
     "@scure/btc-signer": "^1.5.0",
     "arkade-coinflip": "file:packages/lib",
     "bech32": "^2.0.0",
     "bitcoinjs-lib": "^7.0.0-rc.0",
     "core-js": "^3.31.0",
-    "nostr-tools": "^1.17.0",
     "qrcode": "^1.5.4",
     "tiny-secp256k1": "^2.2.3",
     "typescript": "^5.7.2",
@@ -57,7 +57,7 @@
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz"
+    "@arkade-os/sdk": "file:./vendor/arkade-os-sdk-0.4.46-arkade-script-c1eb74f4.tgz"
   },
   "eslintConfig": {
     "root": true,

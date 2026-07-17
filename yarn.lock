@@ -32,13 +32,13 @@
     bip68 "1.0.4"
     light-bolt11-decoder "3.2.0"
 
-"@arkade-os/sdk@file:../../vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz", "@arkade-os/sdk@file:./vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz":
-  version "0.4.41"
-  resolved "file:vendor/arkade-os-sdk-0.4.41-arkade-script-9bd350e8.tgz"
-  integrity sha512-kZPIYB3u3+pVtl5NSg9t2lpsrWL4JKEmG88UGKIzE3sZpR0o0K2TMBr7FOhDi0qEgYL+YJS6Ij04cek62weyQQ==
+"@arkade-os/sdk@file:../../vendor/arkade-os-sdk-0.4.46-arkade-script-c1eb74f4.tgz", "@arkade-os/sdk@file:./vendor/arkade-os-sdk-0.4.46-arkade-script-c1eb74f4.tgz":
+  version "0.4.46"
+  resolved "file:vendor/arkade-os-sdk-0.4.46-arkade-script-c1eb74f4.tgz"
+  integrity sha512-0RwWKdm6hIIrdWhgFG6ji8Hc4c8VEyx19dVvmGQCUlEclesemgodcSg1Dq04tPABBNgLWSIx5mohP8AqtygpUQ==
   dependencies:
     "@bitcoinerlab/descriptors-scure" "3.1.7"
-    "@marcbachmann/cel-js" "7.3.1"
+    "@marcbachmann/cel-js" "8.0.0"
     "@noble/curves" "2.0.1"
     "@noble/secp256k1" "3.0.0"
     "@scure/base" "2.0.0"
@@ -51,7 +51,7 @@
   version "0.0.1"
   resolved "file:packages/contract-workflows-prototype"
   dependencies:
-    "@arkade-os/sdk" "file:../../vendor/arkade-os-sdk-0.4.36-arkade-script-e5e4c1c.tgz"
+    "@arkade-os/sdk" "file:../../vendor/arkade-os-sdk-0.4.46-arkade-script-c1eb74f4.tgz"
     "@noble/curves" "^1.6.0"
     "@scure/base" "^1.2.1"
     "@scure/btc-signer" "^2.0.1"
@@ -1123,10 +1123,10 @@
   resolved "https://registry.npmjs.org/@leichtgewicht/ip-codec/-/ip-codec-2.0.5.tgz"
   integrity sha512-Vo+PSpZG2/fmgmiNzYK9qWRh8h/CHrwD0mo1h1DzL4yzHNSfWYujGTYsWGreD000gcgmZ7K4Ys6Tx9TxtsKdDw==
 
-"@marcbachmann/cel-js@7.3.1":
-  version "7.3.1"
-  resolved "https://registry.npmjs.org/@marcbachmann/cel-js/-/cel-js-7.3.1.tgz"
-  integrity sha512-P6o26TvjStT8V8+8EF+yq9Pp7ZFV00bpiUMbssr76XbIZGxaB+NNWeBp6WNxOrR9gp0JPzvJueCKHpOs5LE9PQ==
+"@marcbachmann/cel-js@8.0.0":
+  version "8.0.0"
+  resolved "https://registry.npmjs.org/@marcbachmann/cel-js/-/cel-js-8.0.0.tgz"
+  integrity sha512-oaTrAziGr3zDLFiMt/yLU3nZuRMawyWQB5X1a0I7s9eGy3JYzX9l8ZXXHyMd64nzbeVFZTewuUShwsZQdK6UCA==
 
 "@nicolo-ribaudo/eslint-scope-5-internals@5.1.1-v1":
   version "5.1.1-v1"
@@ -1134,11 +1134,6 @@
   integrity sha512-54/JRvkLIzzDWshCWfuhadfrfZVPiElY8Fcgmg1HroEly/EDSszzhBAsarCux+D/kOslTRquNzuyGSmUSTTHGg==
   dependencies:
     eslint-scope "5.1.1"
-
-"@noble/ciphers@0.2.0":
-  version "0.2.0"
-  resolved "https://registry.npmjs.org/@noble/ciphers/-/ciphers-0.2.0.tgz"
-  integrity sha512-6YBxJDAapHSdd3bLDv6x2wRPwq4QFMUaB3HvljNBUTThDd12eSm7/3F+2lnfzx2jvM+S6Nsy0jEt9QbPqSwqRw==
 
 "@noble/curves@^1.6.0":
   version "1.9.7"
@@ -1153,13 +1148,6 @@
   integrity sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==
   dependencies:
     "@noble/hashes" "2.2.0"
-
-"@noble/curves@~1.1.0", "@noble/curves@1.1.0":
-  version "1.1.0"
-  resolved "https://registry.npmjs.org/@noble/curves/-/curves-1.1.0.tgz"
-  integrity sha512-091oBExgENk/kGj3AZmtBDMpxQPDtxQABR2B9lb1JbVTs6ytdzZNwvhxQ4MWasRNEzlbEH8jCWFCwhF/Obj5AA==
-  dependencies:
-    "@noble/hashes" "1.3.1"
 
 "@noble/curves@~1.9.0":
   version "1.9.7"
@@ -1197,25 +1185,10 @@
   resolved "https://registry.npmjs.org/@noble/hashes/-/hashes-2.2.0.tgz"
   integrity sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==
 
-"@noble/hashes@~1.3.0":
-  version "1.3.3"
-  resolved "https://registry.npmjs.org/@noble/hashes/-/hashes-1.3.3.tgz"
-  integrity sha512-V7/fPHgl+jsVPXqqeOzT8egNj2iBIVt+ECeMMG8TdcnTikP3oaBtUVqpT/gYCR68aEBJSF+XbYUxStjbFMqIIA==
-
-"@noble/hashes@~1.3.1":
-  version "1.3.3"
-  resolved "https://registry.npmjs.org/@noble/hashes/-/hashes-1.3.3.tgz"
-  integrity sha512-V7/fPHgl+jsVPXqqeOzT8egNj2iBIVt+ECeMMG8TdcnTikP3oaBtUVqpT/gYCR68aEBJSF+XbYUxStjbFMqIIA==
-
 "@noble/hashes@~1.8.0", "@noble/hashes@1.8.0":
   version "1.8.0"
   resolved "https://registry.npmjs.org/@noble/hashes/-/hashes-1.8.0.tgz"
   integrity sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==
-
-"@noble/hashes@1.3.1":
-  version "1.3.1"
-  resolved "https://registry.npmjs.org/@noble/hashes/-/hashes-1.3.1.tgz"
-  integrity sha512-EbqwksQwz9xDRGfDST86whPBgM65E0OH/pCgqW0GBVzO22bNE+NuIbeTb714+IfSjU3aRk47EUvXIb5bTsenKA==
 
 "@noble/secp256k1@^2.1.0":
   version "2.3.0"
@@ -1314,11 +1287,6 @@
   resolved "https://registry.npmjs.org/@scure/base/-/base-2.2.0.tgz"
   integrity sha512-b8XEupJibegiXV+tDUseI8oLQc8ei3d/4Jkb2RpbHh3MfE054ov3uIz2dhFkB3FI8iwYkEh0gGCApkrYggkPNg==
 
-"@scure/base@~1.1.0":
-  version "1.1.9"
-  resolved "https://registry.npmjs.org/@scure/base/-/base-1.1.9.tgz"
-  integrity sha512-8YKhl8GHiNI/pU2VMaofa2Tor7PJRAjwQLBBuilkJ9L5+13yVbC7JO/wS7piioAvPSwR3JKM1IJ/u4xQzbcXKg==
-
 "@scure/base@~2.0.0", "@scure/base@2.0.0":
   version "2.0.0"
   resolved "https://registry.npmjs.org/@scure/base/-/base-2.0.0.tgz"
@@ -1343,22 +1311,13 @@
     "@noble/hashes" "2.2.0"
     "@scure/base" "2.2.0"
 
-"@scure/bip32@1.3.1":
-  version "1.3.1"
-  resolved "https://registry.npmjs.org/@scure/bip32/-/bip32-1.3.1.tgz"
-  integrity sha512-osvveYtyzdEVbt3OfwwXFr4P2iVBL5u1Q3q4ONBfDY/UpOuXmOlbgwc1xECEboY8wIays8Yt6onaWMUdUbfl0A==
+"@scure/bip39@^2.0.1":
+  version "2.2.0"
+  resolved "https://registry.npmjs.org/@scure/bip39/-/bip39-2.2.0.tgz"
+  integrity sha512-T/Bj/YvYMNkIPq6EENO6/rcs2e7qTNuyoUXf0KBFDmp0ZDu0H2X4Lq6yC3i0c8PcWkov5EbW+yQZZbdMmk154A==
   dependencies:
-    "@noble/curves" "~1.1.0"
-    "@noble/hashes" "~1.3.1"
-    "@scure/base" "~1.1.0"
-
-"@scure/bip39@1.2.1":
-  version "1.2.1"
-  resolved "https://registry.npmjs.org/@scure/bip39/-/bip39-1.2.1.tgz"
-  integrity sha512-Z3/Fsz1yr904dduJD0NpiyRHhRYHdcnyh73FZWiV+/qhWi83wNJ3NWolYqCEN+ZWsUz2TWwajJggcRE9r1zUYg==
-  dependencies:
-    "@noble/hashes" "~1.3.0"
-    "@scure/base" "~1.1.0"
+    "@noble/hashes" "2.2.0"
+    "@scure/base" "2.2.0"
 
 "@scure/bip39@2.0.1":
   version "2.0.1"
@@ -2566,7 +2525,7 @@ argparse@^2.0.1:
   version "0.3.20"
   resolved "file:packages/lib"
   dependencies:
-    "@arkade-os/sdk" "file:../../vendor/arkade-os-sdk-0.4.36-arkade-script-e5e4c1c.tgz"
+    "@arkade-os/sdk" "file:../../vendor/arkade-os-sdk-0.4.46-arkade-script-c1eb74f4.tgz"
     "@arklabshq/contract-workflows-prototype" "file:../contract-workflows-prototype"
     "@noble/curves" "^1.6.0"
     "@scure/base" "^1.2.1"
@@ -5330,18 +5289,6 @@ normalize-url@^6.0.1:
   resolved "https://registry.npmjs.org/normalize-url/-/normalize-url-6.1.0.tgz"
   integrity sha512-DlL+XwOy3NxAQ8xuC0okPgK46iuVNAK01YN7RueYBqqFeGsBjV9XmCAzAdgt+667bCl5kPh9EqKKDwnaPG1I7A==
 
-nostr-tools@^1.17.0:
-  version "1.17.0"
-  resolved "https://registry.npmjs.org/nostr-tools/-/nostr-tools-1.17.0.tgz"
-  integrity sha512-LZmR8GEWKZeElbFV5Xte75dOeE9EFUW/QLI1Ncn3JKn0kFddDKEfBbFN8Mu4TMs+L4HR/WTPha2l+PPuRnJcMw==
-  dependencies:
-    "@noble/ciphers" "0.2.0"
-    "@noble/curves" "1.1.0"
-    "@noble/hashes" "1.3.1"
-    "@scure/base" "1.1.1"
-    "@scure/bip32" "1.3.1"
-    "@scure/bip39" "1.2.1"
-
 npm-run-path@^2.0.0:
   version "2.0.2"
   resolved "https://registry.npmjs.org/npm-run-path/-/npm-run-path-2.0.2.tgz"
@@ -6999,7 +6946,7 @@ type-is@~1.6.18:
     media-typer "0.3.0"
     mime-types "~2.1.24"
 
-typescript@*, typescript@^5.7.2, typescript@^5.9.3, "typescript@>= 2.7", typescript@>=2, "typescript@>=2.8.0 || >= 3.2.0-dev || >= 3.3.0-dev || >= 3.4.0-dev || >= 3.5.0-dev || >= 3.6.0-dev || >= 3.6.0-beta || >= 3.7.0-dev || >= 3.7.0-beta", typescript@>=4.8.4, "typescript@>=4.8.4 <6.0.0", typescript@>=5, typescript@>=5.0.0:
+typescript@*, typescript@^5.7.2, typescript@^5.9.3, "typescript@>= 2.7", typescript@>=2, "typescript@>=2.8.0 || >= 3.2.0-dev || >= 3.3.0-dev || >= 3.4.0-dev || >= 3.5.0-dev || >= 3.6.0-dev || >= 3.6.0-beta || >= 3.7.0-dev || >= 3.7.0-beta", typescript@>=4.8.4, "typescript@>=4.8.4 <6.0.0", typescript@>=5:
   version "5.9.3"
   resolved "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz"
   integrity sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==

@@ -17,3 +17,21 @@
 export function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
+
+/**
+ * Map a raw (usually arkd) error message to a short, plain-English explanation
+ * for a toast. Falls back to the raw string so nothing is hidden — the verbatim
+ * message is always in the diagnostics log regardless (see diagnosticsLog.ts).
+ * Pure + total: returns a string for every input.
+ */
+export function friendlyError(raw: string): string {
+  // arkd rejects a settle/reclaim whose input set includes a VTXO whose signer
+  // was rotated and is PAST its migration cutoff ("invalid vtxo script … since
+  // <date>"). Those funds are NOT lost — they auto-recover on-chain once their
+  // batch is swept; the user need do nothing. (See coinflip-server renewal
+  // signer-rotation handling + the pre-settle migrateDeprecatedSignerVtxos.)
+  if (/invalid[_ ]vtxo[_ ]script/i.test(raw)) {
+    return "Some funds can't be reclaimed right now — a server key rotation left them pending on-chain. They return automatically once their batch is swept, so no action is needed."
+  }
+  return raw
+}

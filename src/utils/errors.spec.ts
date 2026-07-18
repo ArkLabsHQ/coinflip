@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { getErrorMessage } from './errors'
+import { getErrorMessage, friendlyError } from './errors'
 
 // ---------------------------------------------------------------------------
 // getErrorMessage — the one idiom this codebase reaches for in every catch:
@@ -35,5 +35,30 @@ describe('getErrorMessage', () => {
 
   it('stringifies a non-Error object (no message leakage of [object Object] surprises)', () => {
     expect(getErrorMessage({ code: 1 })).toBe('[object Object]')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// friendlyError — rewrite the handful of raw arkd errors that are scary and
+// meaningless to a player into a plain-English explanation. Everything else
+// passes through verbatim; the full raw text always survives in the diagnostics
+// log regardless (diagnosticsLog.ts).
+// ---------------------------------------------------------------------------
+
+describe('friendlyError', () => {
+  it('explains INVALID_VTXO_SCRIPT as auto-recovering / no action needed', () => {
+    const raw =
+      'INVALID_VTXO_SCRIPT (10): invalid vtxo script: fc961d763cca9abc73d4b88efcb8f5e7ff92dc55e9aa553d since 2026-06-21T00:00:00Z'
+    const out = friendlyError(raw)
+    expect(out).not.toBe(raw)
+    expect(out).toMatch(/automatically|no action/i)
+  })
+
+  it('matches the lowercase "invalid vtxo script" phrasing too', () => {
+    expect(friendlyError('rebuild failed: invalid vtxo script for input 0')).toMatch(/no action/i)
+  })
+
+  it('passes an unrecognized message through unchanged', () => {
+    expect(friendlyError('some other error')).toBe('some other error')
   })
 })

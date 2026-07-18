@@ -143,7 +143,7 @@
       </template>
     </div>
 
-    <div v-if="error" class="error-toast">{{ error }}</div>
+    <div v-if="error" class="error-toast" @click="error = null" title="Tap to dismiss">{{ error }}</div>
 
     <!-- Result slab — Stake pattern. Slides up from bottom, auto-dismisses. -->
     <transition name="slab">
@@ -192,6 +192,8 @@ import GameDetailsModal from '@/components/GameDetailsModal.vue'
 import StalledBets from '@/components/StalledBets.vue'
 import { getTiers } from '@/services/api'
 import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState, type OddsBet } from '@/skins'
+import { getErrorMessage, friendlyError } from '@/utils/errors'
+import { logDiag } from '@/utils/diagnosticsLog'
 
 const AUTO_OPTIONS = [
   { label: 'OFF', value: null },
@@ -606,11 +608,14 @@ export default defineComponent({
 
         return true
       } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : 'Something went wrong'
-        error.value = msg
+        // Log the raw cause for diagnostics; show the player a friendly message.
+        const raw = getErrorMessage(e)
+        logDiag('error', 'flip', raw)
+        error.value = friendlyError(raw)
         phase.value = 'idle'
         outcome.value = null
-        setTimeout(() => { error.value = null }, 4000)
+        const shown = error.value
+        setTimeout(() => { if (error.value === shown) error.value = null }, 8000)
         return false
       } finally {
         isFlipping.value = false
@@ -1144,13 +1149,23 @@ export default defineComponent({
   transform: translateX(-50%);
   background: var(--red);
   color: #fff;
-  padding: 10px 24px;
+  padding: 10px 20px;
   border-radius: 10px;
   font-size: 0.85rem;
   font-weight: 600;
   z-index: 999;
   animation: slideUp 0.3s ease;
   box-shadow: 0 4px 20px rgba(239, 68, 68, 0.4);
+  cursor: pointer;
+  /* Wrap + cap so a long raw error stays on-screen instead of running off both
+     edges (the old single-line toast clipped the message). Tap dismisses it. */
+  max-width: min(92vw, 440px);
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.35;
+  max-height: 40vh;
+  overflow-y: auto;
+  text-align: center;
 }
 
 /* ── Win flash ──────────────────────────────────────────────────── */

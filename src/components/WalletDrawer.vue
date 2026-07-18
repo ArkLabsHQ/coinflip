@@ -262,6 +262,8 @@
             {{ restoring ? 'Restoring…' : 'Restore Games from Server' }}
           </button>
           <p class="text-muted mono resync-hint">Fetches your game history from the server, signed with your wallet key. Stalled games recover automatically.</p>
+          <button class="btn-outline" @click="copyDiagnostics">Copy Diagnostics</button>
+          <p class="text-muted mono resync-hint">Copies recent errors + app/network info to your clipboard, so you can paste them when reporting a problem. No keys or funds are included.</p>
           <button class="btn-danger" @click="showDeleteConfirm = true">Delete Wallet</button>
           <div class="server-info text-muted mono">
             <div>Network: {{ info?.network || '—' }} <span class="net-note">(set by server)</span></div>
@@ -366,7 +368,8 @@ import { isCredentialBackupSupported, saveWalletToBrowser } from '@/utils/creden
 import type { GameSummary } from '@/services/api'
 import { detectLnurlInput, resolveLnurlToInvoice } from '@/utils/lnurl'
 import { encodeBip21 } from '@/utils/bip21'
-import { getErrorMessage } from '@/utils/errors'
+import { getErrorMessage, friendlyError } from '@/utils/errors'
+import { logDiag, formatDiagnostics } from '@/utils/diagnosticsLog'
 import { openLnurlSession, lnurlServerForNetwork, type LnurlSession } from '@/services/lnurlSession'
 import QrCode from '@/components/QrCode.vue'
 
@@ -823,7 +826,12 @@ export default defineComponent({
         const txid = await store.dispatch('ark/settle')
         showToast(`Settled! TX: ${txid.slice(0, 12)}…`)
       } catch (err) {
-        showToast(`Settle failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+        // Log the RAW arkd message (e.g. INVALID_VTXO_SCRIPT) for diagnostics, but
+        // show the user a plain-English explanation when we recognize it.
+        const raw = getErrorMessage(err)
+        logDiag('error', 'settle', raw)
+        const friendly = friendlyError(raw)
+        showToast(friendly === raw ? `Reclaim failed: ${raw}` : friendly, 'error')
       } finally {
         settleLoading.value = false
       }
@@ -948,9 +956,28 @@ export default defineComponent({
     const toastMsg = ref('')
     const toastType = ref<'success' | 'error'>('success')
     function showToast(msg: string, type: 'success' | 'error' = 'success') {
+      // Every error toast is captured in the diagnostics log so it's copyable
+      // later even after the toast fades. Errors linger longer so they're readable.
+      if (type === 'error') logDiag('error', 'wallet', msg)
       toastMsg.value = msg
       toastType.value = type
-      setTimeout(() => { toastMsg.value = '' }, 3000)
+      const shown = msg
+      setTimeout(() => { if (toastMsg.value === shown) toastMsg.value = '' }, type === 'error' ? 8000 : 3000)
+    }
+
+    // Copy recent errors + app/network context to the clipboard for bug reports.
+    // No keys/funds — just the pubkey PREFIX (identifies the wallet, not spendable).
+    async function copyDiagnostics() {
+      const header: Record<string, string> = {
+        url: typeof location !== 'undefined' ? location.href : '',
+        network: info.value?.network || '—',
+        ark: arkServer.value || '—',
+        status: String(arkStatus.value || '—'),
+        wallet: (store.getters.walletPublicKey || '').slice(0, 16),
+        ua: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+      }
+      if (await copyToClipboard(formatDiagnostics(header))) showToast('Diagnostics copied!')
+      else showToast('Copy failed — open the log and copy manually', 'error')
     }
 
     async function copyText(text: string) {
@@ -990,7 +1017,7 @@ export default defineComponent({
       resyncing, resyncWallet,
       restoring, showRestore, restoredGames, restoreError, restoreGames,
       outcomeLabel, outcomeClass, formatRestoreDate,
-      copyText, toastMsg, toastType,
+      copyText, toastMsg, toastType, copyDiagnostics,
     }
   },
 })
@@ -1369,6 +1396,11 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   background: var(--bg-elevated); border: 1px solid var(--border-light);
   border-radius: 10px; padding: 10px 16px; font-size: 0.85rem;
   z-index: 400;
+  /* Wrap + cap so a long raw error (e.g. INVALID_VTXO_SCRIPT …) stays on-screen
+     instead of overflowing off the left edge; scroll if it's really long. */
+  max-width: min(92vw, 420px);
+  white-space: normal; word-break: break-word; line-height: 1.35;
+  max-height: 40vh; overflow-y: auto;
   &.error { border-color: var(--red); color: var(--red); }
   &.success { border-color: var(--green); color: var(--green); }
 }

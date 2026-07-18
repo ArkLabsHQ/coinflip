@@ -26,6 +26,13 @@
         </div>
         <button class="history-btn" title="Game history" @click="openHistory">&#9827;</button>
         <router-link to="/how-it-works" class="history-btn help-btn" title="How it works">?</router-link>
+        <!-- Wallet balance folded into the one HUD (the global float-pill is hidden
+             on this route) so there's a single top nav, not two overlapping ones. -->
+        <button class="wallet-chip mono" @click="$emit('open-wallet')" :title="`Wallet — ${arkStatus}`">
+          <span class="conn-dot" :class="arkStatus"></span>
+          <span class="wallet-ico" aria-hidden="true">&#128176;</span>
+          <span class="wallet-bal">{{ walletBalanceLabel }}</span>
+        </button>
       </div>
     </div>
 
@@ -446,6 +453,11 @@ export default defineComponent({
     const winFlash = ref(false)
 
     // ── Other computed ────────────────────────────────────────────────
+    // Wallet balance + connection status for the HUD wallet chip (mirrors what
+    // App.vue's float-pill shows, since that pill is hidden on this route).
+    const arkStatus = computed(() => store.state.ark?.status as string)
+    const walletBalanceLabel = computed(() => Number(store.getters['ark/balance'] || 0).toLocaleString())
+
     // Spendable offchain balance (settled + preconfirmed). Was previously
     // returning the whole WalletBalance object (truthy), so `tier > balance`
     // was always false and tier options above the wallet balance were
@@ -719,6 +731,7 @@ export default defineComponent({
       detailOpen, detailGameId, openDetail, playerPubkey, networkName,
       // Stats
       sessionPnl, allTimePnl, pnlScope, togglePnlScope, formattedPnl, pnlClass,
+      arkStatus, walletBalanceLabel,
       streak, sparkline, slab, winFlash,
       // Other
       playerBalance, canFlip,
@@ -733,10 +746,10 @@ export default defineComponent({
 .play-page {
   max-width: 520px;
   margin: 0 auto;
-  /* Top clears the fixed balance pill (App.vue .float-pill, ~52px); trimmed the
-   *  excessive 80px bottom to reclaim vertical space so the FLIP button clears the
-   *  fold on short/mobile viewports. */
-  padding: 56px 16px 24px;
+  /* The wallet balance now lives in the in-page top-hud (the global float-pill is
+   *  hidden on this route), so the page no longer needs a tall top padding to clear
+   *  a floating pill — reclaim it (~40px) so the whole game fits without scrolling. */
+  padding: 14px 16px 24px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -750,9 +763,10 @@ export default defineComponent({
 @media (max-height: 720px) {
   .play-page {
     gap: 10px;
-    padding-top: 52px;
+    padding-top: 12px;
     padding-bottom: 16px;
   }
+  .skin-area { padding: 6px 0 8px; }
 }
 
 /* ── Top HUD ──────────────────────────────────────────────────────── */
@@ -820,6 +834,37 @@ export default defineComponent({
   border-color: var(--gold);
   box-shadow: 0 0 10px var(--gold-glow);
 }
+
+/* Wallet chip in the HUD (replaces the global float-pill on this route). */
+.wallet-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 5px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--gold-dim, #d4a530);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.18s;
+}
+.wallet-chip:hover { border-color: var(--gold); box-shadow: 0 0 12px var(--gold-glow); }
+.wallet-chip .wallet-ico { font-size: 0.9rem; line-height: 1; }
+.wallet-chip .wallet-bal { color: var(--gold); }
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+.conn-dot.connected { background: var(--green, #22c55e); box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }
+.conn-dot.connecting { background: var(--gold); }
+.conn-dot.error { background: var(--red); }
 
 .pnl-pill {
   display: flex;

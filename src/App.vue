@@ -2,7 +2,7 @@
   <div id="app" class="app">
     <!-- Floating balance pill, top-right. Single corner-anchored UI element
          that replaces the entire topbar nav. Click opens the WalletDrawer. -->
-    <button v-if="isInitialized" class="float-pill mono" @click="walletOpen = true" :title="connTitle">
+    <button v-if="isInitialized && !isPlayRoute" class="float-pill mono" @click="walletOpen = true" :title="connTitle">
       <span class="conn-dot" :class="arkStatus"></span>
       <span class="wallet-ico" aria-hidden="true">👛</span>
       <span class="balance-num">{{ formatSats(walletBalance) }}</span>
@@ -45,6 +45,9 @@ export default defineComponent({
       return settled !== undefined ? Number(settled) : (store.state.walletBalance || 0)
     })
     const arkStatus = computed(() => store.state.ark?.status as string)
+    // The play view carries its own unified top-hud with the balance folded in, so
+    // the global floating pill would just duplicate/overlap it there — hide it on '/'.
+    const isPlayRoute = computed(() => route.path === '/')
     const connTitle = computed(() => {
       if (arkStatus.value === 'connected') return 'Connected to Ark'
       if (arkStatus.value === 'connecting') return 'Connecting…'
@@ -80,7 +83,7 @@ export default defineComponent({
 
     function formatSats(n: number): string { return n.toLocaleString() }
 
-    return { isInitialized, walletBalance, formatSats, walletOpen, forceWalletOpen, arkStatus, connTitle }
+    return { isInitialized, walletBalance, formatSats, walletOpen, forceWalletOpen, arkStatus, connTitle, isPlayRoute }
   },
 })
 </script>

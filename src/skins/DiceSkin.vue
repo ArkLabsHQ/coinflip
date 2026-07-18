@@ -125,7 +125,9 @@ export default defineComponent({
   position: relative;
   width: 100%;
   max-width: 340px;
-  height: 240px;
+  /* Viewport-responsive height so the stage (and its canvas, which fills it) shrinks
+     on short screens, keeping the controls + FLIP above the fold; 240px on taller. */
+  height: min(240px, 36vh);
   border-radius: 16px;
   overflow: hidden;
   background: radial-gradient(circle at 50% 40%, rgba(255, 255, 255, 0.04) 0%, transparent 70%);

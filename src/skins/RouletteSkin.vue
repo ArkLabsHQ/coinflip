@@ -187,8 +187,10 @@ export default defineComponent({
 
 .wheel {
   position: relative;
-  width: 280px;
-  height: 280px;
+  /* Viewport-responsive so the wheel shrinks on short screens (below ~667px tall)
+     and the tiers + odds + FLIP stay above the fold; full 280px on taller ones. */
+  width: min(280px, 42vh);
+  height: min(280px, 42vh);
   border-radius: 50%;
   background: radial-gradient(circle, #1a1a24 0%, #08080d 80%);
   border: 2px solid var(--border-light, #2a2a38);

@@ -91,6 +91,10 @@ export interface V4PlayRequest {
   oddsN?: number
   oddsTarget?: number
   oddsLo?: number
+  /** Sub-dust top-up (sats) the client folds into its stake: when the player's
+   *  selected VTXOs would leave a change ≤ dust, staking that remainder keeps the
+   *  co-fund balanced (a dust output can't exist). Validated 0 < topUp ≤ dust. */
+  stakeTopUp?: number
 }
 
 /** Covenant params the client re-derives the identical CoinflipJointPotScript from. */
@@ -177,17 +181,28 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     throw new Error('Too many pending games. Complete or wait for existing games to expire.')
   }
 
-  // House stake: tier for the coin, a house-edged multiple for variable odds.
+  // House stake: (folded) player stake for the coin, a house-edged multiple for
+  // variable odds. Both scale with the player stake, so folding keeps the game fair.
   const dust = Number(deps.arkInfo.dust ?? 546n)
+  // Fold a sub-dust player-change "top-up" into the stake. The client sends topUp
+  // when its VTXOs would leave a change ≤ dust — a dust output can't exist, so the
+  // remainder MUST be staked or the co-fund can't balance (input != output). All of
+  // pot/houseStake/refund key off playerStake, so the game stays fair at the player's
+  // ACTUAL contribution. Guarded to (0, dust] so a client can't inflate the stake.
+  const stakeTopUp = req.stakeTopUp ?? 0
+  if (stakeTopUp !== 0 && (!Number.isInteger(stakeTopUp) || stakeTopUp < 0 || stakeTopUp > dust)) {
+    throw new Error(`Invalid stakeTopUp ${stakeTopUp}: must be an integer in (0, ${dust}]`)
+  }
+  const playerStake = req.tier + stakeTopUp
   const isVariable = req.oddsN !== undefined && req.oddsTarget !== undefined
-  let houseStake = req.tier
+  let houseStake = playerStake
   let odds: { oddsN: number; oddsTarget: number; oddsLo: number } = { ...COIN_ODDS }
   if (isVariable) {
     const n = req.oddsN as number, target = req.oddsTarget as number, lo = req.oddsLo ?? 0
     if (!Number.isInteger(n) || n < 2 || !Number.isInteger(target) || !Number.isInteger(lo) || lo < 0 || target <= lo || target > n) {
       throw new Error(`Invalid odds: need oddsN>=2 and 0<=oddsLo<oddsTarget<=oddsN (got n=${n}, target=${target}, lo=${lo})`)
     }
-    houseStake = computeHouseStake(req.tier, n, target, lo, await getOddsEdgeBps(deps))
+    houseStake = computeHouseStake(playerStake, n, target, lo, await getOddsEdgeBps(deps))
     if (houseStake < dust) {
       throw new Error(`Odds [${lo},${target})/${n} at tier ${req.tier} give a sub-dust house stake (${houseStake}); raise the tier or win probability.`)
     }
@@ -227,7 +242,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   const playerHashBytes = hex.decode(req.playerHash)
   const playerPayoutPkScript = ArkAddress.decode(req.playerPayoutAddress).pkScript
   const housePayoutPkScript = ArkAddress.decode(await deps.wallet.getAddress()).pkScript
-  const pot = req.tier + houseStake
+  const pot = playerStake + houseStake
 
   const covenantScript = new CoinflipJointPotScript({
     creatorPubkey: housePubkey, playerPubkey, serverPubkey,
@@ -236,7 +251,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
     emulatorPubkey: emulator.signerPubkey,
     playerPayoutPkScript, housePayoutPkScript,
-    playerStake: BigInt(req.tier), houseStake: BigInt(houseStake),
+    playerStake: BigInt(playerStake), houseStake: BigInt(houseStake),
   })
   const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
   const potAddress = covenantScript.address(networkHrp, serverPubkey).encode()
@@ -294,7 +309,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     emulatorPubkey: hex.encode(emulator.signerPubkey),
     playerPayoutPkScript: hex.encode(playerPayoutPkScript),
     housePayoutPkScript: hex.encode(housePayoutPkScript),
-    playerStake: req.tier, houseStake,
+    playerStake, houseStake,
   }
   const state: V4State = {
     protocolVersion: 'v4', finalExpiration, setupExpiration,

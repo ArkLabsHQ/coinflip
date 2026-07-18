@@ -176,12 +176,16 @@ export function v4Play(
   playerPayoutAddress: string,
   playerChangeAddress: string,
   odds?: { oddsN: number; oddsTarget: number; oddsLo?: number },
+  /** Sub-dust remainder (sats) folded into the player's stake when the selected
+   *  VTXOs would otherwise leave a dust change. Server validates 0 < topUp ≤ dust. */
+  stakeTopUp?: number,
 ): Promise<V4PlayResponse> {
   return request('/api/v4/play', {
     method: 'POST',
     body: JSON.stringify({
       tier, playerPubkey, playerHash, playerPayoutAddress, playerChangeAddress,
       oddsN: odds?.oddsN, oddsTarget: odds?.oddsTarget, oddsLo: odds?.oddsLo,
+      stakeTopUp: stakeTopUp || undefined,
     }),
   })
 }

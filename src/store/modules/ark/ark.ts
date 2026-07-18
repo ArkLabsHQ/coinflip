@@ -1189,10 +1189,20 @@ const ark: Module<ArkState, RootState> = {
         throw new Error(`Insufficient spendable balance for a ${tier}-sat bet (have ${playerSum}) — top up or settle to consolidate, then retry.`)
       }
 
+      // Fold a sub-dust change into the stake. If our selected VTXOs would leave a
+      // change ≤ dust — a dust output can't exist, so the co-fund can't balance and
+      // arkd rejects it — stake the whole remainder instead: the server folds
+      // `stakeTopUp` into playerStake, the pot grows to match, and our change becomes 0.
+      const dust = state.info?.dust ? parseInt(state.info.dust, 10) : 546
+      const change = playerSum - tier
+      const stakeTopUp = change > 0 && change <= dust ? change : 0
+      const betAmount = tier + stakeTopUp // == playerSum when folding, else the tier
+
       // 1. /play — reserve the house stake + get the covenant params.
       const playRes = await v4Play(
         tier, playerPubkey, playerHash, playerAddress, playerAddress,
         isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number, oddsLo: oddsLo ?? 0 } : undefined,
+        stakeTopUp,
       )
 
       // 2. Build the atomic co-fund (player inputs = our own VTXOs; house inputs
@@ -1205,7 +1215,7 @@ const ark: Module<ArkState, RootState> = {
         play: playRes,
         playerInputs,
         playerChangePkScript: ArkAddress.decode(playerAddress).pkScript,
-        betAmount: tier,
+        betAmount,
         serverUnroll,
       })
       // Sign our input vins — the LEADING k.

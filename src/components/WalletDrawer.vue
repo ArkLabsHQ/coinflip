@@ -293,7 +293,7 @@
             >
               Also save to browser
             </button>
-            <p v-else-if="savedToBrowser" class="browser-saved-note">&#x2713; Saved to your browser's password manager</p>
+            <p v-else-if="savedToBrowser" class="browser-saved-note">&#x2713; Sent to your browser &mdash; check your saved passwords to confirm</p>
             <button class="btn-outline" @click="showKey = false">Close</button>
           </div>
         </div>
@@ -1356,6 +1356,9 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   background: var(--bg-elevated); border: 1px solid var(--border-light);
   border-radius: 10px; padding: 12px; cursor: pointer; margin: 12px 0;
   code { font-size: 0.75rem; word-break: break-all; }
+  /* The copy hint here reused .address-action, which is only styled under
+     .address-box — so it rendered at default (large, left) size. Style it here. */
+  .address-action { display: block; margin-top: 8px; text-align: center; font-size: 0.68rem; color: var(--text-muted); }
 }
 .browser-saved-note { font-size: 0.8rem; color: var(--gold); text-align: center; margin: 0 0 12px; }
 

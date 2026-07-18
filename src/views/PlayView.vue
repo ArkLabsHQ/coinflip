@@ -781,6 +781,10 @@ export default defineComponent({
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+  /* Wrap to a second line on very narrow phones rather than shrinking the
+     skin-selector until its last chip (rocket) spills out of the pill. */
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 .skin-selector {
@@ -790,17 +794,16 @@ export default defineComponent({
   border: 1px solid var(--border-light);
   border-radius: 999px;
   padding: 3px;
-  /* Let the chips shrink when the HUD has to compete with the pill on
-     narrow phones — otherwise the natural width pushes hud-right off-screen. */
-  min-width: 0;
-  flex-shrink: 1;
+  /* Never shrink below the chips' width — a shrunk pill let its last chip (rocket)
+     spill outside the rounded background. If the whole HUD can't fit, .top-hud wraps. */
+  flex-shrink: 0;
 }
 .skin-chip {
   border: none;
   background: transparent;
   color: var(--text-muted);
   border-radius: 999px;
-  padding: 5px 12px;
+  padding: 5px 8px;
   cursor: pointer;
   font-size: 1.05rem;
   line-height: 1;

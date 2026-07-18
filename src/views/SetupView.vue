@@ -119,7 +119,7 @@
           >
             Also save to browser
           </button>
-          <p v-else-if="savedToBrowser" class="browser-saved-note">&#x2713; Saved to your browser's password manager</p>
+          <p v-else-if="savedToBrowser" class="browser-saved-note">&#x2713; Sent to your browser &mdash; check your saved passwords to confirm</p>
           <label class="checkbox-label">
             <input type="checkbox" v-model="hasBackedUp" />
             I have safely stored my recovery phrase

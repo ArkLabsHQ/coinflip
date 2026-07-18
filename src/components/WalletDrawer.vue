@@ -284,6 +284,14 @@
               <code v-else class="mono">{{ privateKey }}</code>
               <span class="address-action">Click to copy</span>
             </div>
+            <button
+              v-if="credentialBackupSupported && !savedToBrowser"
+              class="btn-outline"
+              @click="saveToBrowser"
+            >
+              Also save to browser
+            </button>
+            <p v-else-if="savedToBrowser" class="browser-saved-note">&#x2713; Saved to your browser's password manager</p>
             <button class="btn-outline" @click="showKey = false">Close</button>
           </div>
         </div>
@@ -354,6 +362,7 @@ import {
   type LimitsResponse,
 } from '@/services/boltz'
 import { copyToClipboard } from '@/utils/clipboard'
+import { isCredentialBackupSupported, saveWalletToBrowser } from '@/utils/credentialBackup'
 import type { GameSummary } from '@/services/api'
 import { detectLnurlInput, resolveLnurlToInvoice } from '@/utils/lnurl'
 import { encodeBip21 } from '@/utils/bip21'
@@ -826,6 +835,25 @@ export default defineComponent({
     const deleteConfirmText = ref('')
     const resyncing = ref(false)
 
+    // Optional browser-password-manager backup of the recovery phrase (Chromium +
+    // HTTPS only; hidden otherwise). `privateKey` above already resolves to the
+    // phrase or the legacy nsec — exactly what restoreWallet() accepts back.
+    const credentialBackupSupported = isCredentialBackupSupported()
+    const savedToBrowser = ref(false)
+    async function saveToBrowser() {
+      const secret = privateKey.value
+      const id = store.getters.walletPublicKey
+      if (!secret || !id) return
+      try {
+        savedToBrowser.value = await saveWalletToBrowser(secret, id)
+      } catch {
+        // store() can reject if the user dismisses the browser's save prompt —
+        // leave the button available to retry.
+      }
+    }
+    // Reset the saved-note whenever the backup modal reopens.
+    watch(showKey, (open) => { if (open) savedToBrowser.value = false })
+
     async function deleteWallet() {
       await store.dispatch('clearWallet')
       // Reset the confirm-modal state before the drawer closes. The drawer is
@@ -958,6 +986,7 @@ export default defineComponent({
       fees, limits, calcReceive,
       createLnDeposit, resetDeposit, settleFunds,
       showKey, showDeleteConfirm, deleteConfirmText, deleteWallet, requestFaucet,
+      credentialBackupSupported, savedToBrowser, saveToBrowser,
       resyncing, resyncWallet,
       restoring, showRestore, restoredGames, restoreError, restoreGames,
       outcomeLabel, outcomeClass, formatRestoreDate,
@@ -1301,6 +1330,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 10px; padding: 12px; cursor: pointer; margin: 12px 0;
   code { font-size: 0.75rem; word-break: break-all; }
 }
+.browser-saved-note { font-size: 0.8rem; color: var(--gold); text-align: center; margin: 0 0 12px; }
 
 /* Restored-games list inside the restore modal. */
 .restore-list {

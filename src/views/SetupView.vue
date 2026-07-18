@@ -86,6 +86,14 @@
         <button class="btn-primary btn-lg" :disabled="!privateKey" @click="restoreWallet" style="width:100%">
           Restore
         </button>
+        <button
+          v-if="credentialBackupSupported"
+          class="btn-outline"
+          @click="importFromBrowser"
+          style="width:100%"
+        >
+          Import from browser
+        </button>
         <button class="btn-outline" @click="mode = ''" style="width:100%">Back</button>
       </div>
     </div>
@@ -102,6 +110,16 @@
             </ol>
             <span class="key-hint">Click to copy all</span>
           </div>
+          <!-- Optional extra backup: the browser's password manager (Chromium + HTTPS). -->
+          <button
+            v-if="credentialBackupSupported && !savedToBrowser"
+            class="btn-outline"
+            @click="saveToBrowser"
+            style="width:100%"
+          >
+            Also save to browser
+          </button>
+          <p v-else-if="savedToBrowser" class="browser-saved-note">&#x2713; Saved to your browser's password manager</p>
           <label class="checkbox-label">
             <input type="checkbox" v-model="hasBackedUp" />
             I have safely stored my recovery phrase
@@ -120,6 +138,11 @@ import { defineComponent, ref, computed } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
 import { copyToClipboard } from '@/utils/clipboard'
+import {
+  isCredentialBackupSupported,
+  saveWalletToBrowser,
+  importWalletFromBrowser,
+} from '@/utils/credentialBackup'
 
 export default defineComponent({
   name: 'SetupView',
@@ -134,6 +157,11 @@ export default defineComponent({
     const hasBackedUp = ref(false)
     // The recovery phrase split into words for the numbered backup grid.
     const phraseWords = computed(() => newPrivateKey.value.trim().split(/\s+/).filter(Boolean))
+
+    // Optional browser-password-manager backup (Chromium + HTTPS only). Evaluated
+    // once — support can't change mid-session. Hidden entirely when unsupported.
+    const credentialBackupSupported = isCredentialBackupSupported()
+    const savedToBrowser = ref(false)
 
     async function createWallet() {
       await store.dispatch('createNewWallet')
@@ -162,10 +190,39 @@ export default defineComponent({
       }
     }
 
+    // Save the recovery phrase (or the legacy nsec) to the browser's password
+    // manager — a synced, one-tap-restorable backup ALONGSIDE the written phrase.
+    async function saveToBrowser() {
+      const secret = store.getters.walletMnemonic || store.getters.walletPrivateKeyEncoded
+      const id = store.getters.walletPublicKey
+      if (!secret || !id) return
+      try {
+        savedToBrowser.value = await saveWalletToBrowser(secret, id)
+      } catch {
+        // store() can reject (e.g. the user dismisses the browser's own save
+        // prompt) — leave the button available so they can retry.
+      }
+    }
+
+    // Pull a previously-saved secret from the browser picker and run it straight
+    // through the existing restore path (mnemonic / nsec / hex all accepted).
+    async function importFromBrowser() {
+      try {
+        const secret = await importWalletFromBrowser()
+        if (!secret) return // unsupported, nothing stored, or picker dismissed
+        privateKey.value = secret
+        await restoreWallet()
+      } catch {
+        error.value = 'Could not import from your browser'
+      }
+    }
+
     return {
       mode, privateKey, error,
       showPrivateKey, newPrivateKey, hasBackedUp, phraseWords,
+      credentialBackupSupported, savedToBrowser,
       createWallet, restoreWallet, copyKey, onConfirm,
+      saveToBrowser, importFromBrowser,
     }
   },
 })
@@ -507,6 +564,13 @@ export default defineComponent({
 .key-hint {
   font-size: 0.7rem;
   color: var(--text-muted);
+}
+
+.browser-saved-note {
+  font-size: 0.8rem;
+  color: var(--gold);
+  text-align: center;
+  margin: 0;
 }
 
 .checkbox-label {

@@ -733,12 +733,26 @@ export default defineComponent({
 .play-page {
   max-width: 520px;
   margin: 0 auto;
-  padding: 60px 16px 80px;
+  /* Top clears the fixed balance pill (App.vue .float-pill, ~52px); trimmed the
+   *  excessive 80px bottom to reclaim vertical space so the FLIP button clears the
+   *  fold on short/mobile viewports. */
+  padding: 56px 16px 24px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 18px;
+  gap: 14px;
   position: relative;
+}
+
+/* Short viewports (mobile with browser chrome): tighten gaps so the tiers, odds
+ *  slider, auto-play row and FLIP button all stay above the fold. The coin itself
+ *  shrinks via a viewport-relative height in the skin. */
+@media (max-height: 720px) {
+  .play-page {
+    gap: 10px;
+    padding-top: 52px;
+    padding-bottom: 16px;
+  }
 }
 
 /* ── Top HUD ──────────────────────────────────────────────────────── */

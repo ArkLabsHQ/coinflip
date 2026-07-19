@@ -11,7 +11,7 @@ import {
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
 // Subpath import (not the package root) so the browser bundle doesn't pull in
 // the v2 transactions module, which imports Node's `crypto`.
-import { buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx, encodeSettleForEmulator } from 'arkade-coinflip/dist/joint-pot-tx'
+import { buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx, encodeSettleForEmulator, tapLeafHasKey } from 'arkade-coinflip/dist/joint-pot-tx'
 import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import { singleFlight } from '@/utils/singleFlight'
@@ -1176,9 +1176,19 @@ const ark: Module<ArkState, RootState> = {
 
       // The co-fund spends the player's OWN stake inputs (the leading vins). Pick
       // enough spendable VTXOs (largest-first) to cover the tier — one or many.
-      const spendable = (await wallet.getVtxos())
+      const playerXOnly = hex.decode(playerPubkey)
+      const allSpendable = (await wallet.getVtxos())
         .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed')
+      // Only spend coins WE can co-sign: a coin whose forfeit leaf doesn't carry our
+      // key (e.g. a prior-payout coin that landed here owned by another key) is
+      // unsignable, so arkd would reject the co-fund at finalize (INVALID_SIGNATURE).
+      const spendable = allSpendable
+        .filter((v: ExtendedVirtualCoin) => tapLeafHasKey(v.forfeitTapLeafScript, playerXOnly))
         .sort((a: ExtendedVirtualCoin, b: ExtendedVirtualCoin) => b.value - a.value)
+      if (spendable.length < allSpendable.length) {
+        const stuck = allSpendable.filter((v: ExtendedVirtualCoin) => !tapLeafHasKey(v.forfeitTapLeafScript, playerXOnly))
+        logDiag('warn', 'v4play', `skipping ${stuck.length} VTXO(s) this wallet can't co-sign: ${stuck.map((v) => `${v.txid}:${v.vout}`).join(', ')}`)
+      }
       const playerVtxos: ExtendedVirtualCoin[] = []
       let playerSum = 0
       for (const v of spendable) {

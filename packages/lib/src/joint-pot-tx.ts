@@ -421,6 +421,32 @@ export function deserializeTapLeaf(s: SerializedTapLeaf): TapLeafScript {
   ]
 }
 
+/** First index of `needle` as a contiguous subsequence of `hay`, or -1. Inputs are
+ *  tiny (a tapscript, a 32-byte key), so the naive scan is fine. */
+function indexOfBytes(hay: Uint8Array, needle: Uint8Array): number {
+  if (needle.length === 0 || needle.length > hay.length) return -1
+  outer: for (let i = 0; i <= hay.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) continue outer
+    return i
+  }
+  return -1
+}
+
+/**
+ * True iff the x-only pubkey `xOnlyKey` (32 bytes) appears as a push in the tapleaf's
+ * script — i.e. whoever holds that key can produce a signature this leaf accepts.
+ *
+ * A co-fund must only contribute VTXOs the contributing side can actually co-sign:
+ * a coin whose forfeit leaf carries a DIFFERENT owner key (e.g. a prior-payout coin
+ * that landed in the wrong wallet) is unsignable by this side, so arkd rejects the
+ * whole co-fund at finalize with INVALID_SIGNATURE. `tl[1]` is `script || leafVersion`
+ * (btc-signer's TapLeafScript shape), so drop the trailing version byte first.
+ */
+export function tapLeafHasKey(tl: TapLeafScript, xOnlyKey: Uint8Array): boolean {
+  const script = tl?.[1] && tl[1].length > 1 ? tl[1].subarray(0, -1) : undefined
+  return !!script && indexOfBytes(script, xOnlyKey) >= 0
+}
+
 /** A house stake input as serialized in the /play response (outpoint + the
  *  forfeit leaf + tapTree the client needs to spend it). */
 export interface SerializedHouseInput {

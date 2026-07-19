@@ -19,7 +19,7 @@ import {
   CoinflipJointPotScript, commitDigit, randomUniformInt,
   determineWinnerV3, computeRollV3, buildJointPotSettleTx, buildStageTwoSettleTx, buildJointPotRefundTx,
   buildCooperativeSpendExitTx, encodeSettleForEmulator, getConditionWitness,
-  serializeTapLeaf, type SerializedTapLeaf, type SerializedHouseInput, type BuiltJointPotTx,
+  serializeTapLeaf, tapLeafHasKey, type SerializedHouseInput, type BuiltJointPotTx,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
@@ -269,9 +269,21 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       const free = vtxos
         .filter((v) => settledOrPre(v) && !reservations.isReserved(outpointKey(v.txid, v.vout)))
         .sort((a, b) => b.value - a.value)
+      // Only contribute coins the HOUSE can actually co-sign. A coin whose forfeit
+      // leaf doesn't carry the CURRENT house key (e.g. a prior-payout coin that landed
+      // in the pool owned by another key) is unsignable, so arkd rejects the whole
+      // co-fund at finalize with INVALID_SIGNATURE. Skip it (and log — it's stuck, needs recovery).
+      const signable = free.filter((v) => tapLeafHasKey(v.forfeitTapLeafScript, housePubkey))
+      if (signable.length < free.length) {
+        const stuck = free.filter((v) => !tapLeafHasKey(v.forfeitTapLeafScript, housePubkey))
+        console.warn(
+          `[v4/play] skipping ${stuck.length} house VTXO(s) the current key can't co-sign ` +
+          `(stuck funds, needs recovery): ${stuck.map((v) => outpointKey(v.txid, v.vout)).join(', ')}`,
+        )
+      }
       const picked: ExtendedVirtualCoin[] = []
       let sum = 0
-      for (const v of free) {
+      for (const v of signable) {
         if (sum >= houseStake) break
         picked.push(v)
         sum += v.value

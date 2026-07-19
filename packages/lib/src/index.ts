@@ -113,6 +113,7 @@ export {
   encodeSettleForEmulator,
   serializeTapLeaf,
   deserializeTapLeaf,
+  tapLeafHasKey,
   buildCofundFromPlay,
   type BuiltJointPotTx,
   type BuiltExitTx,

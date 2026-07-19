@@ -31,6 +31,7 @@ import { makeCooperativeExitIo, V4_EXIT_FEE_SATS, V4_EXIT_BUMPER_MIN_SATS } from
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
 import { getErrorMessage } from '@/utils/errors'
+import { logDiag } from '@/utils/diagnosticsLog'
 import { isCltvMatured } from '@/utils/cltv'
 import { withTimeout, TIMEOUTS } from '@/utils/withTimeout'
 import { gameActivityResolver } from './gameActivityResolver'
@@ -1225,7 +1226,12 @@ const ark: Module<ArkState, RootState> = {
         playRes.gameId,
         base64.encode(arkTxSigned.toPSBT()),
         cof.checkpoints.map((c) => base64.encode(c.toPSBT())),
-      )
+      ).catch((e) => {
+        // Capture the gameId in the client diagnostics so it correlates with the
+        // server's [v4/cofund]/[v4/finalize] log for the same game. Log + re-throw.
+        logDiag('error', 'v4cofund', `game ${playRes.gameId} co-fund submit failed: ${getErrorMessage(e)}`)
+        throw e
+      })
       // Sign each of our checkpoints (the server returns the leading k), then finalize.
       const signedPlayerCheckpoints = await Promise.all(
         cofundRes.playerCheckpoints.map(async (cpB64) => {
@@ -1236,7 +1242,10 @@ const ark: Module<ArkState, RootState> = {
           return base64.encode(s.toPSBT())
         }),
       )
-      const finRes = await v4CofundFinalize(playRes.gameId, signedPlayerCheckpoints)
+      const finRes = await v4CofundFinalize(playRes.gameId, signedPlayerCheckpoints).catch((e) => {
+        logDiag('error', 'v4cofund', `game ${playRes.gameId} finalize failed: ${getErrorMessage(e)}`)
+        throw e
+      })
 
       // Stash the forfeit recovery BEFORE revealing. If the server stalls on the
       // settle, this is the player's claim to the WHOLE pot once the CLTV (the

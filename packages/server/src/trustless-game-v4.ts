@@ -27,6 +27,7 @@ import { hashSecret, networkHrpFromArkInfo, ARK_SERVER_URL } from './house-walle
 import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyError, BetExceedsCapacityError, KeyedMutex } from './vtxo-pool.js'
 import { loadEmulatorConfig } from './emulator.js'
 import { computeHouseStake } from './house-economics.js'
+import { leafPubkeys } from './checkpoint-diagnostics.js'
 import type { AppDeps } from './deps.js'
 
 const toXOnly = (b: Uint8Array): Uint8Array => (b.length === 33 ? b.slice(1) : b)
@@ -500,9 +501,37 @@ export async function handleV4CofundFinalize(gameId: string, req: V4CofundFinali
   }
 
   // finalizeTx takes checkpoints in vin order: [player (leading k), house (trailing m)].
-  await withArkSubmit(() =>
-    deps.wallet.arkProvider.finalizeTx(state.cofundArkTxid!, [...req.playerCheckpoints, ...state.houseSignedCheckpoints!]),
-  )
+  const allCheckpoints = [...req.playerCheckpoints, ...state.houseSignedCheckpoints!]
+  try {
+    await withArkSubmit(() =>
+      deps.wallet.arkProvider.finalizeTx(state.cofundArkTxid!, allCheckpoints),
+    )
+  } catch (e) {
+    // Log-only diagnostic (behaviour unchanged — the error is re-thrown): dump each
+    // checkpoint's spend-leaf keys + which keys actually signed, next to the house/
+    // server keys, so a finalize INVALID_SIGNATURE tells us WHOSE checkpoint sig arkd
+    // found missing/invalid (the house is normally NOT a checkpoint signer).
+    try {
+      const houseKey = hex.encode(toXOnly(await deps.identity.compressedPublicKey()))
+      const serverKey = hex.encode(toXOnly(hex.decode(deps.arkInfo.signerPubkey)))
+      const k = req.playerCheckpoints.length
+      const dump = allCheckpoints.map((b64, idx) => {
+        const in0 = Transaction.fromPSBT(base64.decode(b64)).getInput(0) as {
+          txid?: Uint8Array; index?: number
+          tapLeafScript?: ReadonlyArray<readonly [unknown, Uint8Array]>
+          tapScriptSig?: ReadonlyArray<readonly [{ pubKey: Uint8Array }, Uint8Array]>
+        }
+        const outpoint = in0.txid ? `${hex.encode(in0.txid)}:${in0.index}` : '?'
+        const leafKeys = (in0.tapLeafScript ?? []).flatMap(([, s]) => leafPubkeys(s))
+        const sigKeys = (in0.tapScriptSig ?? []).map(([kk]) => hex.encode(kk.pubKey))
+        return `#${idx}(${idx < k ? 'player' : 'house'} ${outpoint}) leaf=[${leafKeys.join(',')}] signed=[${sigKeys.join(',')}]`
+      }).join(' | ')
+      console.error(`[v4/finalize] ${gameId} finalizeTx FAILED: ${e instanceof Error ? e.message : String(e)} :: houseKey=${houseKey} serverKey=${serverKey} :: ${dump}`)
+    } catch (diagErr) {
+      console.error(`[v4/finalize] ${gameId} finalizeTx failed; diag dump errored: ${diagErr instanceof Error ? diagErr.message : String(diagErr)}`)
+    }
+    throw e
+  }
   state.cofundTxid = state.cofundArkTxid
   await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
 

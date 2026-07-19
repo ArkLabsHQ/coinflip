@@ -66,6 +66,24 @@ export function jointPotCofundOutputs(args: {
 }
 
 /**
+ * Fold a sub-dust stake overshoot into the stake. A funder reserves coins summing
+ * to `coinSum` (≥ `stake`); the remainder `coinSum − stake` would return to them as
+ * co-fund change. But a change ≤ dust can't be its own output, and `jointPotCofundOutputs`
+ * DROPS it — which unbalances the offchain tx (arkd rejects: "input amount is not equal
+ * to output amount"). So when the overshoot is sub-dust, stake the whole `coinSum`: the
+ * pot grows to match and the change becomes 0. A larger overshoot is left as real change.
+ *
+ * This is the house-side twin of the client's player `stakeTopUp` fold. `dust` MUST be
+ * ≥ the threshold `jointPotCofundOutputs` drops at (330 by default) or a mid-band
+ * overshoot would still be dropped-and-lost; callers pass the ark dust, which is ≥ 330.
+ * Returns the (possibly increased) stake.
+ */
+export function foldSubDustStake(stake: number, coinSum: number, dust: number): number {
+  const overshoot = coinSum - stake
+  return overshoot > 0 && overshoot <= dust ? coinSum : stake
+}
+
+/**
  * Build the atomic co-fund: ONE offchain tx spending ARBITRARY player stake
  * inputs followed by ARBITRARY house stake inputs into the joint-pot output
  * (vout 0) plus changes. Each party signs ONLY its own inputs + checkpoints;

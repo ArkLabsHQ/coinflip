@@ -12,7 +12,7 @@
  */
 /* eslint-disable @typescript-eslint/no-require-imports */
 export {}
-const { jointPotCofundOutputs } = require('arkade-coinflip')
+const { jointPotCofundOutputs, foldSubDustStake } = require('arkade-coinflip')
 
 const p2tr = (b: number): Uint8Array => new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(b)])
 const sum = (outs: { amount: bigint }[]): bigint => outs.reduce((s, o) => s + o.amount, 0n)
@@ -67,5 +67,61 @@ describe('co-fund sub-dust-change fold — balance invariant', () => {
     })
     expect(outs).toHaveLength(3) // pot + player change + house change
     expect(sum(outs)).toBe(bigVtxo + HOUSE_VTXO) // balanced
+  })
+})
+
+// The HOUSE side has the SAME sub-dust hazard, and it was UNguarded until the
+// foldSubDustStake fix. Real prod recurrence — game fa619859 (2026-07-19): after the
+// v0.9.3 cross-keyed-coin filter narrowed the house to a single 399-sat coin, a bet
+// with houseStake=337 left a 62-sat (sub-dust) house change → dropped → arkd rejected
+// the co-fund. These use the actual on-chain numbers from that game (dust=330, the
+// mutinynet ark dust, which is also jointPotCofundOutputs' drop threshold).
+describe('foldSubDustStake — the house-side fold', () => {
+  const HDUST = 330
+
+  it('folds a sub-dust overshoot up to the whole coin (the fa619859 case: 337→399)', () => {
+    expect(foldSubDustStake(337, 399, HDUST)).toBe(399) // overshoot 62 <= 330 → fold
+  })
+  it('leaves a non-sub-dust overshoot as change (no fold)', () => {
+    expect(foldSubDustStake(337, 5000, HDUST)).toBe(337) // overshoot 4663 > 330 → keep
+  })
+  it('no-ops at the boundary and when the coin exactly covers the stake', () => {
+    expect(foldSubDustStake(337, 337 + HDUST, HDUST)).toBe(337 + HDUST) // == dust → fold (inclusive)
+    expect(foldSubDustStake(337, 337 + HDUST + 1, HDUST)).toBe(337) // just over → keep
+    expect(foldSubDustStake(337, 337, HDUST)).toBe(337) // exact, no overshoot → no fold
+  })
+})
+
+describe('co-fund HOUSE sub-dust-change fold — balance invariant (fa619859)', () => {
+  const HDUST = 330n
+  const TIER_H = 330n // playerStake for this game
+  const PLAYER_VTXO_H = 1000n // leaves a 670-sat change (> dust) — kept, not folded
+  const HOUSE_VTXO_H = 399n // the single narrowed house coin
+  const HOUSE_STAKE_H = 337n // computeHouseStake(...) for this game
+
+  it('UNFOLDED (the bug): the 62-sat house change is dropped → tx short by 62', () => {
+    const pot = TIER_H + HOUSE_STAKE_H // 667
+    const outs = jointPotCofundOutputs({
+      potPkScript: p2tr(0x01), potAmount: pot,
+      playerChangePkScript: p2tr(0x0a), playerChange: PLAYER_VTXO_H - TIER_H, // 670 (kept)
+      houseChangePkScript: p2tr(0x0b), houseChange: HOUSE_VTXO_H - HOUSE_STAKE_H, // 62 (sub-dust)
+      dust: HDUST,
+    })
+    expect(sum(outs)).toBe(pot + (PLAYER_VTXO_H - TIER_H)) // 1337 — house change gone
+    expect(PLAYER_VTXO_H + HOUSE_VTXO_H - sum(outs)).toBe(62n) // 1399 - 1337 = 62 imbalance
+  })
+
+  it('FOLDED: staking the whole house coin keeps inputs == outputs', () => {
+    // Server folds houseStake 337 → 399 (the whole coin); pot grows to 330+399=729.
+    const foldedHouseStake = BigInt(foldSubDustStake(Number(HOUSE_STAKE_H), Number(HOUSE_VTXO_H), Number(HDUST)))
+    expect(foldedHouseStake).toBe(399n)
+    const pot = TIER_H + foldedHouseStake // 729
+    const outs = jointPotCofundOutputs({
+      potPkScript: p2tr(0x01), potAmount: pot,
+      playerChangePkScript: p2tr(0x0a), playerChange: PLAYER_VTXO_H - TIER_H, // 670 (kept)
+      houseChangePkScript: p2tr(0x0b), houseChange: HOUSE_VTXO_H - foldedHouseStake, // 0
+      dust: HDUST,
+    })
+    expect(sum(outs)).toBe(PLAYER_VTXO_H + HOUSE_VTXO_H) // 1399 == 1399 ✅ balanced
   })
 })

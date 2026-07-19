@@ -19,7 +19,7 @@ import {
   CoinflipJointPotScript, commitDigit, randomUniformInt,
   determineWinnerV3, computeRollV3, buildJointPotSettleTx, buildStageTwoSettleTx, buildJointPotRefundTx,
   buildCooperativeSpendExitTx, encodeSettleForEmulator, getConditionWitness,
-  serializeTapLeaf, tapLeafHasKey, type SerializedHouseInput, type BuiltJointPotTx,
+  serializeTapLeaf, tapLeafHasKey, foldSubDustStake, type SerializedHouseInput, type BuiltJointPotTx,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
@@ -243,19 +243,6 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   const playerHashBytes = hex.decode(req.playerHash)
   const playerPayoutPkScript = ArkAddress.decode(req.playerPayoutAddress).pkScript
   const housePayoutPkScript = ArkAddress.decode(await deps.wallet.getAddress()).pkScript
-  const pot = playerStake + houseStake
-
-  const covenantScript = new CoinflipJointPotScript({
-    creatorPubkey: housePubkey, playerPubkey, serverPubkey,
-    creatorHash: houseHashBytes, playerHash: playerHashBytes,
-    finalExpiration: BigInt(finalExpiration), cancelDelay: BigInt(cancelDelay), exitDelay: BigInt(exitDelay),
-    oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
-    emulatorPubkey: emulator.signerPubkey,
-    playerPayoutPkScript, housePayoutPkScript,
-    playerStake: BigInt(playerStake), houseStake: BigInt(houseStake),
-  })
-  const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
-  const potAddress = covenantScript.address(networkHrp, serverPubkey).encode()
 
   const gameId = uuidv4()
 
@@ -303,6 +290,14 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       if (freeTotal < houseStake) throw new BetExceedsCapacityError(`Bet exceeds house capacity: needs ${houseStake} sat, free house balance is ${freeTotal}.`)
       throw new HouseBusyError('House is busy (insufficient free stake VTXOs). Try again shortly.')
     }
+    // Fold a sub-dust house-change overshoot into the stake (the house-side twin of the
+    // player's stakeTopUp fold). The reserved coins sum to Hsum ≥ houseStake; if the change
+    // (Hsum − houseStake) is ≤ dust it can't be its own output, and DROPPING it unbalances
+    // the co-fund (arkd: "input amount is not equal to output amount"). Staking the whole
+    // coin — the pot grows to match — keeps it balanced; bounded by dust, so the house
+    // over-stakes ≤ dust sat. MUST precede the pot/covenant build below.
+    const Hsum = picked.reduce((s, v) => s + v.value, 0)
+    houseStake = foldSubDustStake(houseStake, Hsum, dust)
     houseInputs = picked.map((v) => ({
       txid: v.txid, vout: v.vout, value: v.value,
       leaf: serializeTapLeaf(v.forfeitTapLeafScript), tapTree: hex.encode(v.tapTree),
@@ -310,6 +305,21 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     reservations.reserve(gameId, picked.map((v) => outpointKey(v.txid, v.vout)), houseStake)
   })
   if (houseInputs.length === 0) throw new HouseBusyError('House is busy. Try again shortly.')
+
+  // Pot + covenant are derived AFTER the fold so the covenant embeds the (possibly
+  // folded) houseStake and output 0 matches the agreed pot in Guard 1.
+  const pot = playerStake + houseStake
+  const covenantScript = new CoinflipJointPotScript({
+    creatorPubkey: housePubkey, playerPubkey, serverPubkey,
+    creatorHash: houseHashBytes, playerHash: playerHashBytes,
+    finalExpiration: BigInt(finalExpiration), cancelDelay: BigInt(cancelDelay), exitDelay: BigInt(exitDelay),
+    oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
+    emulatorPubkey: emulator.signerPubkey,
+    playerPayoutPkScript, housePayoutPkScript,
+    playerStake: BigInt(playerStake), houseStake: BigInt(houseStake),
+  })
+  const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
+  const potAddress = covenantScript.address(networkHrp, serverPubkey).encode()
 
   const covenant: V4CovenantParams = {
     creatorPubkey: hex.encode(housePubkey),

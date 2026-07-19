@@ -110,6 +110,7 @@ export {
   buildJointPotRefundTx,
   buildCooperativeSpendExitTx,
   jointPotCofundOutputs,
+  foldSubDustStake,
   encodeSettleForEmulator,
   serializeTapLeaf,
   deserializeTapLeaf,

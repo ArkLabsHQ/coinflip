@@ -27,6 +27,7 @@ import { hashSecret, networkHrpFromArkInfo, ARK_SERVER_URL } from './house-walle
 import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyError, BetExceedsCapacityError, KeyedMutex } from './vtxo-pool.js'
 import { loadEmulatorConfig } from './emulator.js'
 import { computeHouseStake } from './house-economics.js'
+import { partitionHouseSignable, houseSigAttached, xOnlyInTapscript } from './house-signing.js'
 import type { AppDeps } from './deps.js'
 
 const toXOnly = (b: Uint8Array): Uint8Array => (b.length === 33 ? b.slice(1) : b)
@@ -268,9 +269,20 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       const free = vtxos
         .filter((v) => settledOrPre(v) && !reservations.isReserved(outpointKey(v.txid, v.vout)))
         .sort((a, b) => b.value - a.value)
+      // Exclude VTXOs whose forfeit leaf doesn't embed the CURRENT house key — the
+      // house can't produce the mandatory 2-of-2 checkpoint signature for them, so a
+      // co-fund that reserves one is rejected by arkd at finalize (INVALID_SIGNATURE).
+      // These are stuck house funds (rotated/legacy key) that need separate recovery.
+      const { signable, unsignable } = partitionHouseSignable(free, housePubkey)
+      if (unsignable.length > 0) {
+        console.warn(
+          `[v4/play] excluding ${unsignable.length} house VTXO(s) the current key can't co-sign ` +
+          `(stuck funds, needs recovery): ${unsignable.map((v) => outpointKey(v.txid, v.vout)).join(', ')}`,
+        )
+      }
       const picked: ExtendedVirtualCoin[] = []
       let sum = 0
-      for (const v of free) {
+      for (const v of signable) {
         if (sum >= houseStake) break
         picked.push(v)
         sum += v.value
@@ -453,16 +465,37 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   )
   if (signedCheckpointTxs.length !== total) throw new Error(`Expected ${total} checkpoints back, got ${signedCheckpointTxs.length}`)
   const houseSignedCheckpoints: string[] = []
+  const houseXOnly = toXOnly(await deps.identity.compressedPublicKey())
   for (let i = 0; i < m; i++) {
     const cp = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[k + i]))
+    const expected = state.houseInputs[i]
     let cpSigned = cp
+    let signErr: string | null = null
     try {
       cpSigned = await deps.identity.sign(cp, Array.from({ length: cp.inputsLength }, (_, j) => j))
     } catch (e) {
-      // "No taproot scripts signed" = arkd already completed this checkpoint, so
-      // there's nothing for the house to add — use it as-is (a genuinely missing
-      // signature fails loudly later at finalizeTx, not here).
-      if (!String(e instanceof Error ? e.message : e).includes('No taproot scripts signed')) throw e
+      signErr = e instanceof Error ? e.message : String(e)
+    }
+    // The house is a MANDATORY 2-of-2 co-signer on every trailing checkpoint (Guard 0
+    // proved each spends the reserved house VTXO). arkd validates BOTH leaf sigs at
+    // finalize, so a checkpoint missing the house sig is rejected there with a cryptic
+    // INVALID_SIGNATURE. Never forward a cosig-only checkpoint — fail loudly HERE with
+    // the reason (almost always: the VTXO's forfeit leaf carries a stale/rotated house key).
+    const in0 = cpSigned.getInput(0) as {
+      tapScriptSig?: ReadonlyArray<readonly [{ pubKey: Uint8Array }, Uint8Array]>
+      tapLeafScript?: ReadonlyArray<readonly [unknown, Uint8Array]>
+    }
+    if (!houseSigAttached(in0.tapScriptSig, houseXOnly)) {
+      const keyInLeaf = (in0.tapLeafScript ?? []).some(([, s]) => xOnlyInTapscript(s, houseXOnly))
+      console.error(
+        `[v4/cofund] house failed to co-sign checkpoint for ${expected.txid}:${expected.vout} — ` +
+        `houseKey ${hex.encode(houseXOnly)} ${keyInLeaf ? 'IS' : 'is NOT'} in the checkpoint leaf; ` +
+        `signErr=${signErr ?? 'none (no sig attached)'}`,
+      )
+      throw new Error(
+        `House cannot co-sign the checkpoint for its reserved VTXO ${expected.txid}:${expected.vout} — ` +
+        `its forfeit leaf doesn't match the current house key. Aborting co-fund.`,
+      )
     }
     houseSignedCheckpoints.push(base64.encode(cpSigned.toPSBT()))
   }

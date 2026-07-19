@@ -6,6 +6,7 @@
  */
 
 /* eslint-disable @typescript-eslint/no-require-imports */
+export {} // module scope — these jest files are otherwise global scripts (require, no import)
 const { tapLeafHasKey } = require('arkade-coinflip/dist/joint-pot-tx')
 
 const A = new Uint8Array(32).fill(0xaa)

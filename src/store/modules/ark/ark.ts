@@ -1642,8 +1642,14 @@ const ark: Module<ArkState, RootState> = {
      */
     async runAutoClaim({ state, rootState, commit, dispatch }) {
       if (!sdkWallet) return
+      // Both stash stores must be checked: v3 refunds (loadRefunds) AND v4 joint-pot
+      // forfeits (loadV4Forfeits) live at SEPARATE IDB keys. A v4-only user has zero v3
+      // stashes, so returning on `!stashes.length` alone left v4 auto-claim, resolved-game
+      // GC, and the cooperative-exit escalation permanently dead. Return only when BOTH
+      // are empty; the v4 loop below reuses the list loaded here.
       const stashes = await loadRefunds()
-      if (!stashes.length) return
+      const v4Forfeits = await loadV4Forfeits()
+      if (!stashes.length && !v4Forfeits.length) return
       const chainTime = await chainTipTime()
       if (chainTime === null) return // can't decide; try next tick
       for (const stash of stashes) {
@@ -1701,7 +1707,7 @@ const ark: Module<ArkState, RootState> = {
       // v0.4 joint-pot forfeits live in their own store + claim path. The happy
       // path clears the stash on settle, so a lingering one is almost always a
       // genuine stall — fire the client-built claim once the CLTV matures.
-      for (const v4 of await loadV4Forfeits()) {
+      for (const v4 of v4Forfeits) {
         if (state.claimingGames[v4.gameId]) continue
         if (!hasClaimableV4Forfeit(v4)) continue
         const selfRefund = pickV4ClaimPath(v4) === 'self-refund'

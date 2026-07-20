@@ -23,6 +23,7 @@
 import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
 import type { AppDeps } from './deps.js'
 import { selectableHouseVtxos } from './game-engine.js'
+import { timeoutReject, ARK_SYNC_TIMEOUT_MS } from './async-timeout.js'
 
 /** Worst-case house payout for a game of `tier` sats (full pot to player). */
 export function maxLiabilityForTier(tier: number): number {
@@ -196,8 +197,8 @@ export class HouseVtxoCache {
   /** Force a live fetch, collapsing concurrent refreshes onto one getVtxos(). */
   async refresh(deps: AppDeps): Promise<ExtendedVirtualCoin[]> {
     if (this.inflight) return this.inflight
-    this.inflight = deps.wallet
-      .getVtxos()
+    // Bound the re-sync: a stalled getVtxos otherwise wedges /play (which awaits this).
+    this.inflight = timeoutReject(deps.wallet.getVtxos(), ARK_SYNC_TIMEOUT_MS, 'house getVtxos')
       .then((vtxos) => {
         this.snapshot = vtxos
         this.fetchedAt = Date.now()

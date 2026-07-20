@@ -17,22 +17,10 @@
  * failed (rejected or timed-out) fetch is NOT cached, so the next poll retries live.
  */
 
-/** Reject with a labelled timeout after `ms`. Always observes `p` (no unhandled rejection) and clears the timer. */
-export function timeoutReject<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-    p.then(
-      (v) => {
-        clearTimeout(timer)
-        resolve(v)
-      },
-      (e) => {
-        clearTimeout(timer)
-        reject(e)
-      },
-    )
-  })
-}
+// timeoutReject now lives in the shared async-timeout util (used by the core
+// money-path timeouts too); re-exported here so existing importers keep working.
+import { timeoutReject } from '../async-timeout.js'
+export { timeoutReject }
 
 /**
  * Wrap `fetchFn` into a read that collapses concurrent calls onto one fetch,

@@ -1,14 +1,18 @@
 /**
- * Regression unit tests for renewSettle (no regtest). Locks in two fixes from
+ * Regression unit tests for renewSettle (no regtest). Locks in the fixes from
  * the renewal-settle saga:
  *
- *   1. It must call the SDK's NO-ARG settle(). An earlier "fix" passed
- *      settle({ inputs, outputs: [] }) to exclude a phantom boarding input;
- *      empty outputs made arkd reject the intent proof ("proof does not
- *      contain outputs"), so renewal failed every tick and expiring house
- *      VTXOs were never re-minted — surfacing to players as "House has no free
- *      dust-safe VTXO". The no-arg path lets the SDK do the fee + self-output
- *      math it already knows how to do. (commit 60ca445)
+ *   1. It must pass EXPLICIT settle params with a single NON-EMPTY self-output.
+ *      An earlier "fix" passed settle({ inputs, outputs: [] }) to exclude a
+ *      phantom boarding input; empty outputs made arkd reject the intent proof
+ *      ("proof does not contain outputs"), so renewal failed every tick and
+ *      expiring house VTXOs were never re-minted — surfacing to players as
+ *      "House has no free dust-safe VTXO". The params come from
+ *      buildReservationSafeSettleParams, which mirrors the SDK's no-arg
+ *      gathering (fee + self-output math) but excludes VTXOs reserved for
+ *      in-flight games (P0 #53 — the blind settle(undefined) could spend a
+ *      coin committed to a live game's co-fund; see
+ *      reservation-safe-selfspend.unit.test.ts for the reservation matrix).
  *
  *   2. "No inputs found" (the SDK's empty-eligible-set signal) is a graceful
  *      no-op → returns false, NOT a thrown failure.
@@ -23,14 +27,36 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
+import { ArkAddress } from '@arkade-os/sdk'
 const { renewSettle } = require('arkade-coinflip-server/dist/game-engine.js')
 
+const HOUSE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
+
+/** One healthy settled VTXO so the params builder always finds an input. */
+const FREE_COIN = {
+  txid: 'ab'.repeat(32),
+  vout: 0,
+  value: 40_000,
+  virtualStatus: { state: 'settled', batchExpiry: Date.now() + 24 * 3600_000 },
+  status: { confirmed: false },
+  createdAt: new Date(),
+}
+
 function depsWithSettle(settle: (...args: any[]) => Promise<any>) {
-  return { wallet: { settle } } as any
+  return {
+    wallet: {
+      dustAmount: 330n,
+      arkProvider: { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: -1n }) },
+      getBoardingUtxos: async () => [],
+      getVtxos: async () => [FREE_COIN],
+      getAddress: async () => HOUSE_ADDRESS,
+      settle,
+    },
+  } as any
 }
 
 describe('renewSettle (renewal settle path)', () => {
-  it('calls settle() with undefined params (SDK default gathering, not explicit empty-outputs)', async () => {
+  it('calls settle() with explicit params carrying a single non-empty self-output', async () => {
     const calls: any[][] = []
     const deps = depsWithSettle(async (...args: any[]) => {
       calls.push(args)
@@ -39,12 +65,17 @@ describe('renewSettle (renewal settle path)', () => {
     const ok = await renewSettle(deps)
     expect(ok).toBe(true)
     expect(calls).toHaveLength(1)
-    // Load-bearing: the FIRST arg (settle params) must be undefined so the SDK
-    // does its own input gathering + fee + self-output math. A regression to
-    // settle({ inputs, outputs: [] }) would put an object here and arkd would
-    // reject with "proof does not contain outputs". (The 2nd arg is the
-    // batch-event handler — see below.)
-    expect(calls[0][0]).toBeUndefined()
+    // Load-bearing: the FIRST arg (settle params) must be an explicit
+    // { inputs, outputs } with a NON-EMPTY outputs list. A regression to
+    // outputs: [] would make arkd reject with "proof does not contain
+    // outputs"; a regression to settle(undefined) would revert to the SDK's
+    // reservation-blind gathering (P0 #53). (The 2nd arg is the batch-event
+    // handler — see below.)
+    const params = calls[0][0]
+    expect(params).toBeDefined()
+    expect(params.inputs.map((v: any) => `${v.txid}:${v.vout}`)).toEqual([`${FREE_COIN.txid}:0`])
+    expect(params.outputs).toHaveLength(1)
+    expect(params.outputs[0]).toEqual({ address: HOUSE_ADDRESS, amount: 40_000n })
   })
 
   it('passes a batch/round event handler as the settle eventCallback', async () => {

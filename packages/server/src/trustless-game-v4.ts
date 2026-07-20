@@ -29,6 +29,7 @@ import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyErr
 import { loadEmulatorConfig } from './emulator.js'
 import { computeHouseStake } from './house-economics.js'
 import { leafPubkeys } from './checkpoint-diagnostics.js'
+import { timeoutReject, ARK_SUBMIT_TIMEOUT_MS } from './async-timeout.js'
 import type { AppDeps } from './deps.js'
 
 const toXOnly = (b: Uint8Array): Uint8Array => (b.length === 33 ? b.slice(1) : b)
@@ -473,7 +474,10 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   const houseVins = Array.from({ length: m }, (_, i) => k + i)
   const signed = await deps.identity.sign(arkTx, houseVins)
   const { arkTxid, signedCheckpointTxs } = await withArkSubmit(() =>
-    deps.wallet.arkProvider.submitTx(base64.encode(signed.toPSBT()), req.checkpoints),
+    timeoutReject(
+      deps.wallet.arkProvider.submitTx(base64.encode(signed.toPSBT()), req.checkpoints),
+      ARK_SUBMIT_TIMEOUT_MS, 'arkd submitTx',
+    ),
   )
   if (signedCheckpointTxs.length !== total) throw new Error(`Expected ${total} checkpoints back, got ${signedCheckpointTxs.length}`)
   // arkd returns the signed checkpoints in Go map-iteration order (randomized per
@@ -533,7 +537,10 @@ export async function handleV4CofundFinalize(gameId: string, req: V4CofundFinali
   const allCheckpoints = [...req.playerCheckpoints, ...state.houseSignedCheckpoints!]
   try {
     await withArkSubmit(() =>
-      deps.wallet.arkProvider.finalizeTx(state.cofundArkTxid!, allCheckpoints),
+      timeoutReject(
+        deps.wallet.arkProvider.finalizeTx(state.cofundArkTxid!, allCheckpoints),
+        ARK_SUBMIT_TIMEOUT_MS, 'arkd finalizeTx',
+      ),
     )
   } catch (e) {
     // Log-only diagnostic (behaviour unchanged — the error is re-thrown): dump each

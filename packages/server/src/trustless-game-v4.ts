@@ -19,7 +19,8 @@ import {
   CoinflipJointPotScript, commitDigit, randomUniformInt,
   determineWinnerV3, computeRollV3, buildJointPotSettleTx, buildStageTwoSettleTx, buildJointPotRefundTx,
   buildCooperativeSpendExitTx, encodeSettleForEmulator, getConditionWitness,
-  serializeTapLeaf, tapLeafHasKey, foldSubDustStake, type SerializedHouseInput, type BuiltJointPotTx,
+  serializeTapLeaf, tapLeafHasKey, foldSubDustStake, splitCheckpointsByOutpoint,
+  type SerializedHouseInput, type BuiltJointPotTx,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
@@ -475,18 +476,24 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
     deps.wallet.arkProvider.submitTx(base64.encode(signed.toPSBT()), req.checkpoints),
   )
   if (signedCheckpointTxs.length !== total) throw new Error(`Expected ${total} checkpoints back, got ${signedCheckpointTxs.length}`)
+  // arkd returns the signed checkpoints in Go map-iteration order (randomized per
+  // response), NOT the submitted vin order. So DEMUX by the outpoint each checkpoint
+  // spends (invariant to the shuffle), never by array position — a positional split
+  // hands the house the PLAYER's checkpoint ~12.5% of the time (the n=2 map swap), the
+  // house key isn't in that leaf so nothing gets signed, and finalize then rejects the
+  // unsigned checkpoint with INVALID_SIGNATURE. Same hex(txid):vout convention as Guard 0.
+  const houseOutpoints = new Set(state.houseInputs.map((h) => `${h.txid}:${h.vout}`))
+  const { houseCheckpoints, playerCheckpoints } = splitCheckpointsByOutpoint(signedCheckpointTxs, houseOutpoints)
+  if (houseCheckpoints.length !== m) throw new Error(`Co-fund: matched ${houseCheckpoints.length} house checkpoints by outpoint, expected ${m}`)
+  if (playerCheckpoints.length !== k) throw new Error(`Co-fund: matched ${playerCheckpoints.length} player checkpoints, expected ${k}`)
   const houseSignedCheckpoints: string[] = []
-  for (let i = 0; i < m; i++) {
-    const cp = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[k + i]))
-    let cpSigned = cp
-    try {
-      cpSigned = await deps.identity.sign(cp, Array.from({ length: cp.inputsLength }, (_, j) => j))
-    } catch (e) {
-      // "No taproot scripts signed" = arkd already completed this checkpoint, so
-      // there's nothing for the house to add — use it as-is (a genuinely missing
-      // signature fails loudly later at finalizeTx, not here).
-      if (!String(e instanceof Error ? e.message : e).includes('No taproot scripts signed')) throw e
-    }
+  for (const b64 of houseCheckpoints) {
+    // The house's OWN checkpoint — its forfeit leaf carries the house key, so the sign
+    // MUST add it. NO silent swallow: after an outpoint match, a "nothing signed" result
+    // is a real bug (arkd or a mis-selected coin), so let it throw here rather than
+    // surface as an opaque INVALID_SIGNATURE at finalize.
+    const cp = Transaction.fromPSBT(base64.decode(b64))
+    const cpSigned = await deps.identity.sign(cp, Array.from({ length: cp.inputsLength }, (_, j) => j))
     houseSignedCheckpoints.push(base64.encode(cpSigned.toPSBT()))
   }
 
@@ -495,7 +502,7 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   state.playerInputCount = k
   await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
 
-  return { arkTxid, playerCheckpoints: signedCheckpointTxs.slice(0, k) }
+  return { arkTxid, playerCheckpoints }
 }
 
 export interface V4CofundFinalizeRequest {

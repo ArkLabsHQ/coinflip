@@ -111,6 +111,7 @@ export {
   buildCooperativeSpendExitTx,
   jointPotCofundOutputs,
   foldSubDustStake,
+  splitCheckpointsByOutpoint,
   encodeSettleForEmulator,
   serializeTapLeaf,
   deserializeTapLeaf,

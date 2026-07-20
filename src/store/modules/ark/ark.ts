@@ -2,7 +2,7 @@ import { Module } from 'vuex'
 import { hex, base64 } from '@scure/base'
 import type { State as RootState } from '@/store'
 import {
-  Wallet, SingleKey, VtxoScript,
+  Wallet, SingleKey,
   ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
   RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
   type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity, type ArkTxInput,
@@ -36,34 +36,6 @@ import { isCltvMatured } from '@/utils/cltv'
 import { withTimeout, TIMEOUTS } from '@/utils/withTimeout'
 import { gameActivityResolver } from './gameActivityResolver'
 
-/** VtxoInput shape expected by the server's /api/play endpoint. */
-export interface VtxoInput {
-  vtxo: {
-    outpoint: { txid: string; vout: number }
-    amount: string
-    tapscripts: string[]
-  }
-  leaf: string
-}
-
-/**
- * Convert an SDK VTXO into the lib's VtxoInput shape. Mirrors
- * `vtxoToInput` in packages/server/src/game-engine.ts — see that file for
- * the gory tap-tree / leaf-version notes.
- */
-function vtxoToPlayerInput(v: ExtendedVirtualCoin): VtxoInput {
-  const fullScript = VtxoScript.decode(v.tapTree)
-  const tapscripts = fullScript.scripts.map((s) => hex.encode(s))
-  const forfeitScript = v.forfeitTapLeafScript[1].slice(0, -1)
-  return {
-    vtxo: {
-      outpoint: { txid: v.txid, vout: v.vout },
-      amount: v.value.toString(),
-      tapscripts,
-    },
-    leaf: hex.encode(forfeitScript),
-  }
-}
 
 /**
  * Cryptographically-uniform integer in `[0, n)` via `crypto.getRandomValues`
@@ -1101,30 +1073,6 @@ const ark: Module<ArkState, RootState> = {
       await _ctx.dispatch('refreshBalance')
 
       return txid
-    },
-
-    /**
-     * Greedy-select spendable VTXOs to cover `amount` sats, returning them in
-     * the VtxoInput shape the server's /api/play endpoint expects. Throws
-     * if the wallet does not have enough spendable balance.
-     */
-    async selectPlayerVtxoInputs(_ctx, amount: number): Promise<VtxoInput[]> {
-      if (!sdkWallet) throw new Error('Wallet not connected')
-      const all = await sdkWallet.getVtxos()
-      const spendable = all
-        .filter((v: ExtendedVirtualCoin) => v.virtualStatus.state !== 'spent')
-        .sort((a, b) => Number(b.value - a.value))
-      const picked: ExtendedVirtualCoin[] = []
-      let sum = 0n
-      for (const v of spendable) {
-        picked.push(v)
-        sum += BigInt(v.value)
-        if (sum >= BigInt(amount)) break
-      }
-      if (sum < BigInt(amount)) {
-        throw new Error(`Insufficient balance: have ${sum}, need ${amount}`)
-      }
-      return picked.map(vtxoToPlayerInput)
     },
 
     /**

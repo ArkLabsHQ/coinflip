@@ -68,8 +68,8 @@ export function createPublicRoutes(deps: AppDeps): Router {
   // forfeit-tx submission, when the emulator is configured. The browser
   // POSTs the forfeit PSBT directly to this URL (the emulator validates
   // the covenant + co-signs + forwards to arkd). Null when the server
-  // wasn't started with EMULATOR_URL or the probe failed — clients then
-  // fall back to the CSV playerPenalty path.
+  // wasn't started with EMULATOR_URL or the probe failed — v4 REQUIRES the
+  // emulator, so the client then can't play (no CSV fallback in v4).
   router.get('/api/network', async (_req: Request, res: Response) => {
     const emu = await loadEmulatorConfig()
     res.json({

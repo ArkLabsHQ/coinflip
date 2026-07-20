@@ -3,18 +3,17 @@
  *
  * The emulator (https://github.com/arkade-os/emulator) is the off-chain
  * signing service that validates arkade-script covenants and signs the
- * matching tweaked key. We use it to enable the R1 playerForfeit leaf
- * (see `packages/lib/src/arkade-forfeit.ts` and the design doc at
- * `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`).
+ * matching tweaked key. We use it for the v4 joint-pot settle + playerForfeit
+ * covenants (see `packages/lib/src/arkade-forfeit.ts`).
  *
- * Configuration: set `EMULATOR_URL` (e.g. `http://localhost:7073`). When
- * unset, the server runs in legacy mode — new games are minted with the
- * 4-leaf escrow and `playerPenalty` (CSV) remains the only forfeit path.
+ * Configuration: set `EMULATOR_URL` (e.g. `http://localhost:7073`). v4 REQUIRES the
+ * emulator — the joint-pot settle/forfeit path is arkade-script, so there is NO legacy
+ * CSV fallback for new v4 games.
  *
- * Failure mode: if `EMULATOR_URL` is set but the service can't be reached
- * at boot, `loadEmulatorConfig` returns `undefined` (with a console
- * warning). New games fall back to the legacy escrow — the server stays
- * up, no game creation is blocked.
+ * Failure mode: if `EMULATOR_URL` is unset or the service can't be reached at boot,
+ * `loadEmulatorConfig` returns `undefined` (with a console warning) and `handleV4Play`
+ * REJECTS new games ("Emulator not configured…") — the server stays up, but no new
+ * games can be created until the emulator is reachable (restart to re-probe).
  */
 
 const EMULATOR_URL = process.env.EMULATOR_URL?.trim() || ''
@@ -79,8 +78,8 @@ export async function loadEmulatorConfig(): Promise<EmulatorConfig | undefined> 
     const msg = err instanceof Error ? err.message : String(err)
     console.warn(
       `[emulator] EMULATOR_URL set but probe failed (${msg}); ` +
-        `new games will use the legacy 4-leaf escrow (CSV playerPenalty fallback). ` +
-        `Once the emulator becomes reachable, restart the server to pick it up.`,
+        `v4 /play will be REJECTED until the emulator is reachable (no legacy fallback). ` +
+        `Restart the server once it's reachable to re-probe.`,
     )
     cached = null
     return undefined

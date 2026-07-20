@@ -38,6 +38,10 @@ export {
 // v2/v3 tx modules so v4 keeps a stable import. See game-math.ts.
 export { randomUniformInt, determineWinnerV3, computeRollV3 } from './game-math'
 
+// Variable-odds house-stake math — single-sourced here so the server and the
+// browser client share one copy and can't drift. Crypto-free. See stake-math.ts.
+export { computeHouseStake } from './stake-math'
+
 // ConditionWitness PSBT-field helpers — split out of transactions.ts (crypto-free,
 // so the browser bundle can import them via joint-pot-tx without Node `crypto`).
 export { addConditionWitness, getConditionWitness } from './condition-witness'

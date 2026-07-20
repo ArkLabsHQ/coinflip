@@ -10,12 +10,14 @@
  * math term: it's the standard name for that distribution, and the rocket
  * does crash on a loss.)
  *
- * Client-only by convention: the standalone client build doesn't import the
- * `arkade-coinflip` lib, so (like PlayView's `houseStakeOf`) it re-derives the
- * money math here. The SERVER remains the source of truth — it enforces the
- * range on-chain via the same `(oddsN, oddsTarget, oddsLo)` we submit, and
- * `rocketHouseStake` mirrors its `computeHouseStake` exactly to avoid drift.
+ * The SERVER remains the source of truth — it enforces the range on-chain via
+ * the same `(oddsN, oddsTarget, oddsLo)` we submit. The house-stake math is
+ * single-sourced in the `arkade-coinflip` lib (`stake-math.ts`); the local
+ * `rocketHouseStake` wraps that shared `computeHouseStake` so the client's
+ * cap/preview can't drift from what the server charges.
  */
+
+import { computeHouseStake } from 'arkade-coinflip/dist/stake-math'
 
 /**
  * Range resolution. Higher = finer multiplier granularity. v0.3 escrow
@@ -77,14 +79,14 @@ export function rollToCrashPoint(roll: number, n: number = ROCKET_ODDS_N): numbe
 }
 
 /**
- * Exact house stake for a "reach M" bet — mirrors the server's
+ * Exact house stake for a "reach M" bet — delegates to the shared
  * computeHouseStake(bet, n, target, lo, edge) for the same range, so the
  * client's cap/preview never disagrees with what the server will charge.
  */
 export function rocketHouseStake(bet: number, odds: RocketOdds, edgeBps: number): number {
   const win = odds.oddsTarget - odds.oddsLo
   if (win <= 0) return 0
-  return Math.floor((bet * (odds.oddsN - win) * (10000 - edgeBps)) / (win * 10000))
+  return computeHouseStake(bet, odds.oddsN, odds.oddsTarget, odds.oddsLo, edgeBps)
 }
 
 /**

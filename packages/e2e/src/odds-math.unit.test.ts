@@ -7,6 +7,9 @@
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const { computeHouseStake } = require('arkade-coinflip-server/dist/house-economics.js')
+// The formula is single-sourced in the lib; the server re-exports it and the
+// browser client imports the same crypto-free subpath. Pin that they agree.
+const { computeHouseStake: libComputeHouseStake } = require('arkade-coinflip/dist/stake-math.js')
 
 describe('computeHouseStake (variable-odds house stake with edge)', () => {
   it('fair (0 edge): house stakes playerStake·(n−win)/win, win = target−lo', () => {
@@ -35,6 +38,24 @@ describe('computeHouseStake (variable-odds house stake with edge)', () => {
     expect(computeHouseStake(1000, 4, 3, 0, 300)).toBe(323) // 1000·1·9700/(3·10000)=323.3→323
     expect(Number.isInteger(computeHouseStake(777, 6, 1, 0, 250))).toBe(true)
     expect(computeHouseStake(5000, 6, 1, 0, 300)).toBe(5 * computeHouseStake(1000, 6, 1, 0, 300))
+  })
+})
+
+describe('computeHouseStake single-source (lib subpath == server re-export)', () => {
+  it('agree byte-for-byte across a grid of ranges, stakes, and edges', () => {
+    for (const stake of [1000, 777, 5000, 12345]) {
+      for (const n of [2, 4, 6, 100]) {
+        for (let lo = 0; lo < n; lo++) {
+          for (let target = lo + 1; target <= n; target++) {
+            for (const edge of [0, 250, 300]) {
+              expect(libComputeHouseStake(stake, n, target, lo, edge)).toBe(
+                computeHouseStake(stake, n, target, lo, edge),
+              )
+            }
+          }
+        }
+      }
+    }
   })
 })
 

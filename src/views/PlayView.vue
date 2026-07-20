@@ -201,6 +201,9 @@ import { getTiers } from '@/services/api'
 import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState, type OddsBet } from '@/skins'
 import { getErrorMessage, friendlyError } from '@/utils/errors'
 import { logDiag } from '@/utils/diagnosticsLog'
+// House-stake / odds formula — single-sourced in the lib so this preview can't
+// drift from what the server charges (crypto-free subpath, like game-math).
+import { computeHouseStake } from 'arkade-coinflip/dist/stake-math'
 
 const AUTO_OPTIONS = [
   { label: 'OFF', value: null },
@@ -255,14 +258,13 @@ export default defineComponent({
     // rate — more coins / reels / dice). `sliderIndex` is the position.
     const sliderIndex = ref(currentSkin.value.defaultStep)
     const currentSkinLadder = computed(() => currentSkin.value.oddsLadder)
-    // The house escrow for a bet, mirroring the server's computeHouseStake
+    // The house escrow for a bet, via the shared computeHouseStake
     // (house-edged): tier·(n−win)/win, trimmed by the edge. House stake RISES
     // with payout, so the ladder's playable window is a contiguous band:
     //   floor = first step whose stake clears dust (safe end, tiny stakes),
     //   ceiling = last step the bankroll can cover (risky end, big stakes).
     function houseStakeAt(tier: number, bet: OddsBet): number {
-      const win = bet.target - bet.lo
-      return Math.floor((tier * (bet.n - win) * (10000 - oddsEdgeBps.value)) / (win * 10000))
+      return computeHouseStake(tier, bet.n, bet.target, bet.lo, oddsEdgeBps.value)
     }
     function houseStakeOf(bet: OddsBet): number {
       return houseStakeAt(selectedTier.value ?? 0, bet)

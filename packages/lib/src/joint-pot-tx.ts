@@ -84,6 +84,34 @@ export function foldSubDustStake(stake: number, coinSum: number, dust: number): 
 }
 
 /**
+ * Demux a co-fund's SIGNED checkpoint responses into the house's and the player's,
+ * by the OUTPOINT each checkpoint spends — NOT by array position.
+ *
+ * arkd returns the signed checkpoints in Go map-iteration order (randomized per
+ * response; its response is a txid-keyed map it ranges over), so the submitted
+ * `[player…, house…]` order is NOT preserved. Splitting by array position hands the
+ * house the PLAYER's checkpoint ~12.5% of the time (the n=2 map swap) — the house
+ * key isn't in that leaf, so it can't sign it, and finalize then rejects the unsigned
+ * checkpoint with `INVALID_SIGNATURE`. The spent outpoint (`getInput(0)` txid:vout) is
+ * invariant to the shuffle, so it's the reliable key. `houseOutpoints` uses the same
+ * `hex(txid):vout` convention as the reserved house inputs.
+ */
+export function splitCheckpointsByOutpoint(
+  checkpointsB64: string[],
+  houseOutpoints: Set<string>,
+): { houseCheckpoints: string[]; playerCheckpoints: string[] } {
+  const houseCheckpoints: string[] = []
+  const playerCheckpoints: string[] = []
+  for (const b64 of checkpointsB64) {
+    const in0 = Transaction.fromPSBT(base64.decode(b64)).getInput(0)
+    const outpoint = `${in0?.txid ? hex.encode(in0.txid) : ''}:${in0?.index}`
+    if (houseOutpoints.has(outpoint)) houseCheckpoints.push(b64)
+    else playerCheckpoints.push(b64)
+  }
+  return { houseCheckpoints, playerCheckpoints }
+}
+
+/**
  * Build the atomic co-fund: ONE offchain tx spending ARBITRARY player stake
  * inputs followed by ARBITRARY house stake inputs into the joint-pot output
  * (vout 0) plus changes. Each party signs ONLY its own inputs + checkpoints;

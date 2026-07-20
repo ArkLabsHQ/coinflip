@@ -242,11 +242,6 @@ export class HouseVtxoCache {
 export const HOUSE_VTXO_CACHE_TTL_MS = Number(process.env.HOUSE_VTXO_CACHE_TTL_MS || 120_000)
 export const houseVtxoCache = new HouseVtxoCache(HOUSE_VTXO_CACHE_TTL_MS)
 
-export interface SelectedHouseVtxos {
-  vtxos: ExtendedVirtualCoin[]
-  outpoints: string[]
-}
-
 /**
  * Thrown when accepting a new game would push the house's worst-case
  * payout obligation past its available balance. Surfaced to the client
@@ -281,90 +276,6 @@ export function freeHouseVtxos(all: ExtendedVirtualCoin[]): ExtendedVirtualCoin[
   const { selectable } = selectableHouseVtxos(all)
   const reserved = reservations.reservedOutpoints()
   return selectable.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
-}
-
-/**
- * Pick a house VTXO to escrow `amount` from, avoiding a sub-dust change output.
- * Offchain Ark txs are feeless (outputs = inputs + a zero-value anchor), but
- * every VTXO output must clear the dust threshold or the server rejects the tx.
- * So a valid VTXO covers the amount AND leaves either no change or >= `dust`
- * change; we take the smallest such VTXO (best-fit) to keep larger ones free for
- * bigger bets. Returns undefined if none qualify (caller surfaces "busy").
- */
-export function pickEscrowVtxo<T extends { value: number }>(
-  candidates: T[],
-  amount: number,
-  dust: number,
-): T | undefined {
-  // Prefer the smallest VTXO whose change is clean (0 or >= dust) — that
-  // preserves large VTXOs for bigger bets and avoids cluttering the pool with
-  // sub-dust change. But if NO candidate leaves clean change, fall back to the
-  // smallest covering VTXO and accept a sub-dust change rather than strand the
-  // game: the change is a separate output and never affects the escrow (which
-  // is exactly `amount`) or the game itself.
-  let bestClean: T | undefined
-  let bestAny: T | undefined
-  for (const v of candidates) {
-    if (v.value < amount) continue
-    if (!bestAny || v.value < bestAny.value) bestAny = v
-    const change = v.value - amount
-    if (change === 0 || change >= dust) {
-      if (!bestClean || v.value < bestClean.value) bestClean = v
-    }
-  }
-  return bestClean ?? bestAny
-}
-
-/**
- * Pick a SET of house VTXOs whose combined value covers `amount`, for use
- * when no single VTXO is large enough. Prefers the single-input path first
- * (via `pickEscrowVtxo`) since multi-input txs use more witness bytes and
- * more emulator-validation work. Falls back to greedy largest-first
- * accumulation when no single VTXO is sufficient — picks the LARGEST VTXOs
- * first to keep input count low, then trims trailing duplicates that
- * over-cover. Returns undefined if even the SUM of every free VTXO doesn't
- * cover `amount` (caller surfaces a clear "exceeds bankroll" error).
- *
- * Caller-supplied `maxInputs` bounds the input count — Ark txs have a
- * weight cap and many emulator paths walk inputs per validation. The
- * default of 8 is plenty for any realistic bet/bankroll combination.
- */
-export function pickEscrowVtxos<T extends { value: number }>(
-  candidates: T[],
-  amount: number,
-  dust: number,
-  maxInputs: number = 8,
-): T[] | undefined {
-  // Fast path: a single VTXO covers it.
-  const single = pickEscrowVtxo(candidates, amount, dust)
-  if (single) return [single]
-
-  // Greedy largest-first accumulation, then trim from the back if we've
-  // over-collected (skipping smaller VTXOs that we wouldn't have needed).
-  const sorted = [...candidates].sort((a, b) => b.value - a.value)
-  const picked: T[] = []
-  let total = 0
-  for (const v of sorted) {
-    if (picked.length >= maxInputs) break
-    picked.push(v)
-    total += v.value
-    if (total >= amount) break
-  }
-  if (total < amount) return undefined
-
-  // Try to drop trailing items that aren't needed (the last one in particular
-  // might be way oversize for what we needed). This is just a tidy-up; the
-  // change output absorbs any over-collection regardless.
-  while (picked.length > 1 && total - picked[picked.length - 1].value >= amount) {
-    total -= picked[picked.length - 1].value
-    picked.pop()
-  }
-
-  // Sub-dust-change avoidance: if we're between `amount` and `amount + dust`,
-  // it produces an unspendable change VTXO. Same fallback semantics as the
-  // single-input case — we accept the sub-dust change rather than strand the
-  // game (the change is a separate output and doesn't affect the escrow).
-  return picked
 }
 
 /**

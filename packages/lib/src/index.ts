@@ -5,35 +5,6 @@
  * coin flip game using Bitcoin Taproot scripts on the Ark protocol.
  */
 
-// Core types
-export {
-  GameStatus,
-  type Game,
-  type GameEvent,
-  type PlayerData,
-  type VtxoRef,
-  type VtxoInput,
-  type CreateEvent,
-  type JoinEvent,
-  type SetupStartedEvent,
-  type SetupFinalizedEvent,
-  type FinalizeEvent,
-  type ResolveEvent,
-  type GameListing,
-  type GameTransport,
-} from './types'
-
-// Event handling & state machine
-export {
-  gameFromEvents,
-  isCreateEvent,
-  isJoinEvent,
-  isSetupStartedEvent,
-  isSetupFinalizedEvent,
-  isFinalizeEvent,
-  isResolveEvent,
-} from './events'
-
 // Version-neutral game math — CSPRNG + winner/roll, relocated out of the
 // v2/v3 tx modules so v4 keeps a stable import. See game-math.ts.
 export { randomUniformInt, determineWinnerV3, computeRollV3 } from './game-math'
@@ -45,10 +16,6 @@ export { computeHouseStake } from './stake-math'
 // ConditionWitness PSBT-field helpers — split out of transactions.ts (crypto-free,
 // so the browser bundle can import them via joint-pot-tx without Node `crypto`).
 export { addConditionWitness, getConditionWitness } from './condition-witness'
-
-// Coin selection — see `coinselect.ts` for the note on the SDK's
-// internal `selectVirtualCoins` and why we keep our own greedy variant.
-export { coinSelect } from './coinselect'
 
 // Re-export the SDK's global contract registry so consumers that resolve
 // the lib via npm workspaces get the same singleton — avoids

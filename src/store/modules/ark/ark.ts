@@ -2,7 +2,7 @@ import { Module } from 'vuex'
 import { hex, base64 } from '@scure/base'
 import type { State as RootState } from '@/store'
 import {
-  Wallet, SingleKey, VtxoScript,
+  Wallet, SingleKey,
   ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
   RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
   type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity, type ArkTxInput,

@@ -848,8 +848,7 @@ export async function reconcileV4Refunds(deps: AppDeps): Promise<string[]> {
   // accept (and the regtest mock-time the recovery e2e advances). Same source as
   // the v3 escrow recovery's CLTV gate.
   const chainTime = (await deps.wallet.onchainProvider.getChainTip()).time
-  const pending = await deps.repos.games.list({ status: 'pending', limit: 500 })
-  const stalled = pending.filter((g) => g.player_choice === 'trustless-v4' && g.house_vtxos_json)
+  const stalled = await listUnresolvedCofundedV4(deps)
   const refundTxids: string[] = []
   for (const game of stalled) {
     let state: V4State
@@ -981,6 +980,21 @@ async function settleV4StageTwoInner(gameId: string, deps: AppDeps): Promise<{ s
 }
 
 /**
+ * All co-funded v4 games still awaiting resolution. Scans 'pending' AND 'expired':
+ * post-fix a co-funded game never becomes 'expired' (isCofundedGame guards
+ * expirePending), but this recovers any that were stranded in 'expired' by the old
+ * expiry dead-zone — the reconcilers must still refund/settle their live pots, else a
+ * stalling player could sweep the whole pot via playerTakeAll.
+ */
+async function listUnresolvedCofundedV4(deps: AppDeps) {
+  const [pending, expired] = await Promise.all([
+    deps.repos.games.list({ status: 'pending', limit: 500 }),
+    deps.repos.games.list({ status: 'expired', limit: 500 }),
+  ])
+  return [...pending, ...expired].filter((g) => g.player_choice === 'trustless-v4' && g.house_vtxos_json)
+}
+
+/**
  * Failsafe reconcile — the house's AUTO stage-2 response. For every co-funded v4
  * game whose pot has been spent into its StageTwo covenant (a player revealed
  * on-chain), settle StageTwo to the actual winner. Runs BEFORE reconcileV4Refunds
@@ -988,8 +1002,7 @@ async function settleV4StageTwoInner(gameId: string, deps: AppDeps): Promise<{ s
  * settle txids broadcast this pass.
  */
 export async function reconcileV4StageTwo(deps: AppDeps): Promise<string[]> {
-  const pending = await deps.repos.games.list({ status: 'pending', limit: 500 })
-  const cofunded = pending.filter((g) => g.player_choice === 'trustless-v4' && g.house_vtxos_json)
+  const cofunded = await listUnresolvedCofundedV4(deps)
   const indexer = new RestIndexerProvider(ARK_SERVER_URL)
   const settleTxids: string[] = []
   for (const game of cofunded) {

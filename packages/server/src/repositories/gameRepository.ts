@@ -9,6 +9,22 @@ import type {
   SQLExecutor,
 } from './types.js'
 
+/** A game is "co-funded" once its co-fund has been submitted/finalized — i.e. its
+ *  house_vtxos_json (a persisted V4State) carries a cofund txid (`cofundArkTxid` set
+ *  at submit, `cofundTxid` at finalize). Such a game has both stakes live on-chain in
+ *  a pot VTXO, so it MUST NOT be expired: the v4 refund/stage-2 reconcilers only act
+ *  on non-resolved games, and flipping it to 'expired' strands both stakes and lets a
+ *  stalling player sweep the whole pot via the unconditional playerTakeAll leaf. */
+export function isCofundedGame(houseVtxosJson: string | null | undefined): boolean {
+  if (!houseVtxosJson) return false
+  try {
+    const s = JSON.parse(houseVtxosJson) as { cofundArkTxid?: string; cofundTxid?: string }
+    return Boolean(s.cofundArkTxid || s.cofundTxid)
+  } catch {
+    return false
+  }
+}
+
 /** Hard ceiling on `listForPlayer` page size — clamps a caller-supplied limit
  *  so a "restore my games" request can't ask for an unbounded scan. */
 export const LIST_FOR_PLAYER_MAX = 100
@@ -107,20 +123,23 @@ export class SQLiteGameRepository implements GameRepository {
   }
 
   async expirePending(maxAgeMinutes: number): Promise<{ expired: number; rows: GameRow[] }> {
-    // Snapshot the rows that are about to flip so callers can drive
-    // side-effects (e.g. inactivating contract records) against the
-    // same set the UPDATE will touch.
-    const rows = await this.db.all<GameRow>(
+    // Snapshot the pending-old rows, then expire ONLY the ones that are not
+    // co-funded. A co-funded game has a live on-chain pot the reconcilers must
+    // still refund/settle — expiring it strands both stakes and opens the
+    // playerTakeAll theft (see isCofundedGame). Pre-cofund abandoned games
+    // (played but never co-funded) are expired as before so their reserved house
+    // VTXOs free up. Expire by explicit id so the filter can't be raced by the UPDATE.
+    const candidates = await this.db.all<GameRow>(
       `SELECT * FROM games WHERE status = 'pending'
        AND created_at < datetime('now', '-' || ? || ' minutes')`,
       [maxAgeMinutes],
     )
+    const rows = candidates.filter((g) => !isCofundedGame(g.house_vtxos_json as string | null))
     if (rows.length === 0) return { expired: 0, rows: [] }
+    const placeholders = rows.map(() => '?').join(',')
     await this.db.run(
-      `UPDATE games SET status = 'expired'
-       WHERE status = 'pending'
-       AND created_at < datetime('now', '-' || ? || ' minutes')`,
-      [maxAgeMinutes],
+      `UPDATE games SET status = 'expired' WHERE id IN (${placeholders})`,
+      rows.map((g) => g.id),
     )
     return { expired: rows.length, rows }
   }

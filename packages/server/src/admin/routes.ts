@@ -173,14 +173,15 @@ export function createAdminRoutes(deps: AppDeps): Router {
   })
 
   // POST /api/games/expire-pending — release stranded pending games on demand.
-  // Pending games already auto-expire after 5 min (startExpiryTimer), which frees
-  // the per-player cap and the VTXO reservations. This is the admin override to
-  // clear them immediately — e.g. to unblock a player stuck at the cap — instead
-  // of waiting for the timer. `olderThanMinutes` (default 0) expires every pending
-  // game at/over that age; pass a higher value to spare just-created in-flight
-  // games. Expiring a row never strands funds: the player reclaims any funded
-  // escrow via the CLTV refund path and recoverOrphanedHouseEscrows reclaims the
-  // house side once their CLTV matures.
+  // Pending games already auto-expire after 5 min (startExpiryTimer), which frees the
+  // per-player cap and the VTXO reservations. This is the admin override to clear them
+  // immediately — e.g. to unblock a player stuck at the cap — instead of waiting for the
+  // timer. `olderThanMinutes` (default 0) expires every ELIGIBLE pending game at/over that
+  // age; pass a higher value to spare just-created ones. Fund-safe: expirePending SKIPS
+  // co-funded games (isCofundedGame) — only pre-cofund abandoned games (no on-chain pot)
+  // are expired, so freeing their reservation strands nothing. Co-funded games keep their
+  // live pot and are refunded/settled by the v4 reconcilers (reconcileV4Refunds /
+  // reconcileV4StageTwo), NEVER expired here.
   router.post('/api/games/expire-pending', async (req: Request, res: Response) => {
     const raw = (req.body ?? {}).olderThanMinutes
     const olderThanMinutes = raw === undefined ? 0 : Number(raw)

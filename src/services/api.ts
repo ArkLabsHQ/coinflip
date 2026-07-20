@@ -75,8 +75,8 @@ export function getTiers(): Promise<TiersResponse> {
 
 /** The network the coinflip server is pinned to (regtest / mutinynet / …),
  *  plus the arkade-script emulator URL when the operator runs one. The
- *  client posts forfeit txs to `emulator.url`; null means no emulator,
- *  fall back to the CSV penalty path. */
+ *  client posts forfeit txs to `emulator.url`. v4 REQUIRES the emulator, so
+ *  null means the client can't play (playV4Game aborts before funding). */
 export interface NetworkResponse {
   network: string
   emulator: null | {
@@ -295,11 +295,11 @@ export interface GameSummary {
 
 /**
  * Self-refund hint for a PENDING v4 game, echoed by GET /api/games. The server
- * never holds the take-the-pot key, so `playerSecretHex` is ALWAYS null here —
- * a restored hint can't drive a claim. History display only; actionable v4
- * recovery (re-arming a refund) is a deferred follow-up (stalled v4 stakes
- * already self-recover server-side via the refund timer). See ark.ts
- * `restoreFromServer` for why these are counted but not acted on.
+ * never holds the take-the-pot key, so `playerSecretHex` is ALWAYS null here.
+ * On restore, `restoreFromServer` → `rearmV4ReclaimHints` re-arms each hint into a
+ * client-side self-refund stash that auto-claim fires once the CLTV matures — so a
+ * restored device DOES recover its stalled v4 stakes (independent of the server's
+ * own refund timer, which is the redundant backstop).
  */
 export interface V4ReclaimHint {
   gameId: string

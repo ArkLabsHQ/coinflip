@@ -15,7 +15,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
 const pool = require('arkade-coinflip-server/dist/vtxo-pool.js')
-const { KeyedMutex, reservations, rebuildReservations, maxLiabilityForTier, pickEscrowVtxo, pickEscrowVtxos } = pool
+const { KeyedMutex, reservations, rebuildReservations, maxLiabilityForTier } = pool
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -148,78 +148,6 @@ describe('rebuildReservations', () => {
     } finally {
       reservations.release('tl-old')
     }
-  })
-})
-
-describe('pickEscrowVtxo (dust-safe house VTXO selection)', () => {
-  const v = (value: number) => ({ value })
-  const DUST = 546
-
-  it('picks the smallest VTXO that covers the amount with dust-safe change', () => {
-    expect(pickEscrowVtxo([v(50000), v(2000), v(10000)], 1000, DUST)).toEqual(v(2000))
-  })
-
-  it('allows an exact-match VTXO (zero change)', () => {
-    expect(pickEscrowVtxo([v(5000), v(1000)], 1000, DUST)).toEqual(v(1000))
-  })
-
-  it('prefers a clean-change VTXO over one that would leave sub-dust change', () => {
-    // 1300 − 1000 = 300 < dust; 5000 − 1000 = 4000 is clean → prefer 5000.
-    expect(pickEscrowVtxo([v(1300), v(5000)], 1000, DUST)).toEqual(v(5000))
-  })
-
-  it('falls back to the smallest covering VTXO when none leaves clean change', () => {
-    // 900 too small; 1300 would leave sub-dust change (300). Rather than strand
-    // the game, fall back to 1300 — the sub-dust change is a separate output and
-    // never affects the escrow (which is exactly the amount).
-    expect(pickEscrowVtxo([v(900), v(1300)], 1000, DUST)).toEqual(v(1300))
-  })
-
-  it('returns undefined when no VTXO covers the amount at all', () => {
-    expect(pickEscrowVtxo([v(900), v(500)], 1000, DUST)).toBeUndefined()
-  })
-
-  it('returns undefined for an empty candidate set', () => {
-    expect(pickEscrowVtxo([], 1000, DUST)).toBeUndefined()
-  })
-})
-
-describe('pickEscrowVtxos (multi-input house VTXO selection)', () => {
-  const v = (value: number) => ({ value })
-  const DUST = 546
-
-  it('prefers a single covering VTXO over multi-input combos', () => {
-    // Both [5000] and [2000+4000] cover 6000 — single-input is cheaper.
-    const result = pickEscrowVtxos([v(2000), v(4000), v(8000)], 6000, DUST)
-    expect(result).toEqual([v(8000)])
-  })
-
-  it('combines multiple VTXOs largest-first when no single one covers', () => {
-    // None covers 6000 alone. Need 6000 → 5000 + 4000 = 9000 (largest first).
-    const result = pickEscrowVtxos([v(2000), v(4000), v(5000)], 6000, DUST)
-    expect(result).toEqual([v(5000), v(4000)])
-  })
-
-  it('trims trailing inputs that are not needed after the greedy fill', () => {
-    // Greedy would pick 5000, 4000, 3000 (sum=12000 > 8000). Trim trailing 3000 →
-    // sum=9000 still ≥ 8000. Should drop the 3000.
-    const result = pickEscrowVtxos([v(2000), v(3000), v(4000), v(5000)], 8000, DUST)
-    expect(result).toEqual([v(5000), v(4000)])
-  })
-
-  it('returns undefined when even the SUM of all VTXOs is below the amount', () => {
-    expect(pickEscrowVtxos([v(1000), v(2000)], 5000, DUST)).toBeUndefined()
-  })
-
-  it('respects the maxInputs cap', () => {
-    // Need 100 from 30 + 30 + 30 + 30 = 120 in 4 inputs — caller caps at 2.
-    expect(pickEscrowVtxos([v(30), v(30), v(30), v(30)], 100, DUST, 2)).toBeUndefined()
-  })
-
-  it('returns the single covering VTXO via pickEscrowVtxo fast-path', () => {
-    // Single-input path produces dust-safe change preference.
-    const result = pickEscrowVtxos([v(2000), v(50000), v(10000)], 1000, DUST)
-    expect(result).toEqual([v(2000)])
   })
 })
 

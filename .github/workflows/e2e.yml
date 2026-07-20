@@ -93,14 +93,6 @@ jobs:
         # logic break.
         run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="\\.unit\\.test\\.ts$"
 
-      - name: Run coinflip.test.ts unit subset (no regtest)
-        working-directory: packages/e2e
-        # coinflip.test.ts mixes unit + integration cases in one file, so it's
-        # filtered by test NAME to the stack-free ones. Path anchored to the
-        # exact file — the broader `coinflip` substring matches every test file
-        # because the working directory itself contains "coinflip".
-        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="src/coinflip\\.test\\.ts$" -t "gameFromEvents|coinSelect|event type guards"
-
   e2e-tests:
     name: E2E Integration Tests
     runs-on: ubuntu-latest

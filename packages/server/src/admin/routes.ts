@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express'
 import path from 'path'
-import { isExpired, isRecoverable, isSpendable, isVtxoExpiringSoon, selectVirtualCoins } from '@arkade-os/sdk'
+import { isVtxoExpiringSoon } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
-import { houseVtxoCache, reservations, ensureHouseVtxoPool, outpointKey, selectionMutex } from '../vtxo-pool.js'
+import { houseVtxoCache, reservations, ensureHouseVtxoPool, selectionMutex } from '../vtxo-pool.js'
 import { buildReservationSafeSettleParams } from '../game-engine.js'
 import { ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
 import { makeSettlementHandler } from '../settlement-events.js'
@@ -294,13 +294,17 @@ export function createAdminRoutes(deps: AppDeps): Router {
   // sendBitcoin routes by address type). Guards against draining funds reserved
   // for in-flight games unless { force: true } is passed.
   //
-  // Without force the coins are selected HERE from the free (unreserved,
-  // spendable) set and passed as an explicit `selectedVtxos` list — the
-  // SDK's internal selection picks from ALL coins (near-expiry first) and
-  // could spend a VTXO committed to a live game's co-fund (P0 #53). Selection
-  // + send run under the /play selection mutex so a coin can't be reserved
-  // mid-send. force:true keeps the blind SDK selection: the operator
-  // explicitly accepts that it may spend reserved coins and break live games.
+  // The SDK's sendBitcoin selects its own inputs from ALL spendable coins and
+  // can't be constrained to a subset (and reimplementing its selection is
+  // fragile — it drifts across SDK versions). So we mirror the pool split's
+  // proven reservation-safe pattern (P0 #53): run the SDK send UNDER the /play
+  // selectionMutex, and refuse if an outpoint reservation is already live at
+  // entry. Under the mutex no NEW reservation can appear mid-send (reservations
+  // are only minted under this same mutex), so "no reservation at entry" holds
+  // for the whole send. The send is timeout-bounded so a wedged arkd can't hold
+  // the mutex — and /play — hostage. force:true keeps the blind SDK send: the
+  // operator explicitly accepts it may spend reserved coins and break live
+  // games (e.g. to drain the house while games are in flight).
   router.post('/api/wallet/send', async (req: Request, res: Response) => {
     try {
       const { address, force } = req.body
@@ -331,33 +335,21 @@ export function createAdminRoutes(deps: AppDeps): Router {
         return
       }
       const outcome = await selectionMutex.runExclusive(async () => {
-        // Fresh fetch: explicit outpoints go into the tx, so a stale snapshot
-        // could hand the SDK an already-spent input (same rule as /play).
-        const all = await houseVtxoCache.refresh(deps)
-        // Same candidate set the SDK's own send selection uses (spendable, not
-        // recoverable/expired) minus reserved outpoints. NOT freeHouseVtxos:
-        // that also drops coins expiring within the 30-min escrow buffer,
-        // which only matters when a coin must OUTLIVE a game — a send spends
-        // it now (near-expiry coins are the SDK's own first pick).
-        const reserved = reservations.reservedOutpoints()
-        const free = all.filter(
-          (v) => isSpendable(v) && !isRecoverable(v) && !isExpired(v) && !reserved.has(outpointKey(v.txid, v.vout)),
-        )
-        const freeTotal = free.reduce((sum, v) => sum + v.value, 0)
-        if (freeTotal < amount) return { insufficient: true as const, freeTotal }
-        // Near-expiry first, like the SDK's own selection — just from free coins.
-        const { inputs } = selectVirtualCoins(free, amount)
+        // Refuse while any outpoint is reserved: the SDK's own selection could
+        // grab a coin committed to a live game's co-fund (VTXO_ALREADY_SPENT).
+        const reservedNow = reservations.reservedOutpoints()
+        if (reservedNow.size > 0) return { blocked: true as const, reserved: reservedNow.size }
         const txid = await timeoutReject(
-          deps.wallet.sendBitcoin({ address: address.trim(), amount, selectedVtxos: inputs }),
+          deps.wallet.sendBitcoin({ address: address.trim(), amount }),
           ARK_SUBMIT_TIMEOUT_MS,
           'admin send',
         )
-        return { insufficient: false as const, txid }
+        return { blocked: false as const, txid }
       })
-      if (outcome.insufficient) {
-        res.status(400).json({
-          error: `Amount ${amount} exceeds the free (unreserved) spendable balance ${outcome.freeTotal}. Wait for in-flight games to finish, or pass force:true to spend blind (may break live games).`,
-          freeTotal: outcome.freeTotal,
+      if (outcome.blocked) {
+        res.status(409).json({
+          error: `A game is in flight (${outcome.reserved} house VTXO(s) reserved) — an unforced send could spend a coin committed to it. Retry once it settles, or pass force:true to spend blind (may break live games).`,
+          reserved: outcome.reserved,
         })
         return
       }

@@ -1,6 +1,4 @@
-import { hex } from '@scure/base'
-import { type VtxoInput } from 'arkade-coinflip'
-import { isVtxoExpiringSoon, isExpired, isSpendable, VtxoScript, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { isVtxoExpiringSoon, isExpired, isSpendable, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { makeSettlementHandler } from './settlement-events.js'
 import {
   reservations,
@@ -8,45 +6,6 @@ import {
 } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import { makeLogDedup } from './log-dedup.js'
-
-/**
- * Convert SDK ExtendedVirtualCoin to lib VtxoInput.
- *
- * Two non-obvious bits at play:
- *   (1) `intentTapLeafScript[1]` is the raw script with the Taproot
- *       leaf-version byte (0xc0) appended. `VtxoScript`'s constructor
- *       re-appends the version byte when it builds the tap tree, so we
- *       must strip the trailing byte here — otherwise we end up with
- *       `<script><0xc0><0xc0>` and `Unknown opcode=c0` downstream.
- *   (2) The wallet VTXO's pkScript depends on *every* leaf in its tap
- *       tree, not just the one we plan to spend through. If we only put
- *       the intent leaf into `tapscripts`, `vtxoInputToArkTxInput` in
- *       the lib reconstructs a smaller tree → a different pkScript →
- *       arkd's submitTx rejects with `VTXO_NOT_FOUND` because the
- *       (txid, vout) doesn't point at an indexed output with that
- *       script. Decode the full `tapTree` from the VTXO and ship every
- *       leaf along; `leaf` still identifies the one we want to spend.
- */
-function vtxoToInput(vtxo: ExtendedVirtualCoin): VtxoInput {
-  const fullScript = VtxoScript.decode(vtxo.tapTree)
-  const tapscripts = fullScript.scripts.map((s) => hex.encode(s))
-  // Use the forfeit leaf, not the intent leaf. The wallet exposes both:
-  // `intentTapLeafScript` is used when joining a settlement batch round
-  // (where arkd renews the VTXO into the tree), and `forfeitTapLeafScript`
-  // is used when spending through the regular offchain-tx path that
-  // `arkProvider.submitTx` handles. The trustless coinflip fallback path
-  // goes through submitTx, so we want the forfeit leaf here.
-  const forfeitScript = vtxo.forfeitTapLeafScript[1].slice(0, -1)
-  const leafHex = hex.encode(forfeitScript)
-  return {
-    vtxo: {
-      outpoint: { txid: vtxo.txid, vout: vtxo.vout },
-      amount: vtxo.value.toString(),
-      tapscripts,
-    },
-    leaf: leafHex,
-  }
-}
 
 /**
  * Minimum remaining VTXO lifetime when selecting house VTXOs for a new
@@ -171,24 +130,6 @@ export async function migrateDeprecatedSigners(
     const msg = `[renewal] deprecated-signer migration failed: ${err instanceof Error ? err.message : String(err)}`
     if (log.shouldLog('migration', msg)) console.warn(msg)
   }
-}
-
-/**
- * Try to renew house VTXOs by joining a settlement batch. Returns true if
- * a settle round was triggered, false if the wallet has no expiring VTXOs
- * to renew. Called when the selectable house balance would otherwise be
- * insufficient.
- */
-export async function renewExpiringHouseVtxos(deps: AppDeps): Promise<boolean> {
-  const all = await deps.wallet.getVtxos()
-  const { dropped } = selectableHouseVtxos(all)
-  if (dropped.length === 0) return false
-  console.log(`[house wallet] renewing ${dropped.length} expiring VTXOs via settle()`)
-  // Same key-rotation guard as the renewal timer: settle() rejects deprecated-signer
-  // inputs, so migrate them first (no-op when nothing is deprecated) — otherwise a
-  // /play that needs renewal jams on INVALID_VTXO_SCRIPT until the timer catches up.
-  await migrateDeprecatedSigners(deps)
-  return renewSettle(deps, 'play-fallback')
 }
 
 /**

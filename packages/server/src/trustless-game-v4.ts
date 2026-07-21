@@ -253,6 +253,15 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   // co-fund spends. Greedy largest-first keeps the input count small; the house
   // change (Hsum − houseStake) returns to the house in the co-fund.
   let houseInputs: SerializedHouseInput[] = []
+  // Fetch the house VTXO set BEFORE taking the selection lock so concurrent /play
+  // calls collapse onto ONE inflight getVtxos() (HouseVtxoCache.refresh de-dupes by
+  // inflight promise). Under the lock this fetch serializes — N cold plays = N
+  // sequential ≤45s syncs and the collapse never fires. Still a FRESH fetch (not the
+  // cached get()): v4 pins exact outpoints. Fetching pre-lock only grows the staleness
+  // window, which stays safe by construction (vtxo-pool.ts): the under-lock isReserved
+  // re-check excludes a coin another game just reserved, and a coin spent before the
+  // co-fund only fails the escrow submit (caught + retried), never a double-spend.
+  const vtxos = await houseVtxoCache.refresh(deps)
   await selectionMutex.runExclusive(async () => {
     const choose = (vtxos: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] | null => {
       const free = vtxos
@@ -279,11 +288,6 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       }
       return sum >= houseStake ? picked : null
     }
-    // Always select from a FRESH fetch: v4 pins exact outpoints, so a stale cache
-    // (e.g. a VTXO another game just co-funded) would hand the client an
-    // already-spent input → VTXO_ALREADY_SPENT at submit. (v3 reserves liability,
-    // not outpoints, so it tolerates staleness; v4 cannot.)
-    const vtxos = await houseVtxoCache.refresh(deps)
     const picked = choose(vtxos)
     if (!picked) {
       const freeTotal = vtxos

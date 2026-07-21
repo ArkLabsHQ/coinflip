@@ -4,7 +4,8 @@
  * the expanded admin dashboard:
  *   - GET  /api/vtxos        — house VTXOs + which game reserves each
  *   - GET  /api/reservations — in-flight reservation ledger + totals
- *   - POST /api/wallet/send  — move funds out (with reserved-liability guard)
+ *   - POST /api/wallet/send  — move funds out (liability guard + reservation-
+ *                              safe coin selection; force:true spends blind)
  *   - POST /api/wallet/settle    — renew VTXOs / confirm boarding
  *   - POST /api/wallet/fragment  — split the pool into uniform pieces
  *
@@ -185,6 +186,28 @@ describe('admin HTTP API: operator endpoints', () => {
       .send({ address: await deps.wallet.getAddress(), amount: 9_999_999_999 }).expect(400)
     expect(over.body).toHaveProperty('withdrawable')
   })
+
+  it('POST /api/wallet/send refuses coins pinned to a live game; force spends blind', async () => {
+    if (!arkAvailable) return
+    // The v4 play above pinned the house's entire bankroll (its single settled
+    // VTXO, picked largest-first) for a small houseStake. The liability guard
+    // alone passes (withdrawable ≈ bankroll − stake), so pre-fix the blind SDK
+    // selection would spend the pinned coin and break the game's co-fund — the
+    // P0 #53 residual. The reservation-safe path must 400 cleanly instead.
+    const addr = await deps.wallet.getAddress()
+    const blocked = await request(app).post('/api/wallet/send')
+      .send({ address: addr, amount: BET }).expect(400)
+    expect(blocked.body).toHaveProperty('freeSpendable')
+    expect(blocked.body.reservedOutpoints).toBeGreaterThanOrEqual(1)
+
+    // force:true is the operator hatch: blind SDK selection, reserved coins
+    // included. (This spends the abandoned test game's pin — its self-send
+    // outputs also give the next test un-reserved coins to work with.)
+    const forced = await request(app).post('/api/wallet/send')
+      .send({ address: addr, amount: BET, force: true }).expect(200)
+    expect(typeof forced.body.txid).toBe('string')
+    expect(forced.body.txid.length).toBeGreaterThan(0)
+  }, 60_000)
 
   it('POST /api/wallet/send moves a small amount out (returns txid)', async () => {
     if (!arkAvailable) return

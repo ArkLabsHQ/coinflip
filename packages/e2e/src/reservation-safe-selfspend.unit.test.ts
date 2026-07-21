@@ -10,7 +10,6 @@
  *   - ensureHouseVtxoPool (split) / admin POST /api/wallet/fragment:
  *     `wallet.send(...)` sizes from free coins but the SDK picks the actual
  *     inputs from ALL coins.
- *   - admin POST /api/wallet/send: `sendBitcoin` selects inputs internally.
  *
  * Fixed behavior asserted here:
  *   - settle paths pass EXPLICIT SettleParams whose inputs exclude every
@@ -18,12 +17,12 @@
  *   - the pool split runs the SDK send UNDER the /play selection mutex and
  *     defers while any outpoint reservation is live (its recipient-sized
  *     self-send can't be constrained); liability-only reservations don't block.
- *   - admin send selects inputs from the SDK send's OWN candidate base
- *     (getVtxos({withRecoverable:false})) minus reserved outpoints, under the
- *     selection mutex, and passes them as explicit selectedVtxos — so it never
- *     spends a reserved coin yet stays exactly as permissive as an
- *     unconstrained SDK send (200 whenever the FREE balance covers, 400 only
- *     when it genuinely can't). force:true keeps the blind SDK send.
+ *
+ * NOT covered: admin POST /api/wallet/send. Reserved-exclusion there tripped
+ * three distinct regtest failures (400-no-coins, 409-on-restored-reservation,
+ * SDK-internal throw), so it was reverted to master's outpoint-blind behavior
+ * (liability-guarded, operator-discretion, force bypasses) and deferred — see
+ * the NOTE in admin/routes.ts. Its blind path stays covered by admin-api.test.ts.
  *
  * Imports the BUILT server (dist) directly, like the sibling unit tests.
  */
@@ -195,110 +194,6 @@ describe('P0 #53 — admin POST /api/wallet/settle excludes reserved outpoints',
     expect(params).toBeDefined()
     expect(outpoints(params.inputs)).toEqual([`${freeCoin.txid}:3`])
     expect(params.outputs).toHaveLength(1)
-  })
-})
-
-describe('P0 #53 — admin POST /api/wallet/send selects only free (unreserved) coins', () => {
-  afterEach(() => {
-    reservations.release('p0-53-send')
-    houseVtxoCache.invalidate()
-  })
-
-  // getVtxos({withRecoverable:false}) is the SDK send's OWN candidate base; the
-  // handler selects from it minus reserved and passes explicit selectedVtxos.
-  // The mock returns a fixed spendable set regardless of filter (all coins here
-  // are settled + far from expiry, so the real filter would keep them all).
-  function sendDeps(vtxos: any[], sendBitcoinCalls: any[], available?: number) {
-    return {
-      wallet: {
-        getVtxos: async () => vtxos,
-        getBalance: async () => ({
-          available: available ?? vtxos.reduce((s: number, v: any) => s + v.value, 0),
-          boarding: { total: 0 },
-        }),
-        sendBitcoin: async (params: any) => {
-          sendBitcoinCalls.push(params)
-          return 'txid-send'
-        },
-      },
-    } as any
-  }
-
-  function mount(deps: any) {
-    const app = express()
-    app.use(express.json())
-    app.use(createAdminRoutes(deps))
-    return app
-  }
-
-  it('sends 200 with reservation-filtered selectedVtxos even while OTHER coins are reserved', async () => {
-    houseVtxoCache.invalidate()
-    // The admin-api regtest shape: a full pool with only a coin or two reserved
-    // by a pending game. The send must still succeed (this is the case the
-    // mutex+refuse approach wrongly 409'd — rebuildReservations restores
-    // outpoint reservations on boot, so a reservation is almost always live).
-    const reservedCoin = coin('33'.repeat(32), 0, 50_000)
-    const freeCoin = coin('44'.repeat(32), 1, 50_000)
-    reservations.reserve('p0-53-send', [`${reservedCoin.txid}:0`], 0) // liability 0: isolate coin selection
-    const calls: any[] = []
-    const app = mount(sendDeps([reservedCoin, freeCoin], calls))
-
-    const res = await request(app).post('/api/wallet/send').send({ address: 'tark1qdestination', amount: 30_000 })
-
-    expect(res.status).toBe(200)
-    expect(calls).toHaveLength(1)
-    // Selected only from the free set — the reserved coin is excluded (P0-safe).
-    expect(outpoints(calls[0].selectedVtxos)).toEqual([`${freeCoin.txid}:1`])
-  })
-
-  it('400s (no spend) only when the FREE balance genuinely cannot cover the amount', async () => {
-    houseVtxoCache.invalidate()
-    const reservedCoin = coin('55'.repeat(32), 0, 80_000)
-    const freeCoin = coin('66'.repeat(32), 1, 20_000)
-    reservations.reserve('p0-53-send', [`${reservedCoin.txid}:0`], 0)
-    const calls: any[] = []
-    // available (100k) > amount (60k), so the separate withdrawable pre-check
-    // passes — the 400 must come from the FREE (20k) shortfall, not that guard.
-    const app = mount(sendDeps([reservedCoin, freeCoin], calls, 100_000))
-
-    const res = await request(app).post('/api/wallet/send').send({ address: 'tark1qdestination', amount: 60_000 })
-
-    expect(res.status).toBe(400)
-    expect(res.body.freeTotal).toBe(20_000)
-    expect(res.body).not.toHaveProperty('withdrawable') // distinct from the pre-check 400
-    expect(calls).toHaveLength(0)
-  })
-
-  it('force:true sends blind (no selectedVtxos) even while an outpoint is reserved', async () => {
-    houseVtxoCache.invalidate()
-    const reservedCoin = coin('77'.repeat(32), 0, 80_000)
-    const freeCoin = coin('88'.repeat(32), 1, 20_000)
-    reservations.reserve('p0-53-send', [`${reservedCoin.txid}:0`], 0)
-    const calls: any[] = []
-    const app = mount(sendDeps([reservedCoin, freeCoin], calls))
-
-    const res = await request(app).post('/api/wallet/send').send({ address: 'tark1qdestination', amount: 60_000, force: true })
-
-    expect(res.status).toBe(200)
-    expect(calls).toHaveLength(1)
-    expect(calls[0].selectedVtxos).toBeUndefined() // blind SDK selection
-  })
-
-  it('liability-only reservations (no pinned outpoints) do not shrink the free set', async () => {
-    houseVtxoCache.invalidate()
-    // Post-cofund v4 / v3 games reserve liability with NO outpoints; those don't
-    // pin a coin, so the whole spendable set stays free. (Amount stays under the
-    // liability-adjusted withdrawable so the separate pre-check passes too.)
-    const freeCoin = coin('99'.repeat(32), 0, 50_000)
-    reservations.reserve('p0-53-send', [], 5_000)
-    const calls: any[] = []
-    const app = mount(sendDeps([freeCoin], calls))
-
-    const res = await request(app).post('/api/wallet/send').send({ address: 'tark1qdestination', amount: 30_000 })
-
-    expect(res.status).toBe(200)
-    expect(calls).toHaveLength(1)
-    expect(outpoints(calls[0].selectedVtxos)).toEqual([`${freeCoin.txid}:0`])
   })
 })
 

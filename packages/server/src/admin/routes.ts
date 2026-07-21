@@ -175,6 +175,50 @@ export function createAdminRoutes(deps: AppDeps): Router {
     }
   })
 
+  // GET /api/recovery — read-only recovery/expiry diagnostic.
+  //
+  // `balance.available` going to zero does NOT mean funds are gone: a VTXO the
+  // server has swept is still RECOVERABLE while it remains unspent
+  // (isRecoverable = swept && spendable), reclaimed by settling it back in a
+  // batch. The dashboard historically showed only available/settled/
+  // preconfirmed/boarding, so swept-but-reclaimable value was invisible — and
+  // an expiry could drain the house with no visible signal. This surfaces the
+  // SDK's own numbers instead of a curated subset.
+  //
+  // Strictly read-only: getRecoverableBalance/getExpiringVtxos observe; the
+  // mutating counterparts (recoverVtxos/renewVtxos) are deliberately NOT called.
+  router.get('/api/recovery', async (_req: Request, res: Response) => {
+    try {
+      const vm = await deps.wallet.getVtxoManager()
+      const [recoverable, expiring, balance] = await Promise.all([
+        vm.getRecoverableBalance(),
+        vm.getExpiringVtxos(),
+        readBalance(),
+      ])
+      res.json({
+        // bigint → number: sat amounts are well inside Number's safe range.
+        recoverable: {
+          sats: Number(recoverable.recoverable),
+          subdust: Number(recoverable.subdust),
+          includesSubdust: recoverable.includesSubdust,
+          vtxoCount: recoverable.vtxoCount,
+        },
+        expiringSoon: expiring.map((v) => ({
+          txid: v.txid,
+          vout: v.vout,
+          value: v.value,
+          batchExpiry: v.virtualStatus?.batchExpiry ?? null,
+          state: v.virtualStatus?.state ?? null,
+        })),
+        // The full SDK balance, including the recoverable/pendingRecovery
+        // fields the dashboard used to drop on the floor.
+        balance,
+      })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
+  })
+
   // POST /api/config — update configuration
   router.post('/api/config', async (req: Request, res: Response) => {
     const { rakeType, rakeValue, tiers, minHouseBalance, oddsEdgeBps } = req.body

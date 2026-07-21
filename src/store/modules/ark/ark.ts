@@ -3,9 +3,9 @@ import { hex, base64 } from '@scure/base'
 import type { State as RootState } from '@/store'
 import {
   Wallet, SingleKey,
-  ConditionWitness, setArkPsbtField, Transaction, ArkAddress,
+  Transaction, ArkAddress,
   RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
-  type WalletBalance, type ExtendedVirtualCoin, type ArkProvider, type Identity, type ArkTxInput,
+  type WalletBalance, type ExtendedVirtualCoin, type ArkTxInput,
   type Activity, type NetworkName,
 } from '@arkade-os/sdk'
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
@@ -19,13 +19,12 @@ import {
   getNetwork, getGame as apiGetGame,
   v4Play, v4Cofund, v4CofundFinalize, v4Reveal, v4CooperativeExit,
   getRestoreChallenge, restoreGamesFromServer,
-  type Outpoint, type V4CovenantParams,
   type GameSummary, type V4ReclaimHint,
 } from '@/services/api'
 import { signChallenge } from '@/utils/signChallenge'
-import { resolveV4ForfeitStash, hasClaimableV4Forfeit, v4ClaimStage, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
+import { hasClaimableV4Forfeit, v4ClaimStage, type V4PotOutpoint, type StashedV4Forfeit } from './v4ForfeitStash'
 import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits, saveV4Forfeits } from './v4ForfeitStashStore'
-import { buildV4SelfRefund, pickV4ClaimPath, rebuildJointPot, isAlreadySpentError, isTransientSelfRefundError, rearmV4ReclaimHint } from './v4SelfRefund'
+import { buildV4SelfRefund, pickV4ClaimPath, rebuildJointPot, isAlreadySpentError, isTransientSelfRefundError } from './v4SelfRefund'
 import { stepCooperativeExit } from './v4CooperativeExit'
 import { makeCooperativeExitIo, V4_EXIT_FEE_SATS, V4_EXIT_BUMPER_MIN_SATS } from './v4CooperativeExitIo'
 import { createHash } from '@/utils/crypto'
@@ -35,95 +34,15 @@ import { logDiag } from '@/utils/diagnosticsLog'
 import { isCltvMatured } from '@/utils/cltv'
 import { withTimeout, TIMEOUTS } from '@/utils/withTimeout'
 import { gameActivityResolver } from './gameActivityResolver'
+import { stashV4ForfeitRecovery, rearmV4ReclaimHints } from './v4Recovery'
+import {
+  uniformRandomInt, submitOffchain, hasStashedForfeit,
+  addressToPkScriptHex, getRefundStash, parseClaimPayload, decodeCheckpointTxs,
+} from './arkHelpers'
+import type {
+  StashedRefund, ArkServerInfo, ArkVTXO, BoardingUtxo, ClaimMode, ClaimingInfo,
+} from './arkTypes'
 
-
-/**
- * Cryptographically-uniform integer in `[0, n)` via `crypto.getRandomValues`
- * (CSPRNG) with rejection sampling. The variable-odds digit the player picks is
- * encoded into its revealed secret length, so a `Math.random()`-derived digit
- * would leak the non-crypto PRNG's state across games and let an observer
- * predict the next pick. Mirrors the lib's server-side `randomUniformInt`.
- */
-function uniformRandomInt(n: number): number {
-  if (!Number.isInteger(n) || n < 1) throw new Error(`uniformRandomInt: n must be a positive integer (got ${n})`)
-  if (n === 1) return 0
-  const bytes = Math.ceil(Math.log2(n) / 8) || 1
-  const max = 256 ** bytes
-  const limit = max - (max % n)
-  const buf = new Uint8Array(bytes)
-  for (;;) {
-    crypto.getRandomValues(buf)
-    let x = 0
-    for (const b of buf) x = x * 256 + b
-    if (x < limit) return x % n
-  }
-}
-
-/**
- * Stalled-bet refunds. When the player escrows a stake we immediately fetch the
- * server-built refund tx and persist it locally — BEFORE revealing/committing.
- * If the server then stalls (or the tab closes mid-game), the player still holds
- * a self-submittable refund and can reclaim the stake after the CLTV with no
- * trust in the server. The stash is cleared once the game resolves.
- */
-export interface StashedRefund {
-  gameId: string
-  tier: number
-  playerEscrow: Outpoint
-  refundPsbt: string
-  refundCheckpoints: string[]
-  finalExpiration: number
-  createdAt: number
-  /** Arkade-script forfeit-claim PSBT. Submitted to the EMULATOR's /v1/tx
-   *  (not arkd directly) — the emulator validates the covenant + cosigns
-   *  the tweaked slot, then forwards to arkd. */
-  forfeitPsbt?: string
-  forfeitCheckpoints?: string[]
-  /** Absolute CLTV (unix seconds) baked into the playerForfeit leaf —
-   *  forfeit becomes claimable once chain time crosses this. */
-  forfeitClaimableAt?: number
-  /** Emulator base URL the client posts the forfeit PSBT to. */
-  forfeitEmulatorUrl?: string
-  /** Set true once the player has actually called /commit (revealed their
-   * secret). Gates penalty (revealer-takes-all) vs self-refund (own stake).
-   * If the player never revealed, only the self-refund applies. */
-  revealed?: boolean
-  /** Player's secret in hex — required as the condition witness when claiming
-   * the penalty. Stored ONLY in the stash, never sent off-device. */
-  playerSecretHex?: string
-  /**
-   * Serialized params of the PLAYER escrow's `coinflip-escrow` contract (from
-   * /api/play). Persisted so a page reload can RE-REGISTER the escrow with the
-   * SDK ContractManager and re-arm the watcher that clears this stash on the
-   * sweep's `vtxo_spent`. */
-  escrowContractParams?: Record<string, string>
-  /** The player escrow's Ark address — its pkScript is the contract's key
-   *  (and what we deactivate when the bet is done). */
-  escrowAddress?: string
-  /**
-   * Contract version used by this game. 'v2' is the legacy length-encoded
-   * predicate; 'v3' uses the arkade-script + packet-borne reveals shape.
-   * Undefined means v2 (forward-compat with stashes written before this field).
-   * Drives which SDK contract handler type the ContractWatcher registers.
-   */
-  contractVersion?: 'v2' | 'v3'
-  /**
-   * v3 only — the player's commit (digit + salt). Salt stored hex-encoded for
-   * JSON serializability. Stored ONLY in the stash; never sent off-device
-   * except as the /commit payload at reveal time.
-   */
-  reveal?: { digit: number; salt: string }
-  /**
-   * Count of consecutive PERMANENT auto-claim failures (a witness-utxo script
-   * mismatch — the stashed refund no longer matches the Service's VTXO, e.g. a
-   * pre-v4 or rotated-signer escrow). Auto-claim backs off once this reaches
-   * MAX_RECLAIM_ATTEMPTS; the stake still recovers via the operator sweep.
-   * Transient (network / CLTV-timing) failures do NOT increment it.
-   */
-  claimFailures?: number
-  /** Last permanent auto-claim error message, for surfacing in the UI. */
-  lastClaimError?: string
-}
 
 // Stash backend moved to IndexedDB via @/utils/stashStore. The shape and
 // reducer semantics are unchanged from the prior localStorage version;
@@ -135,84 +54,6 @@ import {
   patchStash as updateRefundStash,
 } from '@/utils/stashStore'
 import { isPermanentReclaimError, hasExhaustedReclaim } from '@/utils/reclaimBackoff'
-
-/**
- * The structural fields a forfeit-claim needs, read off a stashed-refund record.
- * A loose subset of `StashedRefund` so this predicate keeps a narrow shape.
- */
-export type ForfeitClaimable = {
-  revealed?: boolean
-  forfeitPsbt?: string
-  forfeitCheckpoints?: string[]
-  forfeitEmulatorUrl?: string
-  forfeitClaimableAt?: number
-}
-
-/**
- * Does this stash hold a COMPLETE, revealed forfeit ready to be claimed?
- *
- * Single source of truth shared by the StalledBets "Claim full pot" button, the
- * `claimForfeit` action's precondition guard, and the background auto-claim poll.
- * Purely STRUCTURAL — it answers "is a forfeit stashed and revealed?", NOT "is
- * the CLTV mature yet?" (that time gate is layered on by the callers). It is a
- * TYPE GUARD, so callers that pass the check may read the forfeit fields as
- * defined. Relocated here when the legacy per-party-escrow (v2/v3) creation flow
- * was removed; it still backs recovery of already-escrowed stalled bets.
- */
-export function hasStashedForfeit<T extends ForfeitClaimable>(
-  stash: T,
-): stash is T & {
-  revealed: true
-  forfeitPsbt: string
-  forfeitCheckpoints: string[]
-  forfeitEmulatorUrl: string
-  forfeitClaimableAt: number
-} {
-  return (
-    stash.revealed === true &&
-    !!stash.forfeitPsbt &&
-    Array.isArray(stash.forfeitCheckpoints) && stash.forfeitCheckpoints.length > 0 &&
-    !!stash.forfeitEmulatorUrl &&
-    stash.forfeitClaimableAt !== undefined
-  )
-}
-
-export interface ArkServerInfo {
-  pubkey: string
-  network: string
-  dust: string
-  unilateralExitDelay: string
-  boardingExitDelay?: string
-  sessionDuration?: string
-}
-
-export interface ArkVTXO {
-  outpoint: {
-    txid: string
-    vout: number
-  }
-  redeemTx?: string
-  amount: string
-  tapscripts: string[]
-  isPreconfirmed?: boolean
-}
-
-export interface BoardingUtxo {
-  outpoint: { txid: string; vout: number }
-  amount: string
-  confirmations?: number
-}
-
-/**
- * Per-game in-flight claim. Set when either the manual button or the
- * background auto-claim poll starts a forfeit/refund submission; cleared
- * in the `finally` of the same action so a failure doesn't strand the
- * lock. `mode` lets the UI distinguish "Auto-claiming…" from a click in
- * progress.
- */
-export type ClaimKind = 'forfeit' | 'refund'
-export type ClaimMode = 'manual' | 'auto'
-export interface ClaimingInfo { kind: ClaimKind; mode: ClaimMode }
 
 // Coinflip's activity resolver lives in its own module so the game-tagging
 // logic is unit-testable without the Vuex store. See gameActivityResolver.ts.
@@ -308,43 +149,6 @@ export const NETWORK_PRESETS: Record<string, NetworkPreset> = {
   },
 }
 
-/**
- * Single-party offchain submit: sign `signInputs` on the ark tx + every
- * checkpoint with `identity`, optionally attaching a condition witness (revealed
- * secrets) to the signed inputs. arkd co-signs the server leg. Mirrors the
- * server's submitOffchain (both proven by the regtest e2e). SDK-only, so it
- * bundles for the browser (the lib's tx-builders are Node-crypto bound).
- */
-async function submitOffchain(
-  arkProvider: ArkProvider,
-  identity: Identity,
-  arkTx: Transaction,
-  checkpoints: Transaction[],
-  signInputs: number[],
-  witness?: Uint8Array[],
-): Promise<string> {
-  if (witness) for (const i of signInputs) setArkPsbtField(arkTx, i, ConditionWitness, witness)
-  const signed = await identity.sign(arkTx, signInputs)
-  const { arkTxid, signedCheckpointTxs } = await withTimeout(
-    arkProvider.submitTx(
-      base64.encode(signed.toPSBT()),
-      checkpoints.map((c) => base64.encode(c.toPSBT())),
-    ),
-    TIMEOUTS.submit,
-    'submit transaction',
-  )
-  const finals: string[] = []
-  for (const c of signedCheckpointTxs) {
-    const tx = Transaction.fromPSBT(base64.decode(c))
-    const idx: number[] = []
-    for (let i = 0; i < tx.inputsLength; i++) idx.push(i)
-    if (witness) for (const i of idx) setArkPsbtField(tx, i, ConditionWitness, witness)
-    finals.push(base64.encode((await identity.sign(tx, idx)).toPSBT()))
-  }
-  await withTimeout(arkProvider.finalizeTx(arkTxid, finals), TIMEOUTS.submit, 'finalize transaction')
-  return arkTxid
-}
-
 // SDK wallet instance (kept outside Vuex state to avoid reactivity issues with complex objects)
 let sdkWallet: Wallet | null = null
 // Run at most ONE boarding-settle round at a time. settlementConfig is false (see
@@ -438,114 +242,6 @@ export function getSDKWallet(): Wallet | null {
 }
 
 /**
- * After the joint pot is co-funded,
- * persist everything the client needs to reclaim it via the `playerForfeit`
- * leaf should the server never settle. The claim is CLIENT-built from the
- * covenant params, so all we need is the pot outpoint + covenant + the emulator
- * URL — captured by the caller BEFORE the co-fund (playV4Game aborts pre-funding
- * when it's absent). Crucially this does NOT re-fetch /api/network: that
- * redundant fetch could fail transiently and, for v4 where the stash is the
- * ONLY recovery (no v3-style self-refund), silently drop recovery for an
- * already-funded pot. So a skip/write failure here is logged LOUDLY — but we
- * still proceed to reveal, which on success makes the stash moot anyway.
- */
-async function stashV4ForfeitRecovery(args: {
-  gameId: string
-  tier: number
-  potOutpoint: V4PotOutpoint
-  covenant: V4CovenantParams
-  expectedPayoutPkScriptHex: string
-  playerSecretHex: string
-  emulatorUrl: string | undefined
-}): Promise<void> {
-  const decision = resolveV4ForfeitStash({
-    emulatorUrl: args.emulatorUrl,
-    potOutpoint: args.potOutpoint,
-    covenant: args.covenant,
-    expectedPayoutPkScriptHex: args.expectedPayoutPkScriptHex,
-    playerSecretHex: args.playerSecretHex,
-  })
-  if (decision.kind === 'stash') {
-    try {
-      await putV4Forfeit({
-        ...decision.patch,
-        gameId: args.gameId,
-        tier: args.tier,
-        createdAt: Date.now(), // ms, matches the listStalledBets grace cutoff
-      })
-    } catch (e) {
-      console.error('[v4] CRITICAL: pot is funded but the recovery stash could not be written:', getErrorMessage(e))
-    }
-  } else {
-    console.error(`[v4] CRITICAL: forfeit not stashed for a funded pot (${decision.reason})`)
-  }
-}
-
-/**
- * Actionable-restore re-arm: for each PENDING v4 reclaim hint, persist a no-secret
- * SELF-REFUND stash so StalledBets + auto-claim can reclaim the player's own stake.
- *
- * Pure decision in `rearmV4ReclaimHint` (unit-tested); this wrapper is the network/
- * storage glue. Best-effort and idempotent:
- *  - skips a hint we already hold as a FUNDED (secret-bearing) stash — that one can
- *    sweep the WHOLE pot, so a no-secret restore must never downgrade it;
- *  - refreshes an existing no-secret stash in place (covenant/outpoint may have moved
- *    from null→known since a pre-co-fund restore);
- *  - never throws: a re-arm failure must not break the history return, and the
- *    server's own refund timer remains the backstop.
- */
-async function rearmV4ReclaimHints(
-  hints: V4ReclaimHint[],
-  games: GameSummary[],
-  arkAddress: string | null,
-): Promise<void> {
-  if (!arkAddress) {
-    console.info(`[restore] ${hints.length} v4 reclaim hint(s) returned, but the wallet isn't connected yet — re-arm deferred to a post-connect restore.`)
-    return
-  }
-  let emulatorUrl: string | undefined
-  try {
-    emulatorUrl = (await getNetwork()).emulator?.url
-  } catch (e) {
-    console.warn('[restore] could not reach /api/network for the emulator URL (continuing):', getErrorMessage(e))
-  }
-  let expectedPayout: string
-  try {
-    expectedPayout = addressToPkScriptHex(arkAddress)
-  } catch (e) {
-    console.warn('[restore] could not derive payout pkScript — skipping v4 re-arm:', getErrorMessage(e))
-    return
-  }
-  const statusById = new Map(games.map((g) => [g.gameId, g.status]))
-  const existing = await loadV4Forfeits()
-  let rearmed = 0
-  for (const hint of hints) {
-    // Never downgrade a funded (secret-bearing) stash to a no-secret restore.
-    const prior = existing.find((s) => s.gameId === hint.gameId)
-    if (prior && pickV4ClaimPath(prior) === 'forfeit') continue
-    const decision = rearmV4ReclaimHint({
-      hint,
-      status: statusById.get(hint.gameId) ?? 'pending',
-      expectedPayoutPkScriptHex: expectedPayout,
-      fallbackEmulatorUrl: emulatorUrl,
-    })
-    if (decision.kind !== 'rearm') {
-      console.info(`[restore] v4 hint ${hint.gameId} not re-armed (${decision.reason})`)
-      continue
-    }
-    try {
-      // Preserve an existing no-secret stash's stage/backoff bookkeeping across a
-      // re-restore (a fresh putV4Forfeit would otherwise reset claimFailures).
-      await putV4Forfeit(prior ? { ...decision.stash, claimFailures: prior.claimFailures, lastClaimError: prior.lastClaimError } : decision.stash)
-      rearmed++
-    } catch (e) {
-      console.error(`[restore] could not persist re-armed self-refund for ${hint.gameId} (continuing):`, getErrorMessage(e))
-    }
-  }
-  console.info(`[restore] re-armed ${rearmed}/${hints.length} pending v4 reclaim hint(s) as self-refund stashes.`)
-}
-
-/**
  * Best-effort: mark a finished bet's player-escrow contract `inactive` so the
  * ContractWatcher stops watching it ("bet done → deactivate"). No-op when the
  * stash lacks an escrow address or the ContractManager is unavailable; never
@@ -559,18 +255,6 @@ async function deactivateEscrowContract(stash: StashedRefund | undefined): Promi
   } catch (e) {
     console.warn('[contract] could not deactivate player escrow (continuing):', getErrorMessage(e))
   }
-}
-
-/** Address → pkScript hex — the dense `ArkAddress.decode(...).pkScript` chain,
- *  named once so its three call sites read as intent, not bit-twiddling. */
-function addressToPkScriptHex(address: string): string {
-  return hex.encode(ArkAddress.decode(address).pkScript)
-}
-
-/** Load the stashed refund for a game, if any. The stash is the trustless
- *  backstop; several actions look it up by the same `gameId` find. */
-async function getRefundStash(gameId: string): Promise<StashedRefund | undefined> {
-  return (await loadRefunds()).find((x) => x.gameId === gameId)
 }
 
 /**
@@ -597,25 +281,6 @@ function requireWalletAndKey(rootState: RootState): { wallet: Wallet; privateKey
   const privateKey = rootState.wallet.privateKey
   if (!privateKey) throw new Error('No wallet key available')
   return { wallet: sdkWallet, privateKey }
-}
-
-/**
- * Both claim actions accept either a bare gameId (legacy callers) or a
- * `{ gameId, mode }` object. Normalise to the object form, defaulting `mode` to
- * 'manual' (a user click) when unspecified.
- */
-function parseClaimPayload(
-  payload: string | { gameId: string; mode?: ClaimMode },
-): { gameId: string; mode: ClaimMode } {
-  return typeof payload === 'string'
-    ? { gameId: payload, mode: 'manual' }
-    : { gameId: payload.gameId, mode: payload.mode ?? 'manual' }
-}
-
-/** Decode an array of checkpoint PSBTs (hex) into Transactions — the shape both
- *  the refund and forfeit claim submissions need before co-signing. */
-function decodeCheckpointTxs(checkpointsHex: string[]): Transaction[] {
-  return checkpointsHex.map((c) => Transaction.fromPSBT(hex.decode(c)))
 }
 
 /**
@@ -1853,5 +1518,12 @@ const ark: Module<ArkState, RootState> = {
     networkPresets: () => NETWORK_PRESETS,
   }
 }
+
+// Re-export the previously-public types + guard so external import paths
+// (`@/store/modules/ark/ark`) keep resolving unchanged after the split.
+export type { StashedRefund, ArkServerInfo, ArkVTXO, BoardingUtxo, ClaimMode, ClaimingInfo }
+export type { ClaimKind } from './arkTypes'
+export type { ForfeitClaimable } from './arkHelpers'
+export { hasStashedForfeit }
 
 export default ark

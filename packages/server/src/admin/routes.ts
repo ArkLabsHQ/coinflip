@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express'
 import path from 'path'
-import { isVtxoExpiringSoon } from '@arkade-os/sdk'
+import { isVtxoExpiringSoon, selectVirtualCoins } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
-import { houseVtxoCache, reservations, ensureHouseVtxoPool } from '../vtxo-pool.js'
+import { houseVtxoCache, reservations, ensureHouseVtxoPool, selectionMutex, outpointKey } from '../vtxo-pool.js'
+import { ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
 import { buildReservationSafeSettleParams } from '../game-engine.js'
 import { makeSettlementHandler } from '../settlement-events.js'
 import {
@@ -290,9 +291,21 @@ export function createAdminRoutes(deps: AppDeps): Router {
   })
 
   // POST /api/wallet/send — move house funds out to an address (Ark or on-chain;
-  // sendBitcoin routes by address type). Guards against draining funds reserved
-  // for in-flight games unless { force: true } is passed.
-  // NOTE(P0 #53 follow-up): admin send is outpoint-blind (liability-guarded but may pick a reserved coin). Operator-discretion; force bypasses. Deferred — server-side reserved-exclusion tripped 3 distinct regtest failures.
+  // sendBitcoin routes by address type). Two guards, both bypassed by
+  // { force: true }:
+  //  - liability: the amount can't eat into the worst-case payout obligation
+  //    of in-flight games (coarse, amount-level);
+  //  - reservation (P0 #53): the spend can't consume a VTXO pinned to a live
+  //    game's co-fund. The SDK's own selection is reservation-blind, so the
+  //    non-force path mirrors `Wallet._sendImpl` exactly — same candidate set
+  //    (getVtxos({withRecoverable:false}) minus pendingRecoveryOutpoints()),
+  //    same selector and target (selectVirtualCoins to max(amount, dust)) —
+  //    minus reserved outpoints, then hands the picks to
+  //    sendBitcoin({selectedVtxos}). Every coin we submit is one the SDK's
+  //    blind path could have picked itself, so arkd accepts them identically.
+  //    Selection + submit run under selectionMutex (like the pool split) so
+  //    /play can't reserve a picked coin mid-flight, with the submit
+  //    timeout-bounded so a wedged arkd can't hold /play hostage.
   router.post('/api/wallet/send', async (req: Request, res: Response) => {
     try {
       const { address, force } = req.body
@@ -317,8 +330,54 @@ export function createAdminRoutes(deps: AppDeps): Router {
         })
         return
       }
-      const txid = await deps.wallet.sendBitcoin({ address: address.trim(), amount })
-      res.json({ txid })
+      if (force) {
+        // Blind operator hatch: the SDK picks inputs from ALL coins, reserved
+        // ones included.
+        const txid = await deps.wallet.sendBitcoin({ address: address.trim(), amount })
+        res.json({ txid })
+        return
+      }
+      // The candidate set `_sendImpl` would use. Fetched before the lock (like
+      // /play's getVtxos) so a slow re-sync doesn't serialize under the mutex;
+      // staleness is safe: reservations are re-read under the lock, and a coin
+      // spent in between only fails the submit cleanly.
+      const allCoins = await deps.wallet.getVtxos({ withRecoverable: false })
+      const pendingRecovery = await deps.wallet.pendingRecoveryOutpoints()
+      const candidates = pendingRecovery.size
+        ? allCoins.filter((v) => !pendingRecovery.has(outpointKey(v.txid, v.vout)))
+        : allCoins
+      const outcome = await selectionMutex.runExclusive(async () => {
+        const reserved = reservations.reservedOutpoints()
+        const free = reserved.size
+          ? candidates.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
+          : candidates
+        // Same target as the SDK's own selection: a sub-dust send still
+        // selects up to dust.
+        const target = Math.max(amount, Number(deps.wallet.dustAmount))
+        const freeSpendable = free.reduce((sum, v) => sum + v.value, 0)
+        if (freeSpendable < target) {
+          return { freeSpendable, reservedCount: reserved.size }
+        }
+        const { inputs } = selectVirtualCoins(free, target)
+        const txid = await timeoutReject(
+          deps.wallet.sendBitcoin({ address: address.trim(), amount, selectedVtxos: inputs }),
+          ARK_SUBMIT_TIMEOUT_MS,
+          'admin wallet send',
+        )
+        // Drop the spent coins from the hot-path snapshot so a /play selection
+        // before the next refresh can't re-pick them.
+        for (const v of inputs) houseVtxoCache.removeOutpoint(v.txid, v.vout)
+        return { txid }
+      })
+      if ('txid' in outcome) {
+        res.json({ txid: outcome.txid })
+        return
+      }
+      res.status(400).json({
+        error: `Amount ${amount} needs ${Math.max(amount, Number(deps.wallet.dustAmount))} sat of un-reserved spendable VTXOs; only ${outcome.freeSpendable} sat is free (${outcome.reservedCount} outpoint(s) reserved by in-flight games). Retry when games resolve, or pass force:true to spend blind.`,
+        freeSpendable: outcome.freeSpendable,
+        reservedOutpoints: outcome.reservedCount,
+      })
     } catch (err) {
       res.status(500).json({ error: String(err instanceof Error ? err.message : err) })
     }

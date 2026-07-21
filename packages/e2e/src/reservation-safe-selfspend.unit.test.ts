@@ -17,12 +17,14 @@
  *   - the pool split runs the SDK send UNDER the /play selection mutex and
  *     defers while any outpoint reservation is live (its recipient-sized
  *     self-send can't be constrained); liability-only reservations don't block.
- *
- * NOT covered: admin POST /api/wallet/send. Reserved-exclusion there tripped
- * three distinct regtest failures (400-no-coins, 409-on-restored-reservation,
- * SDK-internal throw), so it was reverted to master's outpoint-blind behavior
- * (liability-guarded, operator-discretion, force bypasses) and deferred — see
- * the NOTE in admin/routes.ts. Its blind path stays covered by admin-api.test.ts.
+ *   - admin POST /api/wallet/send mirrors the SDK's own `_sendImpl` selection
+ *     (same candidate set: getVtxos({withRecoverable:false}) minus
+ *     pendingRecoveryOutpoints(); same selector: selectVirtualCoins to
+ *     max(amount, dust)) with reserved outpoints removed, and passes the picks
+ *     as sendBitcoin({selectedVtxos}). Every coin it hands to arkd is one the
+ *     SDK's blind path could have picked itself — minus the reserved ones —
+ *     so arkd accepts them identically. Free-set shortfall is a clean 400
+ *     (no spend); force:true keeps the blind operator hatch.
  *
  * Imports the BUILT server (dist) directly, like the sibling unit tests.
  */
@@ -194,6 +196,144 @@ describe('P0 #53 — admin POST /api/wallet/settle excludes reserved outpoints',
     expect(params).toBeDefined()
     expect(outpoints(params.inputs)).toEqual([`${freeCoin.txid}:3`])
     expect(params.outputs).toHaveLength(1)
+  })
+})
+
+describe('P0 #53 — admin POST /api/wallet/send spends only un-reserved coins', () => {
+  afterEach(() => {
+    reservations.release('p0-53-send')
+  })
+
+  /**
+   * Wallet mock for the send path. The handler mirrors `_sendImpl`'s candidate
+   * set (getVtxos({withRecoverable:false}) minus pendingRecoveryOutpoints())
+   * before removing reserved outpoints, so the mock exposes both reads plus the
+   * dust floor the selection target uses.
+   */
+  function sendApp(vtxos: any[], sendCalls: any[], pendingRecovery: string[] = []) {
+    const deps = {
+      wallet: {
+        dustAmount: 330n,
+        getBalance: async () => ({ available: vtxos.reduce((s: number, v: any) => s + v.value, 0) }),
+        getVtxos: async () => vtxos,
+        pendingRecoveryOutpoints: async () => new Set(pendingRecovery),
+        sendBitcoin: async (params: any) => {
+          sendCalls.push(params)
+          return 'txid-send'
+        },
+      },
+    } as any
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRoutes(deps))
+    return app
+  }
+
+  it('selects the FREE coin as an explicit selectedVtxos, never the reserved one', async () => {
+    const reservedCoin = coin('33'.repeat(32), 0, 60_000)
+    const freeCoin = coin('44'.repeat(32), 1, 40_000)
+    // Small liability: the coarse liability guard passes — only the outpoint
+    // exclusion can keep the reserved coin out of the spend.
+    reservations.reserve('p0-53-send', [`${reservedCoin.txid}:0`], 2_000)
+    const sendCalls: any[] = []
+    const app = sendApp([reservedCoin, freeCoin], sendCalls)
+
+    const res = await request(app).post('/api/wallet/send')
+      .send({ address: HOUSE_ADDRESS, amount: 1000 })
+
+    expect(res.status).toBe(200)
+    expect(res.body.txid).toBe('txid-send')
+    expect(sendCalls).toHaveLength(1)
+    // Pre-fix this was a blind sendBitcoin({address, amount}) — the SDK's
+    // internal selection could pick the reserved coin (the P0 residual).
+    expect(sendCalls[0].selectedVtxos).toBeDefined()
+    expect(outpoints(sendCalls[0].selectedVtxos)).toEqual([`${freeCoin.txid}:1`])
+    expect(sendCalls[0].address).toBe(HOUSE_ADDRESS)
+    expect(sendCalls[0].amount).toBe(1000)
+  })
+
+  it('keeps the SDK selector order (near-expiry first) on the free set', async () => {
+    const later = coin('55'.repeat(32), 0, 50_000)
+    const sooner = { ...coin('66'.repeat(32), 1, 40_000), virtualStatus: { state: 'settled', batchExpiry: FUTURE_EXPIRY - 3600_000 } }
+    const sendCalls: any[] = []
+    const app = sendApp([later, sooner], sendCalls)
+
+    const res = await request(app).post('/api/wallet/send')
+      .send({ address: HOUSE_ADDRESS, amount: 1000 })
+
+    expect(res.status).toBe(200)
+    // selectVirtualCoins sorts batchExpiry ascending — the sooner-expiring coin
+    // wins even though the later one is larger (same pick _sendImpl makes).
+    expect(outpoints(sendCalls[0].selectedVtxos)).toEqual([`${sooner.txid}:1`])
+  })
+
+  it('400s cleanly (no spend) when every coin is pinned to a live game', async () => {
+    // The admin-api regtest state: ONE bankroll coin, pinned by a pending v4
+    // game whose liability is far below the balance — the liability guard alone
+    // would let the send through and the blind SDK selection would spend the
+    // pinned coin, breaking the game's co-fund.
+    const reservedCoin = coin('77'.repeat(32), 2, 50_000)
+    reservations.reserve('p0-53-send', [`${reservedCoin.txid}:2`], 2_000)
+    const sendCalls: any[] = []
+    const app = sendApp([reservedCoin], sendCalls)
+
+    const res = await request(app).post('/api/wallet/send')
+      .send({ address: HOUSE_ADDRESS, amount: 1000 })
+
+    expect(res.status).toBe(400)
+    expect(res.body.freeSpendable).toBe(0)
+    expect(res.body.error).toContain('force')
+    expect(sendCalls).toHaveLength(0)
+  })
+
+  it('never selects a pending-recovery coin (the coin arkd would reject)', async () => {
+    const stuck = coin('88'.repeat(32), 0, 80_000)
+    const clean = coin('99'.repeat(32), 1, 30_000)
+    const sendCalls: any[] = []
+    const app = sendApp([stuck, clean], sendCalls, [`${stuck.txid}:0`])
+
+    const res = await request(app).post('/api/wallet/send')
+      .send({ address: HOUSE_ADDRESS, amount: 1000 })
+
+    expect(res.status).toBe(200)
+    // The stuck coin is larger and un-reserved, but _sendImpl drops
+    // pendingRecoveryOutpoints() from its candidate set — so do we. Selecting
+    // it was prior-attempt C's failure: arkd rejects the spend at submit.
+    expect(outpoints(sendCalls[0].selectedVtxos)).toEqual([`${clean.txid}:1`])
+
+    // With ONLY the stuck coin left, the send is a clean 400 — not a doomed submit.
+    const sendCalls2: any[] = []
+    const app2 = sendApp([stuck], sendCalls2, [`${stuck.txid}:0`])
+    const res2 = await request(app2).post('/api/wallet/send')
+      .send({ address: HOUSE_ADDRESS, amount: 1000 })
+    expect(res2.status).toBe(400)
+    expect(sendCalls2).toHaveLength(0)
+  })
+
+  it('targets max(amount, dust) like _sendImpl — a sub-dust send needs dust-worth of coins', async () => {
+    const tiny = coin('aa'.repeat(32), 3, 200) // below the 330 dust floor
+    const sendCalls: any[] = []
+    const app = sendApp([tiny], sendCalls)
+
+    const res = await request(app).post('/api/wallet/send')
+      .send({ address: HOUSE_ADDRESS, amount: 100 })
+
+    expect(res.status).toBe(400)
+    expect(sendCalls).toHaveLength(0)
+  })
+
+  it('force:true keeps the blind operator hatch (no selectedVtxos)', async () => {
+    const reservedCoin = coin('bb'.repeat(32), 4, 50_000)
+    reservations.reserve('p0-53-send', [`${reservedCoin.txid}:4`], 2_000)
+    const sendCalls: any[] = []
+    const app = sendApp([reservedCoin], sendCalls)
+
+    const res = await request(app).post('/api/wallet/send')
+      .send({ address: HOUSE_ADDRESS, amount: 1000, force: true })
+
+    expect(res.status).toBe(200)
+    expect(sendCalls).toHaveLength(1)
+    expect(sendCalls[0].selectedVtxos).toBeUndefined()
   })
 })
 

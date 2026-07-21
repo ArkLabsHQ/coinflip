@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import path from 'path'
 import { isVtxoExpiringSoon, selectVirtualCoins } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
+import type { V4State } from '../v4/types.js'
 import { houseVtxoCache, reservations, ensureHouseVtxoPool, selectionMutex, outpointKey } from '../vtxo-pool.js'
 import { ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
 import { buildReservationSafeSettleParams } from '../game-engine.js'
@@ -93,6 +94,85 @@ export function createAdminRoutes(deps: AppDeps): Router {
       minHouseBalance: parseInt(config.min_house_balance || '100000', 10),
       oddsEdgeBps: parseInt(config.variable_odds_edge_bps || '300', 10),
     })
+  })
+
+  // GET /api/export?raw=1&limit=N — read-only forensic dump for offline
+  // analysis: every game with its v4 odds/stakes lifted out of the state blob,
+  // the config, and a wallet summary. SECRETS NEVER LEAVE: the per-game
+  // commitment secrets are reduced to a boolean and the house_wallet table is
+  // never read. `raw=1` additionally embeds each game's untouched
+  // house_vtxos_json for deeper digging.
+  router.get('/api/export', async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '1000'), 10) || 1000, 1), 10_000)
+      const includeRaw = /^(1|true)$/i.test(String(req.query.raw ?? ''))
+      const [rows, config, balance, pubkeyBytes] = await Promise.all([
+        deps.repos.games.list({ limit }),
+        deps.repos.config.all(),
+        readBalance(),
+        deps.identity.compressedPublicKey(),
+      ])
+
+      const games = rows.map((r) => {
+        // house_vtxos_json holds the V4State for v4 games (odds, stakes, pot,
+        // co-fund txids); legacy rows hold a plain outpoint array instead.
+        // Parse defensively so one malformed row can't fail the whole export.
+        let v4: Record<string, unknown> | null = null
+        try {
+          const parsed = r.house_vtxos_json
+            ? (JSON.parse(r.house_vtxos_json) as V4State | string[])
+            : null
+          if (parsed && !Array.isArray(parsed) && parsed.protocolVersion === 'v4') {
+            v4 = {
+              oddsN: parsed.oddsN,
+              oddsTarget: parsed.oddsTarget,
+              oddsLo: parsed.oddsLo,
+              pot: parsed.pot,
+              houseStake: parsed.houseStake,
+              playerStake: parsed.covenant?.playerStake ?? null,
+              potAddress: parsed.potAddress ?? null,
+              cofundArkTxid: parsed.cofundArkTxid ?? null,
+              cofundTxid: parsed.cofundTxid ?? null,
+              setupExpiration: parsed.setupExpiration,
+              finalExpiration: parsed.finalExpiration,
+              houseInputCount: parsed.houseInputs?.length ?? 0,
+            }
+          }
+        } catch { /* unparseable or legacy shape — leave v4 null */ }
+
+        return {
+          id: r.id,
+          tier: r.tier,
+          playerPubkey: r.player_pubkey,
+          playerChoice: r.player_choice,
+          winner: r.winner,
+          rakeAmount: r.rake_amount,
+          payoutAmount: r.payout_amount,
+          status: r.status,
+          createdAt: r.created_at,
+          resolvedAt: r.resolved_at,
+          // Redacted: presence only, never the secret itself.
+          playerRevealed: r.player_secret_hex !== null,
+          v4,
+          ...(includeRaw ? { houseVtxosRaw: r.house_vtxos_json } : {}),
+        }
+      })
+
+      res.json({
+        meta: {
+          exportedAt: new Date().toISOString(),
+          gameCount: games.length,
+          limit,
+          truncated: games.length === limit,
+          redacted: ['house_secret_hex', 'player_secret_hex', 'house_wallet'],
+        },
+        wallet: { pubkey: Buffer.from(pubkeyBytes).toString('hex'), balance },
+        config,
+        games,
+      })
+    } catch (err) {
+      res.status(500).json({ error: String(err) })
+    }
   })
 
   // POST /api/config — update configuration

@@ -28,11 +28,15 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
 import { ArkAddress } from '@arkade-os/sdk'
-const { renewSettle } = require('arkade-coinflip-server/dist/game-engine.js')
+const { renewSettle, buildReservationSafeSettleParams, RENEWAL_EXPIRY_BUFFER_MS } =
+  require('arkade-coinflip-server/dist/game-engine.js')
+const { reservations, outpointKey } = require('arkade-coinflip-server/dist/vtxo-pool.js')
 
 const HOUSE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
 
-/** One healthy settled VTXO so the params builder always finds an input. */
+/** One healthy settled VTXO so the params builder always finds an input.
+ *  Expiry +24h keeps it INSIDE the 3-day renewal buffer, so the narrowed
+ *  renewal settle still gathers it. */
 const FREE_COIN = {
   txid: 'ab'.repeat(32),
   vout: 0,
@@ -121,6 +125,144 @@ describe('renewSettle (renewal settle path)', () => {
   it('still rethrows a non-boarding TX_NOT_FOUND (the phantom-boarding match stays narrow)', async () => {
     const deps = depsWithSettle(async () => { throw new Error('TX_NOT_FOUND (19): some other tx') })
     await expect(renewSettle(deps)).rejects.toThrow('TX_NOT_FOUND')
+  })
+})
+
+describe('renewSettle narrows to coins that need renewal (SDK renewVtxos semantics)', () => {
+  /** Healthy coin far outside the 3-day renewal buffer — must stay untouched. */
+  const FAR_COIN = {
+    txid: 'cd'.repeat(32),
+    vout: 0,
+    value: 90_000,
+    virtualStatus: { state: 'settled', batchExpiry: Date.now() + RENEWAL_EXPIRY_BUFFER_MS + 7 * 24 * 3600_000 },
+    status: { confirmed: false },
+    createdAt: new Date(),
+  }
+  /** Swept-but-spendable coin — the recovery case (arkd rejects a normal
+   *  offchain spend with VTXO_RECOVERABLE; only a settle reclaims it). */
+  const SWEPT_COIN = {
+    txid: 'ef'.repeat(32),
+    vout: 1,
+    value: 25_000,
+    virtualStatus: { state: 'swept', batchExpiry: Date.now() - 3600_000 },
+    status: { confirmed: false },
+    createdAt: new Date(),
+  }
+
+  function depsWithVtxos(vtxos: any[], settleCalls: any[][]) {
+    return {
+      wallet: {
+        dustAmount: 330n,
+        arkProvider: { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: -1n }) },
+        getBoardingUtxos: async () => [],
+        getVtxos: async () => vtxos,
+        getAddress: async () => HOUSE_ADDRESS,
+        settle: async (...args: any[]) => { settleCalls.push(args); return 'txid' },
+      },
+    } as any
+  }
+
+  it('leaves a healthy far-from-expiry coin untouched (no whole-pool consolidation)', async () => {
+    const settleCalls: any[][] = []
+    const deps = depsWithVtxos([FAR_COIN, FREE_COIN], settleCalls)
+    await expect(renewSettle(deps)).resolves.toBe(true)
+    // Pre-narrowing this was the SDK's settle-all mirror: EVERY free coin —
+    // including FAR_COIN with weeks of life left — was consolidated into one
+    // output on each renewal, collapsing the piece pool.
+    expect(settleCalls[0][0].inputs.map((v: any) => v.txid)).toEqual([FREE_COIN.txid])
+  })
+
+  it('recovers a swept (recoverable) coin — the swept-fund recovery path', async () => {
+    const settleCalls: any[][] = []
+    const deps = depsWithVtxos([SWEPT_COIN], settleCalls)
+    await expect(renewSettle(deps)).resolves.toBe(true)
+    const params = settleCalls[0][0]
+    expect(params.inputs.map((v: any) => v.txid)).toEqual([SWEPT_COIN.txid])
+    expect(params.outputs[0].amount).toBe(25_000n) // zero-fee mock: full value re-minted
+  })
+
+  it('is a graceful no-op when everything is healthy (nothing inside the buffer)', async () => {
+    const settleCalls: any[][] = []
+    const deps = depsWithVtxos([FAR_COIN], settleCalls)
+    await expect(renewSettle(deps)).resolves.toBe(false)
+    expect(settleCalls).toHaveLength(0)
+  })
+
+  it('admin settle-all semantics are preserved: no filter gathers every free coin', async () => {
+    // The admin /api/wallet/settle route calls the builder with no opts — the
+    // narrowing must be strictly opt-in.
+    const deps = depsWithVtxos([FAR_COIN, FREE_COIN], [])
+    const params = await buildReservationSafeSettleParams(deps)
+    expect(params.inputs.map((v: any) => v.txid).sort()).toEqual([FAR_COIN.txid, FREE_COIN.txid].sort())
+  })
+})
+
+describe('renewSettle pins its inputs against a concurrent /play reservation', () => {
+  const freeKey = () => outpointKey(FREE_COIN.txid, FREE_COIN.vout)
+
+  it('reserves the chosen inputs for the duration of the settle and releases after', async () => {
+    let reservedDuringSettle: boolean | null = null
+    const deps = {
+      wallet: {
+        dustAmount: 330n,
+        arkProvider: { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: -1n }) },
+        getBoardingUtxos: async () => [],
+        getVtxos: async () => [FREE_COIN],
+        getAddress: async () => HOUSE_ADDRESS,
+        settle: async () => {
+          // Mid-settle, /play must see the input as reserved (freeHouseVtxos
+          // excludes reserved outpoints) so it can't bake a coin this settle
+          // is about to spend into a live game.
+          reservedDuringSettle = reservations.isReserved(freeKey())
+          return 'txid'
+        },
+      },
+    } as any
+    await expect(renewSettle(deps)).resolves.toBe(true)
+    expect(reservedDuringSettle).toBe(true)
+    expect(reservations.isReserved(freeKey())).toBe(false) // released in finally
+  })
+
+  it('releases the pin even when the settle throws', async () => {
+    const deps = {
+      wallet: {
+        dustAmount: 330n,
+        arkProvider: { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: -1n }) },
+        getBoardingUtxos: async () => [],
+        getVtxos: async () => [FREE_COIN],
+        getAddress: async () => HOUSE_ADDRESS,
+        settle: async () => { throw new Error('BatchFailed: round died') },
+      },
+    } as any
+    await expect(renewSettle(deps)).rejects.toThrow('round died')
+    expect(reservations.isReserved(freeKey())).toBe(false)
+  })
+
+  it('skips (false, no settle) when a /play reservation lands mid-build', async () => {
+    // The builder snapshots the ledger BEFORE fetching VTXOs; simulate a /play
+    // racing in during the fetch. The sync pin-check under selectionMutex must
+    // catch it and skip — pre-fix the settle would spend the game's coin (the
+    // P0 #53 failure through the opposite window).
+    const settleCalls: any[] = []
+    const deps = {
+      wallet: {
+        dustAmount: 330n,
+        arkProvider: { getInfo: async () => ({ fees: { intentFee: {} }, vtxoMaxAmount: -1n }) },
+        getBoardingUtxos: async () => [],
+        getVtxos: async () => {
+          reservations.reserve('race-game', [freeKey()], 80_000)
+          return [FREE_COIN]
+        },
+        getAddress: async () => HOUSE_ADDRESS,
+        settle: async (...args: any[]) => { settleCalls.push(args); return 'txid' },
+      },
+    } as any
+    try {
+      await expect(renewSettle(deps)).resolves.toBe(false)
+      expect(settleCalls).toHaveLength(0)
+    } finally {
+      reservations.release('race-game')
+    }
   })
 })
 

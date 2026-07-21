@@ -81,14 +81,17 @@ export interface BootstrapOptions {
 export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<AppDeps> {
   await initDb()
   const repos = makeRepos(getSqlExecutor())
-  // Keep the SDK's auto-renewal poll-loop OFF (settlementConfig:false). NB: the
-  // installed SDK's `runPeriodicSettle` is now gated (returns early unless VTXOs
-  // are near-expiry or boarding needs confirming) and fee-aware, so the old
-  // "~30s INTENT_INSUFFICIENT_FEE churn" no longer describes it. We still drive
-  // renewal ourselves via the gated `startRenewalTimer` so it stays coupled to
-  // `/play`'s 30-min selection buffer — the SDK's 3-day default vtxoThreshold +
-  // a background loop `/play` can't observe could let it race a not-yet-renewed
-  // VTXO. Callers (tests) may override.
+  // Keep the SDK's auto-renewal poll-loop OFF (settlementConfig:false) — NOT
+  // for the historical fee-churn reason (the installed SDK's runPeriodicSettle
+  // is gated and fee-aware now) but because every SDK self-settle path
+  // (runPeriodicSettle, renewVtxos, the vtxo_received-driven renewal,
+  // recoverVtxos) gathers its own inputs with no exclusion hook — SettleParams
+  // is a bare {inputs, outputs} and SettlementConfig has no input filter — so
+  // an enabled poll-loop could settle a VTXO reserved for a live game's
+  // co-fund (P0 #53, VTXO_ALREADY_SPENT breaking the player's game). The same
+  // work (renewal at the SDK-default 3-day buffer, swept-fund recovery,
+  // boarding confirmation) runs instead through the reservation-aware
+  // `startRenewalTimer`. Callers (tests) may override.
   const { wallet, identity, arkInfo } = await initHouseWallet(repos, {
     settlementConfig: options.walletSettlementConfig ?? false,
   })

@@ -3,6 +3,7 @@ import path from 'path'
 import { isVtxoExpiringSoon } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
 import { houseVtxoCache, reservations, ensureHouseVtxoPool } from '../vtxo-pool.js'
+import { buildReservationSafeSettleParams } from '../game-engine.js'
 import { makeSettlementHandler } from '../settlement-events.js'
 import {
   collapsedTtlRead,
@@ -291,6 +292,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
   // POST /api/wallet/send — move house funds out to an address (Ark or on-chain;
   // sendBitcoin routes by address type). Guards against draining funds reserved
   // for in-flight games unless { force: true } is passed.
+  // NOTE(P0 #53 follow-up): admin send is outpoint-blind (liability-guarded but may pick a reserved coin). Operator-discretion; force bypasses. Deferred — server-side reserved-exclusion tripped 3 distinct regtest failures.
   router.post('/api/wallet/send', async (req: Request, res: Response) => {
     try {
       const { address, force } = req.body
@@ -329,7 +331,12 @@ export function createAdminRoutes(deps: AppDeps): Router {
   // finish in the background rather than hanging the HTTP request.
   router.post('/api/wallet/settle', async (_req: Request, res: Response) => {
     try {
-      const settlePromise = deps.wallet.settle(undefined, makeSettlementHandler('admin'))
+      // Explicit reservation-filtered params (P0 #53): the SDK's no-arg
+      // gathering would pull VTXOs committed to in-flight games. Same math
+      // otherwise; null = nothing eligible → same error the SDK would throw.
+      const params = await buildReservationSafeSettleParams(deps)
+      if (!params) throw new Error('No inputs found')
+      const settlePromise = deps.wallet.settle(params, makeSettlementHandler('admin'))
       // Ensure a late rejection (after we've already responded) can't surface as
       // an unhandled rejection and crash the process.
       settlePromise.catch((e) =>

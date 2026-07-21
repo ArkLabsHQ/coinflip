@@ -1,8 +1,22 @@
-import { isVtxoExpiringSoon, isExpired, isSpendable, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import {
+  ArkAddress,
+  CSVMultisigTapscript,
+  Estimator,
+  hasBoardingTxExpired,
+  isSubdust,
+  isVtxoExpiringSoon,
+  isExpired,
+  isSpendable,
+  type ExtendedCoin,
+  type ExtendedVirtualCoin,
+  type SettleParams,
+} from '@arkade-os/sdk'
+import { hex } from '@scure/base'
 import { makeSettlementHandler } from './settlement-events.js'
 import {
   reservations,
   houseVtxoCache,
+  outpointKey,
 } from './vtxo-pool.js'
 import type { AppDeps } from './deps.js'
 import { makeLogDedup } from './log-dedup.js'
@@ -47,34 +61,132 @@ export function selectableHouseVtxos(
 }
 
 /**
+ * Mirrors the SDK's internal `MAX_VTXOS_PER_SETTLEMENT` cap (not exported):
+ * one settle intent takes at most this many VTXO inputs.
+ */
+const MAX_VTXOS_PER_SETTLEMENT = 50
+
+/**
+ * Build explicit settle params the way the SDK's no-arg `settle()` gathers
+ * them — boarding UTXOs filtered to `status.confirmed && !expired`, VTXOs
+ * (incl. recoverable) by value descending under the per-settlement cap, the
+ * per-input intent fee subtracted from each, and a single self-output for the
+ * net amount — EXCEPT that VTXOs reserved for in-flight games are excluded
+ * (P0 #53). The SDK's blind gathering could pull a coin already committed to a
+ * live game's co-fund, so arkd rejected the game with VTXO_ALREADY_SPENT.
+ * `SettleParams.inputs` is a required explicit list with no exclude-filter, so
+ * the only way to keep reserved coins out of the settle is to build the list
+ * ourselves. Explicit params run the exact same downstream `settle()` code
+ * path as the no-arg form (the SDK's own gathering just assigns `params` and
+ * falls through), so semantics are otherwise identical.
+ *
+ * Always emits exactly one self-output — arkd rejects an intent proof with
+ * empty outputs ("proof does not contain outputs"), and mirrors the SDK's
+ * subdust throw ("Output amount is below dust limit") when the net can't
+ * carry itself.
+ *
+ * Returns null when nothing is eligible once reserved coins are excluded
+ * (the caller treats it like the SDK's "No inputs found").
+ */
+export async function buildReservationSafeSettleParams(deps: AppDeps): Promise<SettleParams | null> {
+  const wallet = deps.wallet
+  const { fees, vtxoMaxAmount } = await wallet.arkProvider.getInfo()
+  const estimator = new Estimator(fees.intentFee)
+  const offchainAddress = await wallet.getAddress()
+  const offchainOutputScript = hex.encode(ArkAddress.decode(offchainAddress).pkScript)
+
+  // Boarding leg — confirmed, unexpired deposits (expired ones belong to the
+  // onchain sweep; including one fails the whole settle). Timelock decode and
+  // chain-tip lookup stay lazy so a wallet with no boarding activity skips the
+  // extra I/O. Boarding UTXOs are onchain and never reserved.
+  let amount = 0
+  const filteredBoardingUtxos: ExtendedCoin[] = []
+  const allBoarding = await wallet.getBoardingUtxos()
+  if (allBoarding.length > 0) {
+    const exitScript = CSVMultisigTapscript.decode(hex.decode(wallet.boardingTapscript.exitScript))
+    const boardingTimelock = exitScript.params.timelock
+    let chainTipHeight: number | undefined
+    if (boardingTimelock.type === 'blocks') {
+      chainTipHeight = (await wallet.onchainProvider.getChainTip()).height
+    }
+    for (const utxo of allBoarding) {
+      if (!utxo.status.confirmed || hasBoardingTxExpired(utxo, boardingTimelock, chainTipHeight)) continue
+      const inputFee = estimator.evalOnchainInput({ amount: BigInt(utxo.value) })
+      if (inputFee.value >= utxo.value) continue
+      filteredBoardingUtxos.push(utxo)
+      amount += utxo.value - inputFee.satoshis
+    }
+  }
+
+  // VTXO leg — the SDK's own gathering minus reserved outpoints.
+  const reserved = reservations.reservedOutpoints()
+  const vtxos = (await wallet.getVtxos({ withRecoverable: true }))
+    .filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
+    .sort((a, b) => b.value - a.value)
+  const filteredVtxos: ExtendedVirtualCoin[] = []
+  for (const vtxo of vtxos) {
+    if (filteredVtxos.length >= MAX_VTXOS_PER_SETTLEMENT) break
+    const inputFee = estimator.evalOffchainInput({
+      amount: BigInt(vtxo.value),
+      type: vtxo.virtualStatus.state === 'swept' ? 'recoverable' : 'vtxo',
+      weight: 0,
+      birth: vtxo.createdAt,
+      expiry: vtxo.virtualStatus.batchExpiry ? new Date(vtxo.virtualStatus.batchExpiry) : undefined,
+    })
+    if (inputFee.satoshis >= vtxo.value) continue
+    const net = vtxo.value - inputFee.satoshis
+    if (vtxoMaxAmount >= 0n) {
+      const projectedAmount = BigInt(amount + net)
+      const projectedOutputFee = estimator.evalOffchainOutput({
+        amount: projectedAmount,
+        script: offchainOutputScript,
+      })
+      if (projectedAmount - BigInt(projectedOutputFee.satoshis) > vtxoMaxAmount) continue
+    }
+    filteredVtxos.push(vtxo)
+    amount += net
+  }
+
+  const inputs: ExtendedCoin[] = [...filteredBoardingUtxos, ...filteredVtxos]
+  if (inputs.length === 0) return null
+
+  const outputFee = estimator.evalOffchainOutput({ amount: BigInt(amount), script: offchainOutputScript })
+  const outputAmount = BigInt(amount) - BigInt(outputFee.satoshis)
+  if (isSubdust(outputAmount, wallet.dustAmount)) {
+    throw new Error('Output amount is below dust limit')
+  }
+  return { inputs, outputs: [{ address: offchainAddress, amount: outputAmount }] }
+}
+
+/**
  * Settle to renew expiring house VTXOs / confirm boarding deposits.
  *
- * Delegates to the SDK's no-arg `settle()`, which already does the right
- * thing: it filters boarding UTXOs to `status.confirmed && !expired`, filters
- * VTXOs (incl. recoverable), subtracts the per-input intent fee from each, and
- * builds a single self-output for the net amount. We must NOT pass an explicit
- * `{ inputs, outputs: [] }` — empty outputs makes arkd reject the intent proof
- * ("proof does not contain outputs"), and hand-rolling the fee + self-output
- * math would duplicate version-specific SDK internals that drift.
+ * Passes EXPLICIT params from `buildReservationSafeSettleParams` — the SDK's
+ * no-arg gathering with VTXOs reserved for in-flight games excluded (P0 #53:
+ * the blind `settle(undefined)` could spend a coin already committed to a live
+ * game's co-fund → VTXO_ALREADY_SPENT breaking the player's game). The params
+ * always carry a single non-empty self-output; an explicit `outputs: []` would
+ * make arkd reject the intent proof ("proof does not contain outputs").
  *
  * Returns true if a settle round ran, false when there's nothing eligible
- * (the SDK throws "No inputs found", which we treat as a graceful no-op so the
- * renewal worker doesn't log it as a failure).
+ * (no free inputs after the reservation filter, or the SDK's "No inputs
+ * found" — both graceful no-ops so the renewal worker doesn't log a failure).
  *
  * NOTE on phantom inputs: if the wallet's persisted DB holds a boarding UTXO
  * that arkd has lost (e.g. a regtest chain reset where the wallet volume
- * outlived the chain), the SDK's `status.confirmed` filter can still include
- * it and the settle fails with TX_NOT_FOUND. That's a stale-wallet condition
- * that a wallet resync/wipe resolves — not something the renewal path can
- * filter around, since the phantom looks confirmed in the wallet's own view.
+ * outlived the chain), the `status.confirmed` filter can still include it and
+ * the settle fails with TX_NOT_FOUND. That's a stale-wallet condition that a
+ * wallet resync/wipe resolves — not something the renewal path can filter
+ * around, since the phantom looks confirmed in the wallet's own view.
  */
 export async function renewSettle(deps: AppDeps, label = 'renewal'): Promise<boolean> {
   try {
-    // First arg stays undefined → SDK does its default input gathering + fee +
-    // self-output math (do NOT pass an explicit empty-outputs set). Second arg
-    // is the batch/round event handler: per-phase visibility for this party's
-    // settle, and a loud BatchFailed line if the round dies mid-flight.
-    await deps.wallet.settle(undefined, makeSettlementHandler(label))
+    const params = await buildReservationSafeSettleParams(deps)
+    if (!params) return false // nothing eligible once reserved coins are excluded
+    // Second arg is the batch/round event handler: per-phase visibility for
+    // this party's settle, and a loud BatchFailed line if the round dies
+    // mid-flight.
+    await deps.wallet.settle(params, makeSettlementHandler(label))
     houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
     return true
   } catch (err) {
@@ -176,16 +288,23 @@ export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.T
       const [balance, all] = await Promise.all([deps.wallet.getBalance(), deps.wallet.getVtxos()])
       renewalLog.clear('renewal') // backend reachable -> reset so a future failure logs fresh
       const { dropped } = selectableHouseVtxos(all) // VTXOs expiring within the buffer
-      if (!shouldRenew(dropped.length, balance.boarding.total)) return
-      console.log(`[renewal] settling: ${dropped.length} expiring VTXO(s), boarding ${balance.boarding.total} sats`)
-      // renewSettle delegates to the SDK's no-arg settle() (proper fee +
-      // self-output math). It returns false only when the SDK finds nothing
-      // eligible ("No inputs found") — treat that as a benign skip.
+      // A reserved VTXO can't be renewed (the settle excludes it — P0 #53), so
+      // it mustn't count toward the gate either: a game's coin nearing the
+      // buffer would otherwise fire a settle that can't touch it every tick.
+      // It gets renewed on the first tick after the reservation is released.
+      const reserved = reservations.reservedOutpoints()
+      const droppedFree = dropped.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
+      if (!shouldRenew(droppedFree.length, balance.boarding.total)) return
+      console.log(`[renewal] settling: ${droppedFree.length} expiring VTXO(s), boarding ${balance.boarding.total} sats`)
+      // renewSettle passes reservation-filtered explicit params through the
+      // SDK's settle (proper fee + self-output math). It returns false only
+      // when nothing is eligible ("No inputs found" / all reserved) — treat
+      // that as a benign skip.
       const settled = await renewSettle(deps)
       if (!settled) {
         console.warn(
-          `[renewal] shouldRenew saw ${dropped.length} expiring + ${balance.boarding.total} boarding sats, ` +
-          `but the SDK found no settle-eligible inputs (fees may exceed tiny VTXOs, or boarding unconfirmed); skipping`,
+          `[renewal] shouldRenew saw ${droppedFree.length} expiring + ${balance.boarding.total} boarding sats, ` +
+          `but found no settle-eligible inputs (fees may exceed tiny VTXOs, or boarding unconfirmed); skipping`,
         )
       }
     } catch (err) {

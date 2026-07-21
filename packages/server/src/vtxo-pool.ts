@@ -23,7 +23,7 @@
 import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
 import type { AppDeps } from './deps.js'
 import { selectableHouseVtxos } from './game-engine.js'
-import { timeoutReject, ARK_SYNC_TIMEOUT_MS } from './async-timeout.js'
+import { timeoutReject, ARK_SYNC_TIMEOUT_MS, ARK_SUBMIT_TIMEOUT_MS } from './async-timeout.js'
 
 /** Worst-case house payout for a game of `tier` sats (full pot to player). */
 export function maxLiabilityForTier(tier: number): number {
@@ -350,7 +350,32 @@ export async function ensureHouseVtxoPool(
   }))
 
   try {
-    await deps.wallet.send(...(recipients as [{ address: string; amount: number }]))
+    // `wallet.send` sizes from `free` above but the SDK picks the ACTUAL
+    // inputs from ALL spendable coins (near-expiry first) — there is no way to
+    // constrain its selection to the free set. So: serialize with /play's
+    // select-and-reserve (reservations are only created under this same
+    // mutex, so none can appear while the send is in flight) and refuse to
+    // split while ANY outpoint reservation is live — otherwise the split could
+    // spend a coin committed to an in-flight game's co-fund (P0 #53,
+    // VTXO_ALREADY_SPENT breaking the player's game). Pinned-outpoint
+    // reservations only span /play → co-fund (seconds to a few minutes), so a
+    // deferred split just catches up on a later tick; liability-only
+    // reservations (no outpoints) don't block. The send is timeout-bounded so
+    // a wedged arkd can't hold the mutex — and /play — hostage.
+    const sent = await selectionMutex.runExclusive(async () => {
+      const reservedNow = reservations.reservedOutpoints()
+      if (reservedNow.size > 0) {
+        console.log(`[house pool] split deferred — ${reservedNow.size} outpoint(s) reserved by in-flight games`)
+        return false
+      }
+      await timeoutReject(
+        deps.wallet.send(...(recipients as [{ address: string; amount: number }])),
+        ARK_SUBMIT_TIMEOUT_MS,
+        'house pool split send',
+      )
+      return true
+    })
+    if (!sent) return 0
     // The split spent + created house VTXOs; drop the stale snapshot so the
     // next access re-syncs and sees the new pieces.
     houseVtxoCache.invalidate()
@@ -359,6 +384,9 @@ export async function ensureHouseVtxoPool(
     return piecesToCreate
   } catch (err) {
     console.warn('[house pool] split failed:', err instanceof Error ? err.message : err)
+    // A timed-out send may still complete in the background — drop the
+    // snapshot so the next access re-syncs rather than re-serving spent coins.
+    houseVtxoCache.invalidate()
     return 0
   }
 }

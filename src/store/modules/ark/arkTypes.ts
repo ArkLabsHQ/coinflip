@@ -8,6 +8,7 @@
  * paths (`@/store/modules/ark/ark`) are unchanged.
  */
 import type { Outpoint } from '@/services/api'
+import type { WalletBalance, Activity } from '@arkade-os/sdk'
 
 /**
  * Stalled-bet refunds. When the player escrows a stake we immediately fetch the
@@ -111,3 +112,30 @@ export interface BoardingUtxo {
 export type ClaimKind = 'forfeit' | 'refund'
 export type ClaimMode = 'manual' | 'auto'
 export interface ClaimingInfo { kind: ClaimKind; mode: ClaimMode }
+
+/**
+ * The ark module's reactive Vuex state. Declared here (not in `ark.ts`) so the
+ * `walletRuntime.ts` action implementations can type the ActionContext the
+ * `ark.ts` wrappers pass them without importing the store shell.
+ */
+export interface ArkState {
+  server: string
+  esplora: string
+  networkPreset: string
+  status: 'disconnected' | 'connecting' | 'connected' | 'error'
+  lastError: Error | null
+  info: ArkServerInfo | null
+  vtxos: ArkVTXO[]
+  boardingUtxos: BoardingUtxo[]
+  walletBalance: WalletBalance | null
+  arkAddress: string | null
+  boardingAddress: string | null
+  /** Grouped activity view from the SDK's `wallet.getActivityHistory()` — a
+   *  game's co-fund + settle collapse into one "Dice game" row via the resolver
+   *  registered at connect (see `gameActivityResolver`). */
+  activityHistory: Activity[]
+  /** Load state for the Activity tab, so a failed/slow getActivityHistory reads
+   *  as an error the user can retry — not as a genuinely empty "No activity yet". */
+  activityStatus: 'idle' | 'loading' | 'ready' | 'error'
+  claimingGames: Record<string, ClaimingInfo>
+}

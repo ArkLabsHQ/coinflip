@@ -253,6 +253,14 @@
       <div class="value games" id="boardingBalance">—</div>
     </div>
     <div class="stat-card">
+      <div class="label">Recoverable (swept)</div>
+      <div class="value balance" id="recoverableBalance">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Pending Recovery</div>
+      <div class="value games" id="pendingRecovery">—</div>
+    </div>
+    <div class="stat-card">
       <div class="label">Games Today</div>
       <div class="value games" id="gamesToday">—</div>
     </div>
@@ -496,6 +504,14 @@
     document.getElementById('balance').textContent = fmt(bal.available) + ' sats';
     document.getElementById('balanceDetail').textContent = fmt(bal.settled) + ' / ' + fmt(bal.preconfirmed);
     document.getElementById('boardingBalance').textContent = fmt(bal.boarding.total) + ' sats';
+    // A swept VTXO is still RECOVERABLE while unspent — reclaim it by settling
+    // it back in a batch. Rendering it (highlighted when non-zero) so an expiry
+    // can never look like a plain zero balance with nothing to act on.
+    const recoverable = bal.recoverable || 0;
+    const recEl = document.getElementById('recoverableBalance');
+    recEl.textContent = fmt(recoverable) + ' sats';
+    recEl.className = 'value ' + (recoverable > 0 ? 'negative' : 'balance');
+    document.getElementById('pendingRecovery').textContent = fmt(bal.pendingRecovery || 0) + ' sats';
     document.getElementById('gamesToday').textContent = data.gamesToday;
     const profitEl = document.getElementById('profit24h');
     profitEl.textContent = (data.profit24h >= 0 ? '+' : '') + fmt(data.profit24h) + ' sats';

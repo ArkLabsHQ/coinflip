@@ -328,10 +328,24 @@ export async function migrateDeprecatedSigners(
     const vm = await deps.wallet.getVtxoManager()
     const report = await vm.migrateDeprecatedSignerVtxos()
     const legErr = report.vtxos?.error || report.boarding?.error
+    // Aggregate the PER-SIGNER recovery numbers. Logging only `signers.length`
+    // hid exactly the case that matters: VTXOs stranded under a ROTATED signer
+    // live on a different script, so they never appear in the wallet's balance
+    // or in `getRecoverableBalance()` — a bare "deprecated-signers=1" told an
+    // operator nothing about whether value was sitting there. `recoverable*`
+    // drains on the next recovery pass; `awaitingSweep*` is wait-only.
+    const sum = (pick: (s: (typeof report.signers)[number]) => number | undefined): number =>
+      report.signers.reduce((acc, s) => acc + (pick(s) ?? 0), 0)
+    const recoverableValue = sum((s) => s.recoverableValue)
+    const recoverableCount = sum((s) => s.recoverableCount)
+    const awaitingSweepValue = sum((s) => s.awaitingSweepValue)
+    const awaitingSweepCount = sum((s) => s.awaitingSweepCount)
     if (report.rotated || report.expired.length > 0 || report.signers.length > 0 || legErr) {
       console.log(
         `[renewal] deprecated-signer migration: rotated=${report.rotated}, ` +
-        `expired/awaiting-sweep=${report.expired.length}, deprecated-signers=${report.signers.length}` +
+        `expired/awaiting-sweep=${report.expired.length}, deprecated-signers=${report.signers.length}, ` +
+        `recoverable=${recoverableValue} sat(s)/${recoverableCount} vtxo(s), ` +
+        `awaiting-sweep=${awaitingSweepValue} sat(s)/${awaitingSweepCount} vtxo(s)` +
         (legErr ? ` (leg error: ${legErr})` : ''),
       )
     }

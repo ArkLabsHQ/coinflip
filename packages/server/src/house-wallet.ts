@@ -30,10 +30,11 @@ export interface HouseWalletBundle {
 export interface InitHouseWalletOptions {
   /**
    * Settlement configuration forwarded to `Wallet.create`. Set to `false` to
-   * disable the wallet's auto-renewal poll-loop. Production keeps it off and
-   * drives renewal via the gated `startRenewalTimer` (so renewal stays coupled
-   * to `/play`'s selection buffer; see index.ts), and tests pass `false` to keep
-   * a background ticker from firing during regtest.
+   * disable the wallet's auto-renewal poll-loop. Production keeps it off
+   * because the SDK's self-settle paths are reservation-blind (see
+   * bootstrapDeps in index.ts) and drives renewal/recovery via the
+   * reservation-aware `startRenewalTimer`; tests pass `false` to keep a
+   * background ticker from firing during regtest.
    */
   settlementConfig?: false | object
 }

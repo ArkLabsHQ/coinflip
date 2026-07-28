@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express'
 import { betRails } from 'arkade-coinflip'
 import type { AppDeps } from './deps.js'
 import { loadEmulatorConfig } from './emulator.js'
-import { newGameProtocolVersion, computeGameRoll, type V4State } from './trustless-game-v4.js'
+import { newGameProtocolVersion, computeGameRoll, getMaxBetFractionBps, type V4State } from './trustless-game-v4.js'
 import { issueChallenge, verifyChallenge } from './restore-auth.js'
 import { RateLimiter } from './rate-limit.js'
 import { freeStakeTotal, houseVtxoCache } from './vtxo-pool.js'
@@ -104,7 +104,11 @@ export function createPublicRoutes(deps: AppDeps): Router {
       const rakeValue = parseInt((await deps.repos.config.get('rake_value')) || '2', 10)
 
       const dust = Number(deps.arkInfo.dust ?? 546n)
-      const maxBetFractionBps = parseInt((await deps.repos.config.get('max_bet_fraction_bps')) || '2500', 10)
+      // Same clamped parse /play enforces against (fail CLOSED on a malformed
+      // config row) — a bare re-parse here could advertise a NaN/out-of-range
+      // fraction while /play uses the clamped one, the same drift class this
+      // task exists to kill, one level up.
+      const maxBetFractionBps = await getMaxBetFractionBps(deps)
       // Reservation-aware on purpose: `available` counts coins already pinned to
       // in-flight games, so sizing the slider off it would offer bets that /play
       // then rejects with BetExceedsCapacityError. Uses the SAME freeStakeTotal

@@ -17,7 +17,7 @@
  *   - ./v4/types, ./v4/concurrency, ./v4/shared — data shapes + shared primitives.
  */
 
-export { computeGameRoll, newGameProtocolVersion, handleV4Play } from './v4/play.js'
+export { computeGameRoll, newGameProtocolVersion, handleV4Play, getMaxBetFractionBps } from './v4/play.js'
 export { handleV4Cofund, handleV4CofundFinalize } from './v4/cofund.js'
 export { handleV4Reveal, handleV4CooperativeExit } from './v4/reveal.js'
 export {

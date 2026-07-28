@@ -71,7 +71,7 @@ async function getTiers(deps: AppDeps): Promise<number[]> {
 async function getOddsEdgeBps(deps: AppDeps): Promise<number> {
   return parseInt((await deps.repos.config.get('variable_odds_edge_bps')) || '300', 10)
 }
-async function getMaxBetFractionBps(deps: AppDeps): Promise<number> {
+export async function getMaxBetFractionBps(deps: AppDeps): Promise<number> {
   const n = parseInt((await deps.repos.config.get('max_bet_fraction_bps')) || '2500', 10)
   // Fail CLOSED on a malformed config row: a NaN/out-of-range fraction must not
   // silently disable the cap (houseStake > NaN is false — the exact fail-open

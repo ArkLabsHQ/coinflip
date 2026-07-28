@@ -65,12 +65,30 @@ export interface AmountBounds {
  *   floor(A*K/D) <= capacity  <=>  A*K <= (capacity+1)*D - 1
  * The max uses that exact form rather than floor(capacity*D/K), which can fall
  * a sat short of the true ceiling and hide the largest playable bet.
+ *
+ * `topUpHeadroom` reserves that many sats at the CAPACITY ceiling, for callers
+ * whose displayed amount is not the amount the cap is finally applied to. The
+ * player's wallet folds a sub-dust change (≤ dust) into its stake AFTER the bet
+ * is chosen, and /play caps on `tier + stakeTopUp` — so a client bounding on the
+ * bare amount offers a maximum the server intermittently rejects, and at long
+ * odds the house-stake overshoot is ~K/D per top-up sat (≈96× on a 1%-win rung),
+ * so the rejection is nowhere near marginal. A ≤ max ⟹ A + headroom ≤ trueMax,
+ * so this is exact, not an estimate. Only the capacity term is reserved: the
+ * rails are checked server-side against the bare amount, which never grows.
  */
 export function amountBoundsForOdds(
   odds: OddsRange,
-  opts: { edgeBps: number; dust: number; capacity: number; railMin: number; railMax: number },
+  opts: {
+    edgeBps: number
+    dust: number
+    capacity: number
+    railMin: number
+    railMax: number
+    topUpHeadroom?: number
+  },
 ): AmountBounds {
   const { edgeBps, dust, capacity, railMin, railMax } = opts
+  const topUpHeadroom = opts.topUpHeadroom ?? 0
   const win = odds.target - odds.lo
   const K = (odds.n - win) * (10000 - edgeBps)
   const D = win * 10000
@@ -78,7 +96,10 @@ export function amountBoundsForOdds(
   // amount can ever produce a dust-clearing house stake.
   if (K <= 0 || D <= 0) return { min: railMin, max: railMax, feasible: false }
   const min = Math.max(railMin, Math.ceil((dust * D) / K))
-  const max = Math.min(railMax, Math.floor(((capacity + 1) * D - 1) / K))
+  const max = Math.min(railMax, Math.floor(((capacity + 1) * D - 1) / K) - topUpHeadroom)
+  // A headroom that eats the whole window makes this rung genuinely unplayable —
+  // report it through `feasible` (the existing infeasible path) rather than
+  // handing back an inverted min > max range for a caller to render.
   return { min, max, feasible: min <= max }
 }
 

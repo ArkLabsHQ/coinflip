@@ -68,6 +68,37 @@ describe('amountBoundsForOdds', () => {
     expect(b.feasible).toBe(false)
   })
 
+  it('reserves topUpHeadroom at the capacity ceiling, not at the rails', () => {
+    // The client's displayed amount is not the amount /play caps on: the wallet
+    // folds a sub-dust change (<= dust) into the stake afterwards. Reserving dust
+    // means the WORST-case bet (max + dust) still fits capacity.
+    const b = amountBoundsForOdds(HALF, {
+      edgeBps: EDGE, dust: DUST, capacity: 10_000, railMin: RAIL_MIN, railMax: RAIL_MAX,
+      topUpHeadroom: DUST,
+    })
+    expect(b.max).toBe(10_310 - DUST)
+    expect(computeHouseStake(b.max + DUST, HALF.n, HALF.target, HALF.lo, EDGE)).toBeLessThanOrEqual(10_000)
+    // The rail ceiling is NOT reduced — /play range-checks the bare amount,
+    // which the top-up never grows.
+    const railed = amountBoundsForOdds(HALF, {
+      edgeBps: EDGE, dust: DUST, capacity: 100_000_000, railMin: RAIL_MIN, railMax: RAIL_MAX,
+      topUpHeadroom: DUST,
+    })
+    expect(railed.max).toBe(RAIL_MAX)
+  })
+
+  it('reports a rung the headroom makes unplayable as infeasible, not inverted', () => {
+    // capacity 340 -> unclamped max 351, min 341: a 10-sat window that a 330-sat
+    // headroom eats entirely. That must surface through `feasible` (the path
+    // PlayView already disables the bet on), never as a min > max range.
+    const b = amountBoundsForOdds(HALF, {
+      edgeBps: EDGE, dust: DUST, capacity: 340, railMin: RAIL_MIN, railMax: RAIL_MAX,
+      topUpHeadroom: DUST,
+    })
+    expect(b.min).toBeGreaterThan(b.max)
+    expect(b.feasible).toBe(false)
+  })
+
   it('stays inside Number.MAX_SAFE_INTEGER at a 1 BTC bankroll', () => {
     const b = amountBoundsForOdds(HALF, {
       edgeBps: EDGE, dust: DUST, capacity: 100_000_000, railMin: RAIL_MIN, railMax: 100_000_000,
@@ -124,7 +155,10 @@ describe('slider convergence (amountBoundsForOdds + feasibleOddsWindow)', () => 
     amount: number,
     index: number,
     ladder: { n: number; target: number; lo: number }[],
-    opts: { edgeBps: number; dust: number; capacity: number; railMin: number; railMax: number },
+    opts: {
+      edgeBps: number; dust: number; capacity: number; railMin: number; railMax: number
+      topUpHeadroom?: number
+    },
   ): { amount: number; index: number } {
     const w = feasibleOddsWindow(amount, ladder, opts)
     let i = index
@@ -150,18 +184,26 @@ describe('slider convergence (amountBoundsForOdds + feasibleOddsWindow)', () => 
   const CAPACITIES = [0, 1, 100, 5_000, 10_000, 1_000_000]
   const AMOUNTS = [1, 100, RAIL_MIN, 1000, 10_000, 100_000]
   const START_INDICES = [0, 1]
+  // With a headroom the amount clamp pulls BELOW what feasibleOddsWindow (which
+  // knows nothing about it) admitted, so re-running the index clamp on the new
+  // amount is the step that could ping-pong. It doesn't — the clamped amount is
+  // still inside [dust, capacity] for that step — but the watchers are mutually
+  // triggering in production, so pin it rather than argue it.
+  const TOPUPS = [0, DUST]
 
-  it('clamping the index then the amount is a fixed point after one pass, across a grid of amounts/ladders/capacities', () => {
+  it('clamping the index then the amount is a fixed point after one pass, across a grid of amounts/ladders/capacities/headrooms', () => {
     const base = { edgeBps: EDGE, dust: DUST, railMin: RAIL_MIN, railMax: RAIL_MAX }
     for (const ladder of LADDERS) {
       for (const capacity of CAPACITIES) {
-        const opts = { ...base, capacity }
-        for (const amount of AMOUNTS) {
-          for (const rawIndex of START_INDICES) {
-            const index = Math.min(rawIndex, ladder.length - 1)
-            const once = clampOnce(amount, index, ladder, opts)
-            const twice = clampOnce(once.amount, once.index, ladder, opts)
-            expect(twice).toEqual(once)
+        for (const topUpHeadroom of TOPUPS) {
+          const opts = { ...base, capacity, topUpHeadroom }
+          for (const amount of AMOUNTS) {
+            for (const rawIndex of START_INDICES) {
+              const index = Math.min(rawIndex, ladder.length - 1)
+              const once = clampOnce(amount, index, ladder, opts)
+              const twice = clampOnce(once.amount, once.index, ladder, opts)
+              expect(twice).toEqual(once)
+            }
           }
         }
       }

@@ -93,6 +93,12 @@
         <div class="amount-ends">
           <span>{{ tiersLoaded ? amountBounds.min.toLocaleString() : '—' }}</span>
           <span v-if="!tiersLoaded">Loading bet range…</span>
+          <!-- An infeasible rung (min > max, including once the top-up headroom
+               is reserved) is ALWAYS a house-side reason — no amount at this win
+               chance produces a stake in [dust, capacity] — so it must not read
+               as a wallet problem. Checked before canAffordRung, which folds
+               both reasons into one flag. -->
+          <span v-else-if="!amountBounds.feasible" class="amount-warn">House can't cover a bet at this win chance</span>
           <span v-else-if="!canAffordRung" class="amount-warn">Your balance is too low for this bet</span>
           <span v-else-if="!canBet" class="amount-warn">House has no capacity right now</span>
           <span v-else-if="balanceCapped" class="amount-warn">Capped by your wallet balance</span>
@@ -310,6 +316,13 @@ export default defineComponent({
       amountBoundsForOdds(selectedBet.value, {
         edgeBps: oddsEdgeBps.value, dust: dust.value, capacity: capacity.value,
         railMin: betMin.value, railMax: betMax.value,
+        // The bet the SERVER caps on is `tier + stakeTopUp`, not the slider's
+        // value: placeTrustlessBet folds a sub-dust wallet change (≤ dust) into
+        // the stake after the amount is already fixed. Bounding on the amount
+        // alone 400s the player at the slider's own maximum whenever that fold
+        // fires — intermittently, since it depends on their live coin shape.
+        // Reserving dust here costs ≤ dust of top-end range and cannot 400.
+        topUpHeadroom: dust.value,
       }),
     )
     const safeStep = computed(() => Math.min(Math.max(sliderIndex.value, minStep.value), maxStep.value))

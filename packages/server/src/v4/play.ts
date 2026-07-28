@@ -17,7 +17,7 @@ import {
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
 import { hashSecret, networkHrpFromArkInfo } from '../house-wallet.js'
-import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyError, BetExceedsCapacityError } from '../vtxo-pool.js'
+import { reservations, selectionMutex, outpointKey, houseVtxoCache, freeStakeTotal, HouseBusyError, BetExceedsCapacityError } from '../vtxo-pool.js'
 import { loadEmulatorConfig } from '../emulator.js'
 import { computeHouseStake } from '../house-economics.js'
 import type { AppDeps } from '../deps.js'
@@ -210,9 +210,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     // advisory, so this is the only thing stopping a crafted request from
     // committing the whole bankroll to one game. capacity <= freeTotal always
     // (the fraction is <= 100%), so this subsumes the old coverage check.
-    const freeTotal = vtxos
-      .filter((v) => settledOrPre(v) && !reservations.isReserved(outpointKey(v.txid, v.vout)))
-      .reduce((s, v) => s + v.value, 0)
+    const freeTotal = freeStakeTotal(vtxos)
     const capacity = Math.floor((freeTotal * maxBetFractionBps) / 10000)
     if (houseStake > capacity) {
       throw new BetExceedsCapacityError(

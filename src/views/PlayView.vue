@@ -93,9 +93,10 @@
         <div class="amount-ends">
           <span>{{ tiersLoaded ? amountBounds.min.toLocaleString() : '—' }}</span>
           <span v-if="!tiersLoaded">Loading bet range…</span>
+          <span v-else-if="!canAffordRung" class="amount-warn">Your balance is too low for this bet</span>
           <span v-else-if="!canBet" class="amount-warn">House has no capacity right now</span>
           <span v-else-if="balanceCapped" class="amount-warn">Capped by your wallet balance</span>
-          <span>{{ tiersLoaded ? usableMax.toLocaleString() : '—' }}</span>
+          <span>{{ tiersLoaded && canAffordRung ? usableMax.toLocaleString() : '—' }}</span>
         </div>
       </div>
 
@@ -304,7 +305,7 @@ export default defineComponent({
     )
     const minStep = computed(() => oddsWindow.value?.loIndex ?? 0)
     const maxStep = computed(() => oddsWindow.value?.hiIndex ?? currentSkinLadder.value.length - 1)
-    const canBet = computed(() => oddsWindow.value !== null && capacity.value >= dust.value)
+    const canBet = computed(() => oddsWindow.value !== null && capacity.value >= dust.value && canAffordRung.value)
     const amountBounds = computed(() =>
       amountBoundsForOdds(selectedBet.value, {
         edgeBps: oddsEdgeBps.value, dust: dust.value, capacity: capacity.value,
@@ -490,6 +491,13 @@ export default defineComponent({
     // capping the top of the slider — the UI has to say so rather than
     // silently showing a lower ceiling than amountBounds implies.
     const balanceCapped = computed(() => playerBalance.value < amountBounds.value.max)
+    // True only when there EXISTS a valid amount this wallet could bet at the
+    // current rung — house-feasible AND the balance reaches at least the
+    // dust-clearing minimum. False here is a DIFFERENT reason than the house
+    // having no capacity: the house could cover this rung, the wallet can't.
+    // canBet folds this in so the FLIP button can never stay enabled on a bet
+    // the wallet cannot fund.
+    const canAffordRung = computed(() => amountBounds.value.feasible && playerBalance.value >= amountBounds.value.min)
     // Only a valid bet is required now — the side defaults to 'random', so a
     // fresh player can flip immediately after load.
     const canFlip = computed(() => !isFlipping.value && canBet.value)
@@ -595,6 +603,15 @@ export default defineComponent({
         // reveals, and (on a win) sweeps the pot — all on-Ark. Keep animating
         // for at least MIN_FLIP_MS so a fast resolution still reads as a flip.
         const bet = overrideBet ?? selectedBet.value
+        // Defense-in-depth balance guard, same "universal choke point"
+        // reasoning as the dust guard below. canBet already reflects this
+        // (via canAffordRung), but runAuto() doesn't re-check canFlip between
+        // iterations — this is what actually stops an auto-batch from
+        // attempting a bet the wallet can no longer cover once the balance
+        // has moved mid-run.
+        if (betAmount.value > playerBalance.value) {
+          throw new Error(`Your balance can't cover a ${betAmount.value.toLocaleString()}-sat bet.`)
+        }
         // Defense-in-depth dust guard. The odds slider already clamps coin /
         // roulette bets to a dust-safe house stake, and the Rocket skin gates its
         // cash-out the same way — but a gesture skin's overrideBet is the one path
@@ -748,18 +765,26 @@ export default defineComponent({
     // Also re-clamps when the wallet balance itself moves (e.g. it drops after
     // a bet resolves) — otherwise a stale betAmount above the new balance
     // would sit unnoticed until the next slider/capacity change.
+    //
+    // A single clamp over [b.min, usableMax], NOT two independent branches —
+    // two branches each checking against a different bound (b.min vs b.max)
+    // let the low branch push betAmount UP past usableMax whenever the
+    // wallet balance sits below this rung's dust-clearing minimum, silently
+    // overwriting the balance ceiling. canAffordRung guards the case where
+    // that range is empty (nothing to clamp into): leave betAmount alone —
+    // canBet/flipOnce refuse the bet instead of the slider showing a
+    // fabricated amount.
     watch([sliderIndex, capacity, playerBalance], () => {
+      if (!canAffordRung.value) return
       const b = amountBounds.value
-      if (!b.feasible) return
-      if (betAmount.value < b.min) betAmount.value = b.min
-      else if (betAmount.value > usableMax.value) betAmount.value = usableMax.value
+      betAmount.value = Math.min(Math.max(betAmount.value, b.min), usableMax.value)
     })
 
     return {
       // Game config
       tiers, maxAvailable, houseReady, tiersLoaded,
       // Amount slider
-      betAmount, amountBounds, usableMax, balanceCapped, canBet,
+      betAmount, amountBounds, usableMax, balanceCapped, canAffordRung, canBet,
       // Odds slider
       sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctLabel, payoutMult,
       // Lifecycle

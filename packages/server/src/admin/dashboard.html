@@ -493,7 +493,8 @@
       tiers: currentTiers,
       minHouseBalance: parseInt(document.getElementById('minBalance').value) || 0,
       oddsEdgeBps: parseInt(document.getElementById('oddsEdgeBps').value) || 0,
-      maxBetFractionBps: parseInt(document.getElementById('maxBetFractionBps').value) || 0,
+      // Floor is 1 bps, not 0; || 0 would post invalid value and silently fail server validation.
+      maxBetFractionBps: parseInt(document.getElementById('maxBetFractionBps').value) || 2500,
     };
     await fetch('/api/config', {
       method: 'POST',

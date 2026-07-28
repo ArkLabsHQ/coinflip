@@ -789,4 +789,38 @@ describe('v4 server: handleV4Play', () => {
     expect(paid).toBe(true)
     console.log('[v4-stage2-poll] server settled contested game to', outcome)
   }, 300_000)
+
+  it('accepts an off-tier bet amount and rejects one above the rail maximum', async () => {
+    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+
+    // Player identity + addresses (no funding needed for /play — same as the
+    // covenant-params test above).
+    const playerId = SingleKey.fromRandomBytes()
+    const playerW = await Wallet.create({
+      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+      settlementConfig: false,
+    })
+    const playerPubkey = hex.encode(toXOnly(await playerId.compressedPublicKey()))
+    const playerHash = createHash('sha256').update(packets.encodeReveal(0, crypto.getRandomValues(new Uint8Array(16)))).digest('hex')
+    const addr = await playerW.getAddress()
+
+    // 1337 is not a configured tier (default tiers are [1000,5000,10000,50000])
+    // — the tier whitelist is gone, so the range check must accept any integer
+    // amount in [railMin, railMax], not just the old whitelisted values.
+    const ok = await server.handleV4Play({
+      tier: 1337, playerPubkey, playerHash,
+      playerPayoutAddress: addr, playerChangeAddress: addr,
+    }, deps)
+    expect(ok.gameId).toBeTruthy()
+
+    // Above railMax -> rejected as an invalid amount before selection ever
+    // runs, so no house coin is touched.
+    await expect(
+      server.handleV4Play({
+        tier: 10_000_000, playerPubkey, playerHash,
+        playerPayoutAddress: addr, playerChangeAddress: addr,
+      }, deps),
+    ).rejects.toThrow(/Invalid bet amount/)
+  }, 60_000)
 })

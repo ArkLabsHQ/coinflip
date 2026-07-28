@@ -84,16 +84,18 @@
           class="amount-range"
           type="range"
           :min="amountBounds.min"
-          :max="amountBounds.max"
-          :step="amountStep"
+          :max="usableMax"
+          step="1"
           v-model.number="betAmount"
           :disabled="isAutoRunning || !canBet"
           aria-label="Bet amount"
         />
         <div class="amount-ends">
-          <span>{{ amountBounds.min.toLocaleString() }}</span>
-          <span v-if="!canBet" class="amount-warn">House has no capacity right now</span>
-          <span>{{ amountBounds.max.toLocaleString() }}</span>
+          <span>{{ tiersLoaded ? amountBounds.min.toLocaleString() : '—' }}</span>
+          <span v-if="!tiersLoaded">Loading bet range…</span>
+          <span v-else-if="!canBet" class="amount-warn">House has no capacity right now</span>
+          <span v-else-if="balanceCapped" class="amount-warn">Capped by your wallet balance</span>
+          <span>{{ tiersLoaded ? usableMax.toLocaleString() : '—' }}</span>
         </div>
       </div>
 
@@ -258,6 +260,11 @@ export default defineComponent({
     const rakeType = ref<'percentage' | 'flat'>('percentage')
     const rakeValue = ref(2)
     const houseReady = ref(false)
+    // Flips true after the first successful /api/tiers response. Before that,
+    // capacity/betMin/betMax are still just defaults, not real bounds — the
+    // template gates on this so the pre-load render is neutral rather than a
+    // false "no capacity" / inverted-range flash.
+    const tiersLoaded = ref(false)
     // Per-bet ceiling published by /api/tiers (reservation-aware). Distinct from
     // houseBankroll, which is the whole spendable balance.
     const capacity = ref(0)
@@ -303,9 +310,6 @@ export default defineComponent({
         edgeBps: oddsEdgeBps.value, dust: dust.value, capacity: capacity.value,
         railMin: betMin.value, railMax: betMax.value,
       }),
-    )
-    const amountStep = computed(() =>
-      Math.max(1, Math.floor((amountBounds.value.max - amountBounds.value.min) / 100)),
     )
     const safeStep = computed(() => Math.min(Math.max(sliderIndex.value, minStep.value), maxStep.value))
     const selectedBet = computed<OddsBet>(() => currentSkinLadder.value[safeStep.value])
@@ -477,6 +481,15 @@ export default defineComponent({
     // connected yet (state.walletBalance === null) so we don't gate the UI
     // on a stale-empty balance during boot.
     const playerBalance = computed(() => store.state.walletBalance?.available ?? Infinity)
+    // The player can never bet more than they hold, even when the house could
+    // cover it. `amountBounds` stays the house-side envelope alone (so it's
+    // still exactly what the server would independently compute); this folds
+    // in the wallet cap for the slider's actual usable ceiling.
+    const usableMax = computed(() => Math.min(amountBounds.value.max, playerBalance.value))
+    // True when the wallet balance, not the house capacity, is what's actually
+    // capping the top of the slider — the UI has to say so rather than
+    // silently showing a lower ceiling than amountBounds implies.
+    const balanceCapped = computed(() => playerBalance.value < amountBounds.value.max)
     // Only a valid bet is required now — the side defaults to 'random', so a
     // fresh player can flip immediately after load.
     const canFlip = computed(() => !isFlipping.value && canBet.value)
@@ -496,6 +509,7 @@ export default defineComponent({
         capacity.value = data.capacity ?? 0
         betMin.value = data.betMin ?? 331
         betMax.value = data.betMax ?? 50_000
+        tiersLoaded.value = true
       } catch (e) {
         console.warn('Failed to load tiers:', e)
       }
@@ -731,18 +745,21 @@ export default defineComponent({
       if (sliderIndex.value < w.loIndex) sliderIndex.value = w.loIndex
       else if (sliderIndex.value > w.hiIndex) sliderIndex.value = w.hiIndex
     })
-    watch([sliderIndex, capacity], () => {
+    // Also re-clamps when the wallet balance itself moves (e.g. it drops after
+    // a bet resolves) — otherwise a stale betAmount above the new balance
+    // would sit unnoticed until the next slider/capacity change.
+    watch([sliderIndex, capacity, playerBalance], () => {
       const b = amountBounds.value
       if (!b.feasible) return
       if (betAmount.value < b.min) betAmount.value = b.min
-      else if (betAmount.value > b.max) betAmount.value = b.max
+      else if (betAmount.value > usableMax.value) betAmount.value = usableMax.value
     })
 
     return {
       // Game config
-      tiers, maxAvailable, houseReady,
+      tiers, maxAvailable, houseReady, tiersLoaded,
       // Amount slider
-      betAmount, amountBounds, amountStep, canBet,
+      betAmount, amountBounds, usableMax, balanceCapped, canBet,
       // Odds slider
       sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctLabel, payoutMult,
       // Lifecycle

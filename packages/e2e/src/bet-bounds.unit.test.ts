@@ -109,3 +109,62 @@ describe('feasibleOddsWindow', () => {
     for (let i = 1; i < stakes.length; i++) expect(stakes[i]).toBeGreaterThan(stakes[i - 1])
   })
 })
+
+describe('slider convergence (amountBoundsForOdds + feasibleOddsWindow)', () => {
+  /**
+   * Mirrors PlayView.vue's two mutual-clamping watchers exactly: clamp the
+   * ladder index into the amount's feasible window, then clamp the amount
+   * into that (possibly new) step's bounds. If the two helpers are genuine
+   * inverses of the same dust<=stake<=capacity predicate, one pass is a
+   * fixed point. Vue's runaway-update guard that would catch a drift here is
+   * DEV-ONLY (absent in production), so this pins the invariant directly
+   * instead of relying on it.
+   */
+  function clampOnce(
+    amount: number,
+    index: number,
+    ladder: { n: number; target: number; lo: number }[],
+    opts: { edgeBps: number; dust: number; capacity: number; railMin: number; railMax: number },
+  ): { amount: number; index: number } {
+    const w = feasibleOddsWindow(amount, ladder, opts)
+    let i = index
+    if (w) {
+      if (i < w.loIndex) i = w.loIndex
+      else if (i > w.hiIndex) i = w.hiIndex
+    }
+    const b = amountBoundsForOdds(ladder[i], opts)
+    let a = amount
+    if (b.feasible) {
+      if (a < b.min) a = b.min
+      else if (a > b.max) a = b.max
+    }
+    return { amount: a, index: i }
+  }
+
+  const SMALL_LADDER = [
+    { n: 6, target: 6, lo: 3 }, // 50%
+    { n: 6, target: 6, lo: 5 }, // ~17%
+  ]
+  const SINGLE_STEP_LADDER = [{ n: 1000, target: 1000, lo: 990 }] // 1%
+  const LADDERS = [LADDER, SMALL_LADDER, SINGLE_STEP_LADDER]
+  const CAPACITIES = [0, 1, 100, 5_000, 10_000, 1_000_000]
+  const AMOUNTS = [1, 100, RAIL_MIN, 1000, 10_000, 100_000]
+  const START_INDICES = [0, 1]
+
+  it('clamping the index then the amount is a fixed point after one pass, across a grid of amounts/ladders/capacities', () => {
+    const base = { edgeBps: EDGE, dust: DUST, railMin: RAIL_MIN, railMax: RAIL_MAX }
+    for (const ladder of LADDERS) {
+      for (const capacity of CAPACITIES) {
+        const opts = { ...base, capacity }
+        for (const amount of AMOUNTS) {
+          for (const rawIndex of START_INDICES) {
+            const index = Math.min(rawIndex, ladder.length - 1)
+            const once = clampOnce(amount, index, ladder, opts)
+            const twice = clampOnce(once.amount, once.index, ladder, opts)
+            expect(twice).toEqual(once)
+          }
+        }
+      }
+    }
+  })
+})

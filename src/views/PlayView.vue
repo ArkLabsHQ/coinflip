@@ -683,6 +683,14 @@ export default defineComponent({
         return false
       } finally {
         isFlipping.value = false
+        // Re-read the envelope after EVERY attempt, settled or rejected. Each
+        // accepted bet reserves house coins, so the capacity /api/tiers
+        // advertised at mount is stale from the first flip onward — an auto
+        // batch would then keep offering a maximum the house can no longer take
+        // and die on a 400 at bet 2. Refreshing on the rejected path too is what
+        // makes that recoverable without a page reload. Fire-and-forget: it
+        // can't reject (loadTiers swallows), and the ~900ms auto pause covers it.
+        loadTiers()
       }
     }
 

@@ -93,6 +93,9 @@ export function createAdminRoutes(deps: AppDeps): Router {
       tiers: JSON.parse(config.tiers || '[1000,5000,10000,50000]'),
       minHouseBalance: parseInt(config.min_house_balance || '100000', 10),
       oddsEdgeBps: parseInt(config.variable_odds_edge_bps || '300', 10),
+      // Fraction of the free house bankroll a single bet may commit, so one
+      // max bet can't pin the whole bankroll and block every other game.
+      maxBetFractionBps: parseInt(config.max_bet_fraction_bps || '2500', 10),
     })
   })
 
@@ -221,7 +224,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
 
   // POST /api/config — update configuration
   router.post('/api/config', async (req: Request, res: Response) => {
-    const { rakeType, rakeValue, tiers, minHouseBalance, oddsEdgeBps } = req.body
+    const { rakeType, rakeValue, tiers, minHouseBalance, oddsEdgeBps, maxBetFractionBps } = req.body
 
     if (rakeType !== undefined) {
       if (rakeType !== 'percentage' && rakeType !== 'flat') {
@@ -268,6 +271,16 @@ export function createAdminRoutes(deps: AppDeps): Router {
       await deps.repos.config.set('variable_odds_edge_bps', String(val))
     }
 
+    if (maxBetFractionBps !== undefined) {
+      const val = parseInt(maxBetFractionBps, 10)
+      // 0 would make every bet impossible; >100% would be meaningless.
+      if (isNaN(val) || val < 1 || val > 10000) {
+        res.status(400).json({ error: 'maxBetFractionBps must be between 1 and 10000 (basis points)' })
+        return
+      }
+      await deps.repos.config.set('max_bet_fraction_bps', String(val))
+    }
+
     const config = await deps.repos.config.all()
     res.json({
       rakeType: config.rake_type,
@@ -275,6 +288,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
       tiers: JSON.parse(config.tiers || '[]'),
       minHouseBalance: parseInt(config.min_house_balance || '100000', 10),
       oddsEdgeBps: parseInt(config.variable_odds_edge_bps || '300', 10),
+      maxBetFractionBps: parseInt(config.max_bet_fraction_bps || '2500', 10),
     })
   })
 

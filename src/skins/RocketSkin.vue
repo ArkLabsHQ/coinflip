@@ -9,7 +9,7 @@
         <path v-if="flightPath" class="flight-trail" :d="flightPath" />
         <!-- Drawn AFTER the trail: this is the player's line and it must stay
              readable where the rocket crosses it, not get painted over. -->
-        <line class="flight-lock" x1="0" :y1="lockedY" x2="100" :y2="lockedY" />
+        <line class="flight-lock" x1="6" :y1="lockedY" x2="94" :y2="lockedY" />
         <circle v-if="!busted" class="flight-head" :cx="headX" :cy="headY" r="1.6" />
         <circle v-if="busted" class="flight-boom" :cx="headX" :cy="headY" r="2.2" />
       </svg>
@@ -218,10 +218,21 @@ export default defineComponent({
     const scaleTop = computed(() =>
       Math.max(2, (crashMult.value ?? lockedMult.value) * 1.25, lockedMult.value * 1.25),
     )
+    // The plot is inset inside the card's 20px border radius. Drawing to the
+    // raw viewBox edges puts the launch point (x≈0, altitude(1)≈bottom) right
+    // in the clipped corner, so the trail visibly starts outside the box.
+    const PAD_X = 9
+    const Y_BOTTOM = 50
+    const Y_TOP = 9
+
     /** Altitude is logarithmic so 1× and 100× are legible on one axis. */
     function altitude(m: number): number {
       const t = Math.log(Math.max(1, m)) / Math.log(scaleTop.value)
-      return 60 - Math.min(1, t) * 56 - 2
+      return Y_BOTTOM - Math.min(1, t) * (Y_BOTTOM - Y_TOP)
+    }
+    /** Horizontal position for flight progress p∈[0,1], inset from both edges. */
+    function abscissa(p: number): number {
+      return PAD_X + p * (100 - 2 * PAD_X)
     }
     const lockedY = computed(() => altitude(lockedMult.value))
     const headX = computed(() => (flightPts.value.length ? flightPts.value[flightPts.value.length - 1][0] : 0))
@@ -232,6 +243,15 @@ export default defineComponent({
     const showFlight = computed(() =>
       props.state.phase === 'resolved' && crashMult.value != null && flightPts.value.length > 0,
     )
+    /**
+     * True while the rocket is still climbing toward its (already-settled) bust
+     * point. Everything that reveals the outcome — the number, the verdict
+     * readout, the win/lose colouring — is suppressed until this goes false.
+     * Printing the result at the START of the flight makes the animation a
+     * replay of an answer you have already read, which is worse than no
+     * animation at all.
+     */
+    const flying = computed(() => showFlight.value && !busted.value)
 
     function runFlight(bust: number) {
       if (flightRaf !== null) cancelAnimationFrame(flightRaf)
@@ -240,16 +260,16 @@ export default defineComponent({
       flightMult.value = 1
       // Duration tracks the outcome, so rounds stop feeling identical: a 1.08×
       // bust is over in ~0.4s (brutal), a 12× climb takes ~4s (agonising).
-      const duration = Math.min(4500, 350 + Math.log(Math.max(1.01, bust)) * 1600)
+      const duration = Math.min(4000, 350 + Math.log(Math.max(1.01, bust)) * 1100)
       const t0 = performance.now()
       const step = (now: number) => {
         const p = Math.min(1, (now - t0) / duration)
         // Ease-in hard: the rocket hugs the floor, then rips. On a log altitude
         // axis a gentle ease still draws a near-straight diagonal — which reads
         // as a progress bar, not a launch. 2.6 gives it a real hockey stick.
-        const eased = Math.pow(p, 2.6)
+        const eased = Math.pow(p, 2.2)
         flightMult.value = Math.pow(bust, eased)
-        flightPts.value.push([p * 100, altitude(flightMult.value)])
+        flightPts.value.push([abscissa(p), altitude(flightMult.value)])
         if (p < 1) { flightRaf = requestAnimationFrame(step); return }
         flightRaf = null
         busted.value = true
@@ -273,7 +293,8 @@ export default defineComponent({
     // Readout (chosen vs. outcome) shows from cash-out through the result —
     // you can't cash out once it's committed, so keep both numbers on screen.
     const showReadout = computed(() =>
-      props.state.phase === 'settling' || props.state.phase === 'flipping' || props.state.phase === 'resolved',
+      props.state.phase === 'settling' || props.state.phase === 'flipping' ||
+      (props.state.phase === 'resolved' && !flying.value),
     )
     const resultText = computed(() => {
       if (props.state.phase === 'settling' || props.state.phase === 'flipping') return 'resolving…'
@@ -294,12 +315,21 @@ export default defineComponent({
     const gaugeClass = computed(() => {
       if (props.state.phase === 'climbing') return 'climbing'
       if (props.state.phase === 'settling' || props.state.phase === 'flipping') return 'settling'
-      if (props.state.phase === 'resolved') return props.state.outcome?.won ? 'won' : 'lost'
+      // Stay neutral while the rocket is still in the air. This one class drives
+      // the card border, the number colour AND the trail stroke, so returning
+      // won/lost here paints the answer on screen before the flight lands.
+      if (props.state.phase === 'resolved') {
+        if (flying.value) return 'climbing'
+        return props.state.outcome?.won ? 'won' : 'lost'
+      }
       return 'idle'
     })
     const gaugeText = computed(() => {
       if (props.state.phase === 'climbing') return `${displayMult.value.toFixed(2)}×`
       if (props.state.phase === 'settling' || props.state.phase === 'flipping') return `${lockedMult.value.toFixed(2)}×`
+      // Mid-flight: the live altitude, ticking up. The player watches this climb
+      // toward their line without knowing where it stops.
+      if (flying.value) return `${flightMult.value.toFixed(2)}×`
       if (props.state.phase === 'resolved' && props.state.outcome) {
         if (props.state.outcome.won) return `${lockedMult.value.toFixed(2)}×`
         // Lost — show the revealed crash point.
@@ -314,6 +344,7 @@ export default defineComponent({
     const gaugeSub = computed(() => {
       if (props.state.phase === 'climbing') return 'HOLDING…'
       if (props.state.phase === 'settling' || props.state.phase === 'flipping') return 'locking in'
+      if (flying.value) return 'IN FLIGHT…'
       if (props.state.phase === 'resolved') return props.state.outcome?.won ? 'cashed out' : 'crashed'
       return 'launch when ready'
     })

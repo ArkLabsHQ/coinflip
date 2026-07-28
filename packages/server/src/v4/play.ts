@@ -72,7 +72,12 @@ async function getOddsEdgeBps(deps: AppDeps): Promise<number> {
   return parseInt((await deps.repos.config.get('variable_odds_edge_bps')) || '300', 10)
 }
 async function getMaxBetFractionBps(deps: AppDeps): Promise<number> {
-  return parseInt((await deps.repos.config.get('max_bet_fraction_bps')) || '2500', 10)
+  const n = parseInt((await deps.repos.config.get('max_bet_fraction_bps')) || '2500', 10)
+  // Fail CLOSED on a malformed config row: a NaN/out-of-range fraction must not
+  // silently disable the cap (houseStake > NaN is false — the exact fail-open
+  // shape that let a batch-expiry sweep drain the house, see v0.10.1). Clamp to
+  // the 2500 default instead of trusting an unvalidated read.
+  return Number.isInteger(n) && n > 0 && n <= 10000 ? n : 2500
 }
 
 const settledOrPre = (v: ExtendedVirtualCoin): boolean =>

@@ -7,8 +7,13 @@
  */
 export {}
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+/* eslint-disable @typescript-eslint/no-require-imports */
+import { hex } from '@scure/base'
+import { ArkAddress } from '@arkade-os/sdk'
+const { schnorr } = require('@noble/curves/secp256k1.js')
 const server = require('arkade-coinflip-server')
+const emulatorModule = require('arkade-coinflip-server/dist/emulator.js')
+const { BetExceedsCapacityError } = require('arkade-coinflip-server/dist/vtxo-pool.js')
 
 const DUST = 330
 
@@ -52,10 +57,126 @@ describe('/play bet amount range', () => {
   })
 
   it('accepts an off-tier amount that the old whitelist would have rejected', async () => {
-    // 1337 was never a configured tier. It must now get past validation and
-    // fail later (no house VTXOs in this mock), NOT fail as an invalid amount.
+    // 1337 was never a configured tier. It must now get past validation and fail
+    // downstream instead — deterministically at the emulator probe, since this
+    // mock's deps have no EMULATOR_URL configured (this test does not touch the
+    // emulator stub below, which is scoped to the cap describe block only). A
+    // bare `rejects.not.toThrow(/Invalid bet amount/)` would pass for ANY
+    // rejection reason (including a real bug), so assert the specific one.
     await expect(
       server.handleV4Play({ tier: 1337, playerPubkey: PLAYER, playerHash: 'ab' }, makeDeps()),
-    ).rejects.not.toThrow(/Invalid bet amount/)
+    ).rejects.toThrow(/Emulator not configured or unreachable/)
+  })
+})
+
+// ── per-bet exposure cap ─────────────────────────────────────────────────────
+//
+// The cap check runs AFTER the emulator probe and the ArkAddress decodes in
+// handleV4Play, so reaching it needs a fuller fixture than the range tests
+// above: real secp256k1 points (CoinflipJointPotScript taproot-tweaks them),
+// valid Ark addresses (ArkAddress.decode is called unconditionally), and a
+// house VTXO whose forfeit leaf embeds the house's own key (tapLeafHasKey does
+// a raw byte-substring match) so selection can find it co-signable.
+//
+// handleV4Play has no way to inject the emulator config — loadEmulatorConfig
+// is a real network probe cached at module scope (packages/server/src/
+// emulator.ts) — so the built dist module's export is monkey-patched directly
+// for the duration of this describe block (same require-the-built-dist
+// pattern as reservation-safe-selfspend.unit.test.ts) and restored after.
+
+const xonlyOf = (b: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(b))
+
+const HOUSE_XONLY = xonlyOf(0x11)
+const HOUSE_COMPRESSED = new Uint8Array([2, ...HOUSE_XONLY])
+const SERVER_XONLY = xonlyOf(0x22)
+const PLAYER_XONLY = xonlyOf(0x33)
+const EMULATOR_XONLY = xonlyOf(0x44)
+const HOUSE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(0x77), new Uint8Array(32).fill(0x88), 'tark').encode()
+const PLAYER_PAYOUT_ADDRESS = new ArkAddress(new Uint8Array(32).fill(0x55), new Uint8Array(32).fill(0x66), 'tark').encode()
+
+/** A house VTXO whose forfeit leaf embeds HOUSE_XONLY, so `choose()` treats it
+ *  as co-signable. The leaf is never actually spent in this test (handleV4Play
+ *  only reads it via tapLeafHasKey + serializeTapLeaf), so a minimal fake shape
+ *  is enough. */
+function houseCoin(txid: string, vout: number, value: number) {
+  return {
+    txid, vout, value,
+    virtualStatus: { state: 'settled' as const },
+    forfeitTapLeafScript: [
+      { version: 0xc0, internalKey: xonlyOf(0x99), merklePath: [] as Uint8Array[] },
+      new Uint8Array([...HOUSE_XONLY, 0xc0]),
+    ],
+    tapTree: new Uint8Array([0]),
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function capDeps(vtxos: any[], overrides: Record<string, string> = {}) {
+  const config: Record<string, string> = {
+    tiers: '[330,1000,5000,10000,50000]',
+    variable_odds_edge_bps: '300',
+    max_bet_fraction_bps: '2500',
+    ...overrides,
+  }
+  return {
+    arkInfo: { dust: BigInt(DUST), signerPubkey: hex.encode(SERVER_XONLY) },
+    wallet: { getVtxos: async () => vtxos, getAddress: async () => HOUSE_ADDRESS },
+    identity: { compressedPublicKey: async () => HOUSE_COMPRESSED },
+    repos: {
+      config: { get: async (k: string) => config[k], all: async () => config },
+      games: { countPendingForPlayer: async () => 0, save: async () => undefined },
+    },
+  }
+}
+
+function capReq(tier: number) {
+  return {
+    tier,
+    playerPubkey: hex.encode(PLAYER_XONLY),
+    playerHash: hex.encode(new Uint8Array(32).fill(0xee)),
+    playerPayoutAddress: PLAYER_PAYOUT_ADDRESS,
+    playerChangeAddress: PLAYER_PAYOUT_ADDRESS,
+  }
+}
+
+describe('/play per-bet exposure cap', () => {
+  let originalLoadEmulatorConfig: typeof emulatorModule.loadEmulatorConfig
+
+  beforeAll(() => {
+    originalLoadEmulatorConfig = emulatorModule.loadEmulatorConfig
+    emulatorModule.loadEmulatorConfig = async () => ({
+      url: 'http://emulator.test',
+      publicUrl: 'http://emulator.test',
+      signerPubkeyHex: hex.encode(EMULATOR_XONLY),
+      signerPubkey: EMULATOR_XONLY,
+      version: 'test-stub',
+    })
+  })
+
+  afterAll(() => {
+    emulatorModule.loadEmulatorConfig = originalLoadEmulatorConfig
+  })
+
+  it('REJECTS a bet whose house stake exceeds the per-bet cap', async () => {
+    // freeTotal = 4000, cap = floor(4000 * 2500 / 10000) = 1000; tier 1337 (a
+    // valid rail amount) needs a 1337-sat house stake, which exceeds the cap.
+    const vtxos = [houseCoin('aa'.repeat(32), 0, 4000)]
+    let err: unknown
+    try {
+      await server.handleV4Play(capReq(1337), capDeps(vtxos))
+    } catch (e) {
+      err = e
+    }
+    expect(err).toBeInstanceOf(BetExceedsCapacityError)
+    expect(String(err)).toMatch(/per-bet cap is 1000 sat/)
+  })
+
+  it('ACCEPTS a bet whose house stake is within the per-bet cap', async () => {
+    // freeTotal = 40000, cap = floor(40000 * 2500 / 10000) = 10000; tier 1000
+    // needs only a 1000-sat house stake, well within the cap — the request
+    // must clear the cap check and resolve with the expected house stake.
+    const vtxos = [houseCoin('bb'.repeat(32), 0, 40000)]
+    const result = await server.handleV4Play(capReq(1000), capDeps(vtxos))
+    expect(result.houseStake).toBe(1000)
   })
 })

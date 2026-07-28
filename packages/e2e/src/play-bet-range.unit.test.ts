@@ -17,6 +17,9 @@ const { BetExceedsCapacityError } = require('arkade-coinflip-server/dist/vtxo-po
 
 const DUST = 330
 
+/** Bare mock for the pure range-check tests below: they all throw during tier
+ *  validation, before handleV4Play ever touches the emulator, identity, or
+ *  wallet — so this incomplete shape is fine, and deliberately stays minimal. */
 function makeDeps(overrides: Record<string, string> = {}) {
   const config: Record<string, string> = {
     tiers: '[330,1000,5000,10000,50000]',
@@ -37,53 +40,15 @@ function makeDeps(overrides: Record<string, string> = {}) {
 
 const PLAYER = '02'.padEnd(66, 'a')
 
-describe('/play bet amount range', () => {
-  it('rejects a bet below railMin (dust + 1)', async () => {
-    await expect(
-      server.handleV4Play({ tier: DUST, playerPubkey: PLAYER, playerHash: 'ab' }, makeDeps()),
-    ).rejects.toThrow(/Invalid bet amount/)
-  })
-
-  it('rejects a bet above railMax', async () => {
-    await expect(
-      server.handleV4Play({ tier: 50_001, playerPubkey: PLAYER, playerHash: 'ab' }, makeDeps()),
-    ).rejects.toThrow(/Invalid bet amount/)
-  })
-
-  it('rejects a non-integer bet', async () => {
-    await expect(
-      server.handleV4Play({ tier: 1000.5, playerPubkey: PLAYER, playerHash: 'ab' }, makeDeps()),
-    ).rejects.toThrow(/Invalid bet amount/)
-  })
-
-  it('accepts an off-tier amount that the old whitelist would have rejected', async () => {
-    // 1337 was never a configured tier. It must now get past validation and fail
-    // downstream instead — deterministically at the emulator probe, since this
-    // mock's deps have no EMULATOR_URL configured (this test does not touch the
-    // emulator stub below, which is scoped to the cap describe block only). A
-    // bare `rejects.not.toThrow(/Invalid bet amount/)` would pass for ANY
-    // rejection reason (including a real bug), so assert the specific one.
-    await expect(
-      server.handleV4Play({ tier: 1337, playerPubkey: PLAYER, playerHash: 'ab' }, makeDeps()),
-    ).rejects.toThrow(/Emulator not configured or unreachable/)
-  })
-})
-
-// ── per-bet exposure cap ─────────────────────────────────────────────────────
+// ── full fixture: real keys + addresses, for any test that must clear validation ──
 //
-// The cap check runs AFTER the emulator probe and the ArkAddress decodes in
-// handleV4Play, so reaching it needs a fuller fixture than the range tests
-// above: real secp256k1 points (CoinflipJointPotScript taproot-tweaks them),
-// valid Ark addresses (ArkAddress.decode is called unconditionally), and a
-// house VTXO whose forfeit leaf embeds the house's own key (tapLeafHasKey does
-// a raw byte-substring match) so selection can find it co-signable.
-//
-// handleV4Play has no way to inject the emulator config — loadEmulatorConfig
-// is a real network probe cached at module scope (packages/server/src/
-// emulator.ts) — so the built dist module's export is monkey-patched directly
-// for the duration of this describe block (same require-the-built-dist
-// pattern as reservation-safe-selfspend.unit.test.ts) and restored after.
-
+// Once past the tier-range check, handleV4Play unconditionally probes the
+// emulator and decodes real pubkeys/addresses (identity, arkInfo.signerPubkey,
+// req.playerPayoutAddress, wallet.getAddress()) before it ever looks at house
+// VTXOs — so a test that needs to run PAST validation needs all of these to be
+// real, not just the VTXO set. Real secp256k1 points are required because
+// CoinflipJointPotScript taproot-tweaks them (a placeholder like an all-zero
+// key is not a valid curve point and throws).
 const xonlyOf = (b: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(b))
 
 const HOUSE_XONLY = xonlyOf(0x11)
@@ -95,9 +60,9 @@ const HOUSE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(0x77), new Uint8Arr
 const PLAYER_PAYOUT_ADDRESS = new ArkAddress(new Uint8Array(32).fill(0x55), new Uint8Array(32).fill(0x66), 'tark').encode()
 
 /** A house VTXO whose forfeit leaf embeds HOUSE_XONLY, so `choose()` treats it
- *  as co-signable. The leaf is never actually spent in this test (handleV4Play
- *  only reads it via tapLeafHasKey + serializeTapLeaf), so a minimal fake shape
- *  is enough. */
+ *  as co-signable. The leaf is never actually spent in these tests
+ *  (handleV4Play only reads it via tapLeafHasKey + serializeTapLeaf), so a
+ *  minimal fake shape is enough. */
 function houseCoin(txid: string, vout: number, value: number) {
   return {
     txid, vout, value,
@@ -139,24 +104,78 @@ function capReq(tier: number) {
   }
 }
 
+// handleV4Play has no way to inject the emulator config — loadEmulatorConfig is
+// a real network probe cached at module scope (packages/server/src/emulator.ts).
+// Patched here for the WHOLE file (not scoped to one describe) so every test
+// sees the SAME behavior whether or not a real emulator is reachable: CI's
+// regtest stack runs one, local dev usually doesn't, and a test pinned to only
+// one of those environments (asserting on whichever error THAT environment
+// happens to throw first) is exactly the bug this fixes. Requiring the built
+// dist module directly (same pattern as reservation-safe-selfspend.unit.test.ts)
+// resolves to the identical CJS singleton play.js calls, so reassigning its
+// export here is visible there too — and since it fully replaces the export,
+// the real network probe never runs in this file regardless of environment.
+// Safe for the plain range-check tests too: they throw during tier validation,
+// before handleV4Play ever calls loadEmulatorConfig.
+let originalLoadEmulatorConfig: typeof emulatorModule.loadEmulatorConfig
+beforeAll(() => {
+  originalLoadEmulatorConfig = emulatorModule.loadEmulatorConfig
+  emulatorModule.loadEmulatorConfig = async () => ({
+    url: 'http://emulator.test',
+    publicUrl: 'http://emulator.test',
+    signerPubkeyHex: hex.encode(EMULATOR_XONLY),
+    signerPubkey: EMULATOR_XONLY,
+    version: 'test-stub',
+  })
+})
+afterAll(() => {
+  emulatorModule.loadEmulatorConfig = originalLoadEmulatorConfig
+})
+
+describe('/play bet amount range', () => {
+  it('rejects a bet below railMin (dust + 1)', async () => {
+    await expect(
+      server.handleV4Play({ tier: DUST, playerPubkey: PLAYER, playerHash: 'ab' }, makeDeps()),
+    ).rejects.toThrow(/Invalid bet amount/)
+  })
+
+  it('rejects a bet above railMax', async () => {
+    await expect(
+      server.handleV4Play({ tier: 50_001, playerPubkey: PLAYER, playerHash: 'ab' }, makeDeps()),
+    ).rejects.toThrow(/Invalid bet amount/)
+  })
+
+  it('rejects a non-integer bet', async () => {
+    await expect(
+      server.handleV4Play({ tier: 1000.5, playerPubkey: PLAYER, playerHash: 'ab' }, makeDeps()),
+    ).rejects.toThrow(/Invalid bet amount/)
+  })
+
+  it('accepts an off-tier amount that the old whitelist would have rejected', async () => {
+    // 1337 was never a configured tier. It must clear the range check and reach
+    // the SAME downstream failure in every environment (see the file-level
+    // loadEmulatorConfig patch above): with zero free house VTXOs the per-bet
+    // cap is 0, so any positive bet exceeds it — deterministically, whether or
+    // not a real emulator happens to be reachable. Asserting the specific
+    // error TYPE (BetExceedsCapacityError, not the plain Error the range check
+    // throws) still fails loudly if validation ever wrongly rejects 1337.
+    let err: unknown
+    try {
+      await server.handleV4Play(capReq(1337), capDeps([]))
+    } catch (e) {
+      err = e
+    }
+    expect(err).toBeInstanceOf(BetExceedsCapacityError)
+    expect(String(err)).toMatch(/per-bet cap is 0 sat/)
+  })
+})
+
+// ── per-bet exposure cap ─────────────────────────────────────────────────────
+//
+// The cap check runs AFTER the emulator probe and the ArkAddress decodes in
+// handleV4Play, so reaching it needs the full fixture above (real secp256k1
+// points, valid Ark addresses, a co-signable house VTXO).
 describe('/play per-bet exposure cap', () => {
-  let originalLoadEmulatorConfig: typeof emulatorModule.loadEmulatorConfig
-
-  beforeAll(() => {
-    originalLoadEmulatorConfig = emulatorModule.loadEmulatorConfig
-    emulatorModule.loadEmulatorConfig = async () => ({
-      url: 'http://emulator.test',
-      publicUrl: 'http://emulator.test',
-      signerPubkeyHex: hex.encode(EMULATOR_XONLY),
-      signerPubkey: EMULATOR_XONLY,
-      version: 'test-stub',
-    })
-  })
-
-  afterAll(() => {
-    emulatorModule.loadEmulatorConfig = originalLoadEmulatorConfig
-  })
-
   it('REJECTS a bet whose house stake exceeds the per-bet cap', async () => {
     // freeTotal = 4000, cap = floor(4000 * 2500 / 10000) = 1000; tier 1337 (a
     // valid rail amount) needs a 1337-sat house stake, which exceeds the cap.

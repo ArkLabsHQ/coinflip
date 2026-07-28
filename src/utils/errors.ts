@@ -33,5 +33,14 @@ export function friendlyError(raw: string): string {
   if (/invalid[_ ]vtxo[_ ]script/i.test(raw)) {
     return "Some funds can't be reclaimed right now — a server key rotation left them pending on-chain. They return automatically once their batch is swept, so no action is needed."
   }
+  // /play's per-bet exposure cap (BetExceedsCapacityError -> 400). The raw body
+  // is an engineering string naming sat totals the player has no way to act on
+  // ("needs 281656 sat, per-bet cap is 250000 sat (25% of 1000000 sat free)").
+  // Reachable whenever the house's free coins drop between the client's last
+  // envelope refresh and the bet — PlayView re-reads /api/tiers after every
+  // attempt, so the slider re-sizes itself behind this message.
+  if (/Bet exceeds house capacity/i.test(raw)) {
+    return "The house can't cover that bet right now — other games have its funds reserved. The bet range refreshes automatically; try a smaller amount or a lower multiplier in a moment."
+  }
   return raw
 }

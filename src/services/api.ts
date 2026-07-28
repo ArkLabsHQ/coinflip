@@ -14,6 +14,13 @@ export interface TiersResponse {
   houseReady: boolean
   rakeType?: string
   rakeValue?: number
+  /** Bet rails: any integer in [betMin, betMax] is a valid amount. */
+  betMin?: number
+  betMax?: number
+  /** Per-bet ceiling — reservation-aware, distinct from houseBankroll (the whole
+   *  spendable balance). The server caps each individual bet at this. */
+  capacity?: number
+  maxBetFractionBps?: number
 }
 
 export interface Outpoint {

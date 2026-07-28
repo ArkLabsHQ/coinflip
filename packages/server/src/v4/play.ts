@@ -11,13 +11,13 @@ import { hex } from '@scure/base'
 import { ArkAddress, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import {
   CoinflipJointPotScript, commitDigit, randomUniformInt, computeRollV3,
-  serializeTapLeaf, tapLeafHasKey, foldSubDustStake,
+  serializeTapLeaf, tapLeafHasKey, foldSubDustStake, betRails,
   type SerializedHouseInput,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
 import { hashSecret, networkHrpFromArkInfo } from '../house-wallet.js'
-import { reservations, selectionMutex, outpointKey, houseVtxoCache, HouseBusyError, BetExceedsCapacityError } from '../vtxo-pool.js'
+import { reservations, selectionMutex, outpointKey, houseVtxoCache, freeStakeTotal, HouseBusyError, BetExceedsCapacityError } from '../vtxo-pool.js'
 import { loadEmulatorConfig } from '../emulator.js'
 import { computeHouseStake } from '../house-economics.js'
 import type { AppDeps } from '../deps.js'
@@ -71,6 +71,14 @@ async function getTiers(deps: AppDeps): Promise<number[]> {
 async function getOddsEdgeBps(deps: AppDeps): Promise<number> {
   return parseInt((await deps.repos.config.get('variable_odds_edge_bps')) || '300', 10)
 }
+export async function getMaxBetFractionBps(deps: AppDeps): Promise<number> {
+  const n = parseInt((await deps.repos.config.get('max_bet_fraction_bps')) || '2500', 10)
+  // Fail CLOSED on a malformed config row: a NaN/out-of-range fraction must not
+  // silently disable the cap (houseStake > NaN is false — the exact fail-open
+  // shape that let a batch-expiry sweep drain the house, see v0.10.1). Clamp to
+  // the 2500 default instead of trusting an unvalidated read.
+  return Number.isInteger(n) && n > 0 && n <= 10000 ? n : 2500
+}
 
 const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
   v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed'
@@ -82,14 +90,20 @@ const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
  */
 export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V4PlayResult> {
   const tiers = await getTiers(deps)
-  if (!tiers.includes(req.tier)) throw new Error(`Invalid tier: ${req.tier}`)
+  const dust = Number(deps.arkInfo.dust ?? 546n)
+  // `tiers` is now just the rails: any integer amount between them is playable.
+  // The real constraint is on the house stake (dust <= stake <= capacity),
+  // enforced below — this only bounds what the player may ask for.
+  const { railMin, railMax } = betRails(tiers, dust)
+  if (!Number.isInteger(req.tier) || req.tier < railMin || req.tier > railMax) {
+    throw new Error(`Invalid bet amount ${req.tier}: must be an integer in [${railMin}, ${railMax}]`)
+  }
   if ((await deps.repos.games.countPendingForPlayer(req.playerPubkey)) >= 3) {
     throw new Error('Too many pending games. Complete or wait for existing games to expire.')
   }
 
   // House stake: (folded) player stake for the coin, a house-edged multiple for
   // variable odds. Both scale with the player stake, so folding keeps the game fair.
-  const dust = Number(deps.arkInfo.dust ?? 546n)
   // Fold a sub-dust player-change "top-up" into the stake. The client sends topUp
   // when its VTXOs would leave a change ≤ dust — a dust output can't exist, so the
   // remainder MUST be staked or the co-fund can't balance (input != output). All of
@@ -165,6 +179,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   // re-check excludes a coin another game just reserved, and a coin spent before the
   // co-fund only fails the escrow submit (caught + retried), never a double-spend.
   const vtxos = await houseVtxoCache.refresh(deps)
+  const maxBetFractionBps = await getMaxBetFractionBps(deps)
   await selectionMutex.runExclusive(async () => {
     const choose = (vtxos: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] | null => {
       const free = vtxos
@@ -191,12 +206,19 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       }
       return sum >= houseStake ? picked : null
     }
+    // Per-bet exposure cap, checked BEFORE selection: the client's envelope is
+    // advisory, so this is the only thing stopping a crafted request from
+    // committing the whole bankroll to one game. capacity <= freeTotal always
+    // (the fraction is <= 100%), so this subsumes the old coverage check.
+    const freeTotal = freeStakeTotal(vtxos)
+    const capacity = Math.floor((freeTotal * maxBetFractionBps) / 10000)
+    if (houseStake > capacity) {
+      throw new BetExceedsCapacityError(
+        `Bet exceeds house capacity: needs ${houseStake} sat, per-bet cap is ${capacity} sat (${maxBetFractionBps / 100}% of ${freeTotal} sat free).`,
+      )
+    }
     const picked = choose(vtxos)
     if (!picked) {
-      const freeTotal = vtxos
-        .filter((v) => settledOrPre(v) && !reservations.isReserved(outpointKey(v.txid, v.vout)))
-        .reduce((s, v) => s + v.value, 0)
-      if (freeTotal < houseStake) throw new BetExceedsCapacityError(`Bet exceeds house capacity: needs ${houseStake} sat, free house balance is ${freeTotal}.`)
       throw new HouseBusyError('House is busy (insufficient free stake VTXOs). Try again shortly.')
     }
     // Fold a sub-dust house-change overshoot into the stake (the house-side twin of the

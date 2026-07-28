@@ -373,6 +373,11 @@
       <button class="btn btn-small" onclick="saveConfig()">Save</button>
     </div>
     <div class="config-row">
+      <label for="maxBetFractionBps">Max bet %</label>
+      <input type="number" id="maxBetFractionBps" style="width:90px" min="1" max="10000">
+      <span class="op-hint" style="margin:0">Basis points of the FREE bankroll one bet may commit (2500 = 25%).</span>
+    </div>
+    <div class="config-row">
       <label>Tiers:</label>
       <div class="tier-chips" id="tierChips"></div>
     </div>
@@ -488,6 +493,8 @@
       tiers: currentTiers,
       minHouseBalance: parseInt(document.getElementById('minBalance').value) || 0,
       oddsEdgeBps: parseInt(document.getElementById('oddsEdgeBps').value) || 0,
+      // Floor is 1 bps, not 0; || 0 would post invalid value and silently fail server validation.
+      maxBetFractionBps: parseInt(document.getElementById('maxBetFractionBps').value) || 2500,
     };
     await fetch('/api/config', {
       method: 'POST',
@@ -525,6 +532,7 @@
     document.getElementById('rakeType').value = data.rakeType;
     document.getElementById('minBalance').value = data.minHouseBalance;
     document.getElementById('oddsEdgeBps').value = data.oddsEdgeBps;
+    document.getElementById('maxBetFractionBps').value = data.maxBetFractionBps;
     currentTiers = data.tiers;
     renderTiers();
   }

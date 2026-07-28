@@ -278,6 +278,26 @@ export function freeHouseVtxos(all: ExtendedVirtualCoin[]): ExtendedVirtualCoin[
   return selectable.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
 }
 
+/** Settled or preconfirmed — a coin state usable to fund a NEW bet. */
+const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
+  v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed'
+
+/**
+ * Total house value that can back a NEW bet: settled-or-preconfirmed coins not
+ * already reserved for an in-flight game.
+ *
+ * Shared on purpose. `/play` derives its per-bet cap from this and `/api/tiers`
+ * advertises capacity from it, so a divergence here means the client offers
+ * bets the server rejects with a 400. Deliberately NOT `freeHouseVtxos`, which
+ * filters on near-expiry rather than coin state — neither set contains the
+ * other.
+ */
+export function freeStakeTotal(vtxos: ExtendedVirtualCoin[]): number {
+  return vtxos
+    .filter((v) => settledOrPre(v) && !reservations.isReserved(outpointKey(v.txid, v.vout)))
+    .reduce((s, v) => s + v.value, 0)
+}
+
 /**
  * Pool floor: minimum number of free VTXOs we always try to keep around.
  * Below this, splitting fires aggressively. Configurable via env.

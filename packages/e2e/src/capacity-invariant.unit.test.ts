@@ -1,0 +1,215 @@
+/**
+ * The branch's central invariant: the capacity `/api/tiers` ADVERTISES is
+ * exactly the capacity `/play` ENFORCES.
+ *
+ * Both sides derive it from `freeStakeTotal` and the clamped
+ * `getMaxBetFractionBps` — but only by convention. The envelope test in
+ * server-api.test.ts asserts types and loose ranges, so it would still pass if
+ * `/api/tiers` went back to sizing off the wallet's `available` balance or off
+ * the expiry-based `freeHouseVtxos` (the drift the plan correction records
+ * happening once already). This pins the NUMBER on both sides.
+ *
+ * The fixture is deliberately adversarial, so each way of drifting produces a
+ * different number and fails:
+ *   - `available` (1,000,000) differs from the free stake total (52,350);
+ *   - a swept coin (9,000,000) inflates a naive sum over all vtxos;
+ *   - a near-expiry coin (12,345) separates `freeStakeTotal` from the REJECTED
+ *     `freeHouseVtxos` design — neither set contains the other;
+ *   - 52,350 * 2500 / 10,000 = 13,087.5, so floor / round / ceil disagree.
+ *
+ * Imports the BUILT server (dist) directly, like the sibling unit tests, so the
+ * route and the handler share one `vtxo-pool` module — the same coupling
+ * production has.
+ */
+export {}
+
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
+import express from 'express'
+import request from 'supertest'
+import { hex } from '@scure/base'
+import { ArkAddress } from '@arkade-os/sdk'
+const { schnorr } = require('@noble/curves/secp256k1.js')
+const server = require('arkade-coinflip-server')
+const emulatorModule = require('arkade-coinflip-server/dist/emulator.js')
+const { createPublicRoutes } = require('arkade-coinflip-server/dist/public-routes.js')
+const {
+  BetExceedsCapacityError, reservations, freeStakeTotal, freeHouseVtxos,
+} = require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+const DUST = 330
+
+const xonlyOf = (b: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(b))
+const HOUSE_XONLY = xonlyOf(0x11)
+const HOUSE_COMPRESSED = new Uint8Array([2, ...HOUSE_XONLY])
+const SERVER_XONLY = xonlyOf(0x22)
+const PLAYER_XONLY = xonlyOf(0x33)
+const EMULATOR_XONLY = xonlyOf(0x44)
+const HOUSE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(0x77), new Uint8Array(32).fill(0x88), 'tark').encode()
+const PLAYER_ADDRESS = new ArkAddress(new Uint8Array(32).fill(0x55), new Uint8Array(32).fill(0x66), 'tark').encode()
+
+const FAR_EXPIRY = Date.now() + 24 * 3600_000
+/** Inside VTXO_LIFETIME_BUFFER_MS (30 min) — `selectableHouseVtxos` drops this. */
+const SOON_EXPIRY = Date.now() + 5 * 60_000
+
+/** A house VTXO whose forfeit leaf embeds HOUSE_XONLY so `choose()` treats it as
+ *  co-signable (raw byte-substring match — the leaf is never actually spent). */
+function houseCoin(
+  txid: string, vout: number, value: number,
+  opts: { state?: string; batchExpiry?: number } = {},
+) {
+  return {
+    txid, vout, value,
+    virtualStatus: { state: opts.state ?? 'settled', batchExpiry: opts.batchExpiry ?? FAR_EXPIRY },
+    status: { confirmed: false },
+    createdAt: new Date(Date.now() - 60_000),
+    forfeitTapLeafScript: [
+      { version: 0xc0, internalKey: xonlyOf(0x99), merklePath: [] as Uint8Array[] },
+      new Uint8Array([...HOUSE_XONLY, 0xc0]),
+    ],
+    tapTree: new Uint8Array([0]),
+  }
+}
+
+const HEALTHY = houseCoin('aa'.repeat(32), 0, 40_005)
+const NEAR_EXPIRY = houseCoin('bb'.repeat(32), 0, 12_345, { batchExpiry: SOON_EXPIRY })
+const SWEPT = houseCoin('cc'.repeat(32), 0, 9_000_000, { state: 'swept' })
+const VTXOS = [HEALTHY, NEAR_EXPIRY, SWEPT]
+
+const FREE_TOTAL = 52_350            // HEALTHY + NEAR_EXPIRY
+const AVAILABLE = 1_000_000          // the wallet balance — deliberately NOT the free total
+const CAPACITY = 13_087              // floor(52_350 * 2500 / 10_000); round/ceil give 13_088
+
+function makeDeps(overrides: Record<string, string> = {}) {
+  const config: Record<string, string> = {
+    tiers: '[330,1000,5000,10000,50000]',
+    variable_odds_edge_bps: '300',
+    max_bet_fraction_bps: '2500',
+    ...overrides,
+  }
+  return {
+    arkInfo: { dust: BigInt(DUST), signerPubkey: hex.encode(SERVER_XONLY), network: 'regtest' },
+    wallet: {
+      getVtxos: async () => VTXOS,
+      getBalance: async () => ({ available: AVAILABLE }),
+      getAddress: async () => HOUSE_ADDRESS,
+    },
+    identity: { compressedPublicKey: async () => HOUSE_COMPRESSED },
+    repos: {
+      config: { get: async (k: string) => config[k], all: async () => config },
+      games: { countPendingForPlayer: async () => 0, save: async () => undefined },
+    },
+  } as any
+}
+
+function mount(deps: any) {
+  const app = express()
+  app.use(express.json())
+  app.use(createPublicRoutes(deps))
+  return app
+}
+
+/** A plain coin bet (no odds) — houseStake === playerStake, so the tier IS the
+ *  house stake the cap is applied to and the boundary needs no inversion. */
+function playReq(tier: number) {
+  return {
+    tier,
+    playerPubkey: hex.encode(PLAYER_XONLY),
+    playerHash: hex.encode(new Uint8Array(32).fill(0xee)),
+    playerPayoutAddress: PLAYER_ADDRESS,
+    playerChangeAddress: PLAYER_ADDRESS,
+  }
+}
+
+async function advertisedCapacity(deps: any): Promise<number> {
+  const res = await request(mount(deps)).get('/api/tiers')
+  expect(res.status).toBe(200)
+  return res.body.capacity
+}
+
+describe('advertised capacity === enforced capacity', () => {
+  let originalLoadEmulatorConfig: typeof emulatorModule.loadEmulatorConfig
+
+  beforeAll(() => {
+    // The cap check runs AFTER handleV4Play's emulator probe, so reaching it
+    // needs the probe stubbed (same pattern as play-bet-range.unit.test.ts).
+    originalLoadEmulatorConfig = emulatorModule.loadEmulatorConfig
+    emulatorModule.loadEmulatorConfig = async () => ({
+      url: 'http://emulator.test',
+      publicUrl: 'http://emulator.test',
+      signerPubkeyHex: hex.encode(EMULATOR_XONLY),
+      signerPubkey: EMULATOR_XONLY,
+      version: 'test-stub',
+    })
+  })
+
+  afterAll(() => {
+    emulatorModule.loadEmulatorConfig = originalLoadEmulatorConfig
+  })
+
+  // An accepted play reserves coins in the process-wide ledger; drop them so the
+  // free total is the same for every test regardless of order.
+  afterEach(() => {
+    for (const r of reservations.snapshot()) reservations.release(r.gameId)
+  })
+
+  it('fixture: the free total is neither the wallet balance, the raw vtxo sum, nor the expiry-filtered set', () => {
+    expect(freeStakeTotal(VTXOS)).toBe(FREE_TOTAL)
+    expect(FREE_TOTAL).not.toBe(AVAILABLE)
+    expect(FREE_TOTAL).not.toBe(VTXOS.reduce((s, v) => s + v.value, 0))
+    // `freeHouseVtxos` filters on near-expiry, `freeStakeTotal` on coin state —
+    // if this stops holding, the fixture no longer distinguishes the two designs.
+    expect(freeHouseVtxos(VTXOS).map((v: any) => v.txid)).not.toContain(NEAR_EXPIRY.txid)
+  })
+
+  it('/play refuses the first sat ABOVE the capacity /api/tiers published, naming that same number', async () => {
+    const deps = makeDeps()
+    const advertised = await advertisedCapacity(deps)
+    // Pins the source AND the rounding: floor(52_350 * 2500 / 10_000) = 13_087.
+    expect(advertised).toBe(CAPACITY)
+
+    let err: unknown
+    try {
+      await server.handleV4Play(playReq(advertised + 1), deps)
+    } catch (e) {
+      err = e
+    }
+    expect(err).toBeInstanceOf(BetExceedsCapacityError)
+    // The enforced cap is echoed verbatim — equal to the advertised one, from
+    // the same free total. Not a shape check: both numbers are pinned.
+    expect((err as Error).message).toContain(`per-bet cap is ${advertised} sat`)
+    expect((err as Error).message).toContain(`of ${FREE_TOTAL} sat free`)
+  })
+
+  it('/play accepts a bet AT the advertised capacity, and the next publication drops by what it reserved', async () => {
+    const deps = makeDeps()
+    const advertised = await advertisedCapacity(deps)
+    expect(advertised).toBe(CAPACITY)
+
+    // Not merely "not looser" — the enforced cap is not TIGHTER either, or the
+    // slider's own maximum would be a bet the server refuses.
+    const result = await server.handleV4Play(playReq(advertised), deps)
+    expect(result.houseStake).toBe(advertised)
+
+    // Both sides read the SAME reservation ledger: the 40,005-sat coin greedy
+    // selection just pinned is gone from the next advertised capacity.
+    expect(await advertisedCapacity(deps)).toBe(Math.floor((NEAR_EXPIRY.value * 2500) / 10000))
+  })
+
+  it('a malformed max_bet_fraction_bps clamps identically on both sides', async () => {
+    // If /api/tiers ever re-parsed the config itself instead of calling the
+    // shared clamped reader, it would advertise 99.999% of the free stake while
+    // /play kept enforcing the 2500 bps default — drift, one level up.
+    const deps = makeDeps({ max_bet_fraction_bps: '99999' })
+    const advertised = await advertisedCapacity(deps)
+    expect(advertised).toBe(CAPACITY)
+
+    let err: unknown
+    try {
+      await server.handleV4Play(playReq(advertised + 1), deps)
+    } catch (e) {
+      err = e
+    }
+    expect(err).toBeInstanceOf(BetExceedsCapacityError)
+    expect((err as Error).message).toContain(`per-bet cap is ${advertised} sat`)
+  })
+})

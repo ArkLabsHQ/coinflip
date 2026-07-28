@@ -58,7 +58,7 @@
       <component
         :is="currentSkin.component"
         :state="skinState"
-        :tier="selectedTier"
+        :tier="betAmount"
         :odds-edge-bps="oddsEdgeBps"
         :dust="dust"
         @launch="onSkinLaunch"
@@ -75,14 +75,35 @@
     </transition>
 
     <div class="controls" :class="{ inert: isFlipping && !isAutoRunning }">
-      <div class="control-group">
-        <TierSelector
-          :tiers="tiers"
-          :selected-tier="selectedTier"
-          :affordable-tiers="affordableTiers"
-          :player-balance="playerBalance"
-          @select="selectedTier = $event"
+      <div class="control-group amount-slider">
+        <div class="amount-readout">
+          <span class="amount-label">Bet</span>
+          <span class="amount-value">{{ betAmount.toLocaleString() }} sats</span>
+        </div>
+        <input
+          class="amount-range"
+          type="range"
+          :min="amountBounds.min"
+          :max="usableMax"
+          step="1"
+          v-model.number="betAmount"
+          :disabled="isAutoRunning || !canBet"
+          aria-label="Bet amount"
         />
+        <div class="amount-ends">
+          <span>{{ tiersLoaded ? amountBounds.min.toLocaleString() : '—' }}</span>
+          <span v-if="!tiersLoaded">Loading bet range…</span>
+          <!-- An infeasible rung (min > max, including once the top-up headroom
+               is reserved) is ALWAYS a house-side reason — no amount at this win
+               chance produces a stake in [dust, capacity] — so it must not read
+               as a wallet problem. Checked before canAffordRung, which folds
+               both reasons into one flag. -->
+          <span v-else-if="!amountBounds.feasible" class="amount-warn">House can't cover a bet at this win chance</span>
+          <span v-else-if="!canAffordRung" class="amount-warn">Your balance is too low for this bet</span>
+          <span v-else-if="!canBet" class="amount-warn">House has no capacity right now</span>
+          <span v-else-if="balanceCapped" class="amount-warn">Capped by your wallet balance</span>
+          <span>{{ tiersLoaded && canAffordRung ? usableMax.toLocaleString() : '—' }}</span>
+        </div>
       </div>
 
       <!-- Odds slider: walks the active skin's bet ladder — slide right for
@@ -98,7 +119,7 @@
           <span class="odds-stats">
             <span class="win-pct">{{ winPctLabel }} win</span>
             <span class="payout-mult">{{ payoutMult(selectedBet) }}</span>
-            <span class="win-amt" v-if="selectedTier">→ {{ winSatsLabel(selectedBet) }}</span>
+            <span class="win-amt" v-if="canBet">→ {{ winSatsLabel(selectedBet) }}</span>
           </span>
         </div>
         <input
@@ -193,7 +214,6 @@
 <script lang="ts">
 import { defineComponent, ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useStore } from 'vuex'
-import TierSelector from '@/components/TierSelector.vue'
 import GameHistoryList, { type GameHistoryItem } from '@/components/GameHistoryList.vue'
 import GameDetailsModal from '@/components/GameDetailsModal.vue'
 import StalledBets from '@/components/StalledBets.vue'
@@ -203,7 +223,7 @@ import { getErrorMessage, friendlyError } from '@/utils/errors'
 import { logDiag } from '@/utils/diagnosticsLog'
 // House-stake / odds formula — single-sourced in the lib so this preview can't
 // drift from what the server charges (crypto-free subpath, like game-math).
-import { computeHouseStake } from 'arkade-coinflip/dist/stake-math'
+import { computeHouseStake, amountBoundsForOdds, feasibleOddsWindow } from 'arkade-coinflip/dist/stake-math'
 
 const AUTO_OPTIONS = [
   { label: 'OFF', value: null },
@@ -229,7 +249,7 @@ interface SlabResult { won: boolean; amount: number }
 
 export default defineComponent({
   name: 'PlayView',
-  components: { TierSelector, GameHistoryList, GameDetailsModal, StalledBets },
+  components: { GameHistoryList, GameDetailsModal, StalledBets },
   emits: ['open-wallet'],
   setup(_props, { emit }) {
     const store = useStore()
@@ -247,7 +267,19 @@ export default defineComponent({
     const rakeType = ref<'percentage' | 'flat'>('percentage')
     const rakeValue = ref(2)
     const houseReady = ref(false)
-    const selectedTier = ref<number | null>(null)
+    // Flips true after the first successful /api/tiers response. Before that,
+    // capacity/betMin/betMax are still just defaults, not real bounds — the
+    // template gates on this so the pre-load render is neutral rather than a
+    // false "no capacity" / inverted-range flash.
+    const tiersLoaded = ref(false)
+    // Per-bet ceiling published by /api/tiers (reservation-aware). Distinct from
+    // houseBankroll, which is the whole spendable balance.
+    const capacity = ref(0)
+    const betMin = ref(331)
+    const betMax = ref(50_000)
+    // The bet amount is now continuous. Starts at the low rail; the watchers
+    // below keep it inside the envelope as the odds or capacity move.
+    const betAmount = ref(betMin.value)
 
     // ── Skin selection (early, so the odds slider can read the ladder) ──
     const currentSkinId = ref(getSavedSkinId())
@@ -267,38 +299,32 @@ export default defineComponent({
       return computeHouseStake(tier, bet.n, bet.target, bet.lo, oddsEdgeBps.value)
     }
     function houseStakeOf(bet: OddsBet): number {
-      return houseStakeAt(selectedTier.value ?? 0, bet)
+      return houseStakeAt(betAmount.value, bet)
     }
-    // A tier is offerable only if the CURRENT skin has at least one odds step
-    // whose house stake both clears dust and fits the house bankroll. Capping on
-    // the house STAKE (not the player's tier) matters for variable odds: a
-    // high-win bet's house stake is far below the tier, so a tier-vs-bankroll
-    // check would wrongly hide affordable bets. The slider then clamps the odds
-    // range within the chosen tier; the server backstops over-cap bets.
-    const affordableTiers = computed<number[]>(() =>
-      tiers.value.filter((t) =>
-        currentSkinLadder.value.some((b) => {
-          const s = houseStakeAt(t, b)
-          return s >= dust.value && s <= houseBankroll.value
-        }),
-      ),
+    // Feasible ladder band for the current amount. Walking the ladder against
+    // the real computeHouseStake is what keeps the client and server in exact
+    // agreement — never offer a step /play would reject.
+    const oddsWindow = computed(() =>
+      feasibleOddsWindow(betAmount.value, currentSkinLadder.value, {
+        edgeBps: oddsEdgeBps.value, dust: dust.value, capacity: capacity.value,
+      }),
     )
-    const minStep = computed(() => {
-      const ladder = currentSkinLadder.value
-      if (!selectedTier.value) return 0
-      for (let i = 0; i < ladder.length; i++) if (houseStakeOf(ladder[i]) >= dust.value) return i
-      return ladder.length - 1 // nothing clears dust at this tier → pin to the riskiest
-    })
-    const maxStep = computed(() => {
-      const ladder = currentSkinLadder.value
-      if (!selectedTier.value) return ladder.length - 1
-      let max = minStep.value
-      for (let i = 0; i < ladder.length; i++) {
-        if (houseStakeOf(ladder[i]) <= houseBankroll.value) max = i
-        else break
-      }
-      return Math.max(max, minStep.value)
-    })
+    const minStep = computed(() => oddsWindow.value?.loIndex ?? 0)
+    const maxStep = computed(() => oddsWindow.value?.hiIndex ?? currentSkinLadder.value.length - 1)
+    const canBet = computed(() => oddsWindow.value !== null && capacity.value >= dust.value && canAffordRung.value)
+    const amountBounds = computed(() =>
+      amountBoundsForOdds(selectedBet.value, {
+        edgeBps: oddsEdgeBps.value, dust: dust.value, capacity: capacity.value,
+        railMin: betMin.value, railMax: betMax.value,
+        // The bet the SERVER caps on is `tier + stakeTopUp`, not the slider's
+        // value: placeTrustlessBet folds a sub-dust wallet change (≤ dust) into
+        // the stake after the amount is already fixed. Bounding on the amount
+        // alone 400s the player at the slider's own maximum whenever that fold
+        // fires — intermittently, since it depends on their live coin shape.
+        // Reserving dust here costs ≤ dust of top-end range and cannot 400.
+        topUpHeadroom: dust.value,
+      }),
+    )
     const safeStep = computed(() => Math.min(Math.max(sliderIndex.value, minStep.value), maxStep.value))
     const selectedBet = computed<OddsBet>(() => currentSkinLadder.value[safeStep.value])
     const stepLabel = computed(() => currentSkin.value.stepLabel(selectedBet.value, safeStep.value))
@@ -314,7 +340,7 @@ export default defineComponent({
     // server economics so the slider shows the honest payout — e.g. a 50% coin
     // at 300 bps edge + 2% rake pays ~1.93×, not a fair 2×.
     function payoutMult(bet: OddsBet): string {
-      const tier = selectedTier.value ?? 0
+      const tier = betAmount.value
       if (!tier) return '—'
       const pot = tier + houseStakeAt(tier, bet)
       let rake = rakeType.value === 'percentage' ? Math.floor((pot * rakeValue.value) / 100) : rakeValue.value
@@ -327,7 +353,7 @@ export default defineComponent({
      *  pot, not the gross payout. Mirrors the server's settle math (same
      *  rake-floor + dust-waiver as `payoutMult`). */
     function winSatsLabel(bet: OddsBet): string {
-      const tier = selectedTier.value ?? 0
+      const tier = betAmount.value
       if (!tier) return ''
       const pot = tier + houseStakeAt(tier, bet)
       let rake = rakeType.value === 'percentage' ? Math.floor((pot * rakeValue.value) / 100) : rakeValue.value
@@ -469,9 +495,25 @@ export default defineComponent({
     // connected yet (state.walletBalance === null) so we don't gate the UI
     // on a stale-empty balance during boot.
     const playerBalance = computed(() => store.state.walletBalance?.available ?? Infinity)
-    // Only a tier is required now — the side defaults to 'random', so a fresh
-    // player can flip immediately after load.
-    const canFlip = computed(() => !isFlipping.value && selectedTier.value !== null)
+    // The player can never bet more than they hold, even when the house could
+    // cover it. `amountBounds` stays the house-side envelope alone (so it's
+    // still exactly what the server would independently compute); this folds
+    // in the wallet cap for the slider's actual usable ceiling.
+    const usableMax = computed(() => Math.min(amountBounds.value.max, playerBalance.value))
+    // True when the wallet balance, not the house capacity, is what's actually
+    // capping the top of the slider — the UI has to say so rather than
+    // silently showing a lower ceiling than amountBounds implies.
+    const balanceCapped = computed(() => playerBalance.value < amountBounds.value.max)
+    // True only when there EXISTS a valid amount this wallet could bet at the
+    // current rung — house-feasible AND the balance reaches at least the
+    // dust-clearing minimum. False here is a DIFFERENT reason than the house
+    // having no capacity: the house could cover this rung, the wallet can't.
+    // canBet folds this in so the FLIP button can never stay enabled on a bet
+    // the wallet cannot fund.
+    const canAffordRung = computed(() => amountBounds.value.feasible && playerBalance.value >= amountBounds.value.min)
+    // Only a valid bet is required now — the side defaults to 'random', so a
+    // fresh player can flip immediately after load.
+    const canFlip = computed(() => !isFlipping.value && canBet.value)
 
     // ── Data load ─────────────────────────────────────────────────────
     async function loadTiers() {
@@ -485,11 +527,10 @@ export default defineComponent({
         if (data.rakeType === 'percentage' || data.rakeType === 'flat') rakeType.value = data.rakeType
         if (data.rakeValue !== undefined) rakeValue.value = data.rakeValue
         houseReady.value = data.houseReady
-        // Pre-select the cheapest affordable tier so getting started is one
-        // click. Only set on first load (don't override a manual pick).
-        if (selectedTier.value === null && tiers.value.length > 0) {
-          selectedTier.value = Math.min(...tiers.value)
-        }
+        capacity.value = data.capacity ?? 0
+        betMin.value = data.betMin ?? 331
+        betMax.value = data.betMax ?? 50_000
+        tiersLoaded.value = true
       } catch (e) {
         console.warn('Failed to load tiers:', e)
       }
@@ -498,7 +539,7 @@ export default defineComponent({
     // ── Stats recording ───────────────────────────────────────────────
     let sparkKey = 0
     function recordResult(won: boolean, payout: number, roll: number | null) {
-      const tier = selectedTier.value ?? 0
+      const tier = betAmount.value
       const net = won ? payout - tier : -tier
 
       // P&L
@@ -547,7 +588,7 @@ export default defineComponent({
      * `selectedBet.value` (the slider's current position).
      */
     async function flipOnce(overrideBet?: OddsBet): Promise<boolean> {
-      if (!selectedTier.value) return false
+      if (!canBet.value) return false
 
       // Mark busy but DON'T animate yet — we only spin once the bet is
       // actually placed on the server, so a rejected bet (insufficient
@@ -575,6 +616,15 @@ export default defineComponent({
         // reveals, and (on a win) sweeps the pot — all on-Ark. Keep animating
         // for at least MIN_FLIP_MS so a fast resolution still reads as a flip.
         const bet = overrideBet ?? selectedBet.value
+        // Defense-in-depth balance guard, same "universal choke point"
+        // reasoning as the dust guard below. canBet already reflects this
+        // (via canAffordRung), but runAuto() doesn't re-check canFlip between
+        // iterations — this is what actually stops an auto-batch from
+        // attempting a bet the wallet can no longer cover once the balance
+        // has moved mid-run.
+        if (betAmount.value > playerBalance.value) {
+          throw new Error(`Your balance can't cover a ${betAmount.value.toLocaleString()}-sat bet.`)
+        }
         // Defense-in-depth dust guard. The odds slider already clamps coin /
         // roulette bets to a dust-safe house stake, and the Rocket skin gates its
         // cash-out the same way — but a gesture skin's overrideBet is the one path
@@ -590,7 +640,7 @@ export default defineComponent({
           // Routes to v0.4 (joint pot) or v0.3 (per-party escrow) by the server's
           // advertised protocolVersion — v0.4 is the default; PROTOCOL_VERSION=v3 opts out.
           store.dispatch('ark/placeTrustlessBet', {
-            tier: selectedTier.value,
+            tier: betAmount.value,
             oddsN: bet.n, oddsTarget: bet.target, oddsLo: bet.lo,
           }),
           new Promise((r) => setTimeout(r, MIN_FLIP_MS)),
@@ -600,7 +650,7 @@ export default defineComponent({
 
         const historyEntry = {
           id: `${Date.now()}`,
-          tier: selectedTier.value,
+          tier: betAmount.value,
           playerChoice: stepLabel.value,
           winner: result.winner,
           rakeAmount: result.rake,
@@ -633,6 +683,14 @@ export default defineComponent({
         return false
       } finally {
         isFlipping.value = false
+        // Re-read the envelope after EVERY attempt, settled or rejected. Each
+        // accepted bet reserves house coins, so the capacity /api/tiers
+        // advertised at mount is stale from the first flip onward — an auto
+        // batch would then keep offering a maximum the house can no longer take
+        // and die on a 400 at bet 2. Refreshing on the rejected path too is what
+        // makes that recoverable without a page reload. Fire-and-forget: it
+        // can't reject (loadTiers swallows), and the ~900ms auto pause covers it.
+        loadTiers()
       }
     }
 
@@ -708,19 +766,46 @@ export default defineComponent({
     })
 
     // Switching skins swaps in that skin's own ladder — reset the slider to the
-    // new skin's default step, clamped into the playable [dust, bankroll] window.
+    // new skin's default step, clamped into the playable [dust, capacity] window.
     watch(currentSkinId, () => {
       sliderIndex.value = Math.min(Math.max(currentSkin.value.defaultStep, minStep.value), maxStep.value)
     })
     // Keep the thumb inside the playable window when the stake changes — the
-    // bankroll ceiling drops and the dust floor rises as the tier moves.
+    // capacity ceiling drops and the dust floor rises as the amount moves.
     watch([minStep, maxStep], ([lo, hi]) => {
       sliderIndex.value = Math.min(Math.max(sliderIndex.value, lo), hi)
+    })
+    // Dual constraint: each control clamps the other into its new window, so
+    // the displayed bet is always one the server will accept.
+    watch([betAmount, currentSkinLadder, capacity], () => {
+      const w = oddsWindow.value
+      if (!w) return
+      if (sliderIndex.value < w.loIndex) sliderIndex.value = w.loIndex
+      else if (sliderIndex.value > w.hiIndex) sliderIndex.value = w.hiIndex
+    })
+    // Also re-clamps when the wallet balance itself moves (e.g. it drops after
+    // a bet resolves) — otherwise a stale betAmount above the new balance
+    // would sit unnoticed until the next slider/capacity change.
+    //
+    // A single clamp over [b.min, usableMax], NOT two independent branches —
+    // two branches each checking against a different bound (b.min vs b.max)
+    // let the low branch push betAmount UP past usableMax whenever the
+    // wallet balance sits below this rung's dust-clearing minimum, silently
+    // overwriting the balance ceiling. canAffordRung guards the case where
+    // that range is empty (nothing to clamp into): leave betAmount alone —
+    // canBet/flipOnce refuse the bet instead of the slider showing a
+    // fabricated amount.
+    watch([sliderIndex, capacity, playerBalance], () => {
+      if (!canAffordRung.value) return
+      const b = amountBounds.value
+      betAmount.value = Math.min(Math.max(betAmount.value, b.min), usableMax.value)
     })
 
     return {
       // Game config
-      tiers, maxAvailable, affordableTiers, houseReady, selectedTier,
+      tiers, maxAvailable, houseReady, tiersLoaded,
+      // Amount slider
+      betAmount, amountBounds, usableMax, balanceCapped, canAffordRung, canBet,
       // Odds slider
       sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctLabel, payoutMult,
       // Lifecycle
@@ -1045,6 +1130,80 @@ export default defineComponent({
   color: var(--gold);
 }
 .auto-chip:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Amount slider */
+.amount-slider {
+  gap: 8px;
+  max-width: 340px;
+}
+.amount-readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+}
+.amount-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.amount-value {
+  font-size: 0.95rem;
+  font-weight: 800;
+  font-family: ui-monospace, monospace;
+  color: var(--gold);
+}
+.amount-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-light);
+  outline: none;
+  cursor: pointer;
+}
+.amount-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--gold);
+  border: 2px solid var(--bg);
+  box-shadow: 0 0 10px var(--gold-glow);
+  cursor: pointer;
+}
+.amount-range::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--gold);
+  border: 2px solid var(--bg);
+  box-shadow: 0 0 10px var(--gold-glow);
+  cursor: pointer;
+}
+.amount-range:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.amount-ends {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.58rem;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.amount-warn {
+  color: var(--red);
+  font-weight: 700;
+}
 
 /* Odds slider */
 .odds-slider {

@@ -39,7 +39,7 @@ function sendError(res: Response, err: unknown, logLabel: string): void {
   } else if (message.includes('not found') || message.includes('Not a v4 game')) {
     res.status(404).json({ error: message })
   } else if (
-    message.includes('Invalid tier') ||
+    message.includes('Invalid bet amount') ||
     message.includes('Invalid odds') ||
     message.includes('sub-dust') ||
     message.includes('does not match') ||

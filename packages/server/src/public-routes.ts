@@ -1,9 +1,11 @@
 import { Router, Request, Response } from 'express'
+import { betRails } from 'arkade-coinflip'
 import type { AppDeps } from './deps.js'
 import { loadEmulatorConfig } from './emulator.js'
-import { newGameProtocolVersion, computeGameRoll, type V4State } from './trustless-game-v4.js'
+import { newGameProtocolVersion, computeGameRoll, getMaxBetFractionBps, type V4State } from './trustless-game-v4.js'
 import { issueChallenge, verifyChallenge } from './restore-auth.js'
 import { RateLimiter } from './rate-limit.js'
+import { freeStakeTotal, houseVtxoCache } from './vtxo-pool.js'
 
 // ── Restore-endpoint plumbing ────────────────────────────────────────────────
 
@@ -101,6 +103,22 @@ export function createPublicRoutes(deps: AppDeps): Router {
       const rakeType = (await deps.repos.config.get('rake_type')) || 'percentage'
       const rakeValue = parseInt((await deps.repos.config.get('rake_value')) || '2', 10)
 
+      const dust = Number(deps.arkInfo.dust ?? 546n)
+      // Same clamped parse /play enforces against (fail CLOSED on a malformed
+      // config row) — a bare re-parse here could advertise a NaN/out-of-range
+      // fraction while /play uses the clamped one, the same drift class this
+      // task exists to kill, one level up.
+      const maxBetFractionBps = await getMaxBetFractionBps(deps)
+      // Reservation-aware on purpose: `available` counts coins already pinned to
+      // in-flight games, so sizing the slider off it would offer bets that /play
+      // then rejects with BetExceedsCapacityError. Uses the SAME freeStakeTotal
+      // /play caps against, so the advertised envelope and the enforced one
+      // cannot drift. Reads the warm pool snapshot rather than re-syncing.
+      const freeTotal = freeStakeTotal(await houseVtxoCache.get(deps))
+      const capacity = Math.floor((freeTotal * maxBetFractionBps) / 10000)
+      // Same single definition /play validates against — they cannot drift.
+      const { railMin, railMax } = betRails(tiers, dust)
+
       res.json({
         tiers,
         maxAvailable,
@@ -111,9 +129,19 @@ export function createPublicRoutes(deps: AppDeps): Router {
         // Dust limit + variable-odds house edge so the client can size the SAFE
         // end of the odds slider: a high-win bet makes the house stake tiny, and
         // below dust the server rejects it. The client mirrors computeHouseStake.
-        dust: Number(deps.arkInfo.dust ?? 546n),
+        dust,
         oddsEdgeBps: parseInt((await deps.repos.config.get('variable_odds_edge_bps')) || '300', 10),
-        houseReady: available >= minBalance,
+        // Bet rails: any integer in [betMin, betMax] is a valid amount. `tiers`
+        // is retained above purely as the source of these rails (and for older
+        // clients still rendering chips).
+        betMin: railMin,
+        betMax: railMax,
+        // What the house can actually commit to ONE bet right now.
+        capacity,
+        maxBetFractionBps,
+        // Ready means a bet is actually placeable — not merely that the wallet
+        // holds a balance whose coins are all reserved.
+        houseReady: capacity >= dust && available >= minBalance,
         rakeType,
         rakeValue,
       })

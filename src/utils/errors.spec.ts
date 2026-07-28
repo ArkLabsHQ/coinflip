@@ -58,6 +58,17 @@ describe('friendlyError', () => {
     expect(friendlyError('rebuild failed: invalid vtxo script for input 0')).toMatch(/no action/i)
   })
 
+  it('explains the per-bet capacity rejection in player terms', () => {
+    // Verbatim shape the client sees: api.ts throws the raw 400 BODY, so the
+    // JSON envelope from v4-routes' sendError is part of the string.
+    const raw =
+      '{"error":"Bet exceeds house capacity: needs 281656 sat, per-bet cap is 250000 sat (25% of 1000000 sat free)."}'
+    const out = friendlyError(raw)
+    expect(out).not.toBe(raw)
+    expect(out).not.toMatch(/\d{4,}/) // no raw sat totals left in the player-facing text
+    expect(out).toMatch(/house can't cover/i)
+  })
+
   it('passes an unrecognized message through unchanged', () => {
     expect(friendlyError('some other error')).toBe('some other error')
   })

@@ -120,6 +120,23 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
       resp.body.tiers.reduce((m: number, t: number) => Math.max(m, t), 0),
     )
   })
+
+  it('GET /api/tiers publishes the bet envelope the client sizes its slider from', async () => {
+    if (!arkAvailable) return
+    const resp = await request(app).get('/api/tiers').expect(200)
+    // Shape, not just presence — the client (Task 5) reads these names directly,
+    // so a missing/misnamed/mistyped field here would pass every other gate.
+    expect(typeof resp.body.betMin).toBe('number')
+    expect(typeof resp.body.betMax).toBe('number')
+    expect(typeof resp.body.capacity).toBe('number')
+    expect(typeof resp.body.maxBetFractionBps).toBe('number')
+    // Strictly above dust (railMin = max(min(tiers), dust + 1)).
+    expect(resp.body.betMin).toBeGreaterThanOrEqual(resp.body.dust + 1)
+    expect(resp.body.betMax).toBeGreaterThanOrEqual(resp.body.betMin)
+    expect(resp.body.capacity).toBeGreaterThanOrEqual(0)
+    expect(resp.body.maxBetFractionBps).toBeGreaterThanOrEqual(1)
+    expect(resp.body.maxBetFractionBps).toBeLessThanOrEqual(10000)
+  })
 })
 
 describe('selectableHouseVtxos: VTXO expiry filter', () => {

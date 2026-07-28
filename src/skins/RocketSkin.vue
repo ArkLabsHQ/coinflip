@@ -1,6 +1,18 @@
 <template>
   <div class="rocket-skin" :class="gaugeClass">
     <div class="gauge">
+      <!-- The flight. Altitude is log(multiplier) so 1×–100× is legible in one
+           view; the dashed line is the multiplier the player locked. During the
+           reveal the rocket climbs to the multiplier the chain actually rolled,
+           so a bust below the line is visibly a bust below the line. -->
+      <svg v-if="showFlight" class="flight" viewBox="0 0 100 60" preserveAspectRatio="none">
+        <path v-if="flightPath" class="flight-trail" :d="flightPath" />
+        <!-- Drawn AFTER the trail: this is the player's line and it must stay
+             readable where the rocket crosses it, not get painted over. -->
+        <line class="flight-lock" x1="0" :y1="lockedY" x2="100" :y2="lockedY" />
+        <circle v-if="!busted" class="flight-head" :cx="headX" :cy="headY" r="1.6" />
+        <circle v-if="busted" class="flight-boom" :cx="headX" :cy="headY" r="2.2" />
+      </svg>
       <div class="gauge-mult mono">{{ gaugeText }}</div>
       <div class="gauge-sub">{{ gaugeSub }}</div>
       <!-- Chosen cash-out alongside the outcome — visible from the moment the
@@ -25,11 +37,11 @@
       <button
         v-else-if="state.phase === 'climbing'"
         class="rocket-btn cashout"
-        :class="{ armed: canCashOut }"
-        :disabled="!canCashOut"
-        @click="onCashOut"
+        :class="{ armed: canLockIn }"
+        :disabled="!canLockIn"
+        @click="onLockIn"
       >
-        CASH OUT @ {{ displayMult.toFixed(2) }}×
+        LOCK IN @ {{ displayMult.toFixed(2) }}×
         <span v-if="cashoutSats !== null" class="rocket-cashout-sats mono">
           {{ cashoutSats.toLocaleString() }} sats
         </span>
@@ -41,9 +53,16 @@
       </div>
     </div>
 
+    <!-- The cost of nerve, made visible: holding for a bigger multiplier drains
+         the win chance. That trade IS this beat — without it on screen the climb
+         reads as a countdown with no stakes. -->
     <div v-if="state.phase === 'climbing'" class="rocket-hint">
-      <span v-if="!canCashOut">arming at {{ minMult.toFixed(2) }}×…</span>
-      <span v-else-if="state.odds">auto cash-out at {{ targetMult.toFixed(2) }}×</span>
+      <span v-if="!canLockIn">arming at {{ minMult.toFixed(2) }}×…</span>
+      <template v-else>
+        <span class="hint-odds" :class="{ thin: liveWinPct < 20 }">{{ liveWinPct.toFixed(0) }}% to land</span>
+        <span class="hint-sep">·</span>
+        <span>auto-locks at {{ targetMult.toFixed(2) }}×</span>
+      </template>
     </div>
   </div>
 </template>
@@ -112,7 +131,9 @@ export default defineComponent({
       const dustSafe = 1 + props.dust / (tier * (1 - props.oddsEdgeBps / 10000))
       return Math.max(1.01, dustSafe)
     })
-    const canCashOut = computed(() => props.state.phase === 'climbing' && displayMult.value >= minMult.value)
+    const canLockIn = computed(() => props.state.phase === 'climbing' && displayMult.value >= minMult.value)
+    /** Win chance at the multiplier currently on the dial — drains as you hold. */
+    const liveWinPct = computed(() => (liveWin.value / ROCKET_ODDS_N) * 100)
     const canLaunch = computed(() => targetBet.value !== null && (props.state.phase === 'idle' || props.state.phase === 'resolved'))
 
     /** Live cashout sats = tier + houseStakeForCurrentWin (mirrors PlayView's math). */
@@ -143,8 +164,8 @@ export default defineComponent({
       rafId = requestAnimationFrame(tick)
     }
 
-    function onCashOut() {
-      if (!canCashOut.value) return
+    function onLockIn() {
+      if (!canLockIn.value) return
       commitCashOut(false)
     }
 
@@ -167,7 +188,10 @@ export default defineComponent({
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
       }
     })
-    onUnmounted(() => { if (rafId !== null) cancelAnimationFrame(rafId) })
+    onUnmounted(() => {
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      if (flightRaf !== null) cancelAnimationFrame(flightRaf)
+    })
 
     // The multiplier the rocket actually reached, derived from the revealed
     // roll. roll = lo is exactly the player's locked multiplier (the boundary):
@@ -179,6 +203,73 @@ export default defineComponent({
       if (roll == null) return null
       return ROCKET_ODDS_N / Math.max(1, ROCKET_ODDS_N - roll)
     })
+    // ── The flight ────────────────────────────────────────────────────
+    // The roll is committed on-chain and revealed only at settlement, so the
+    // client cannot know the bust point while the player is choosing. The
+    // flight is therefore a REPLAY of a settled outcome — the same thing the
+    // dice and roulette skins do — but it is the real one: the rocket climbs to
+    // the multiplier the chain actually rolled and dies there.
+    const flightMult = ref(1)
+    const busted = ref(false)
+    const flightPts = ref<Array<[number, number]>>([])
+    let flightRaf: number | null = null
+
+    /** Top of the altitude axis — always leaves headroom above both lines. */
+    const scaleTop = computed(() =>
+      Math.max(2, (crashMult.value ?? lockedMult.value) * 1.25, lockedMult.value * 1.25),
+    )
+    /** Altitude is logarithmic so 1× and 100× are legible on one axis. */
+    function altitude(m: number): number {
+      const t = Math.log(Math.max(1, m)) / Math.log(scaleTop.value)
+      return 60 - Math.min(1, t) * 56 - 2
+    }
+    const lockedY = computed(() => altitude(lockedMult.value))
+    const headX = computed(() => (flightPts.value.length ? flightPts.value[flightPts.value.length - 1][0] : 0))
+    const headY = computed(() => (flightPts.value.length ? flightPts.value[flightPts.value.length - 1][1] : altitude(1)))
+    const flightPath = computed(() =>
+      flightPts.value.length < 2 ? '' : 'M' + flightPts.value.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join('L'),
+    )
+    const showFlight = computed(() =>
+      props.state.phase === 'resolved' && crashMult.value != null && flightPts.value.length > 0,
+    )
+
+    function runFlight(bust: number) {
+      if (flightRaf !== null) cancelAnimationFrame(flightRaf)
+      flightPts.value = []
+      busted.value = false
+      flightMult.value = 1
+      // Duration tracks the outcome, so rounds stop feeling identical: a 1.08×
+      // bust is over in ~0.4s (brutal), a 12× climb takes ~4s (agonising).
+      const duration = Math.min(4500, 350 + Math.log(Math.max(1.01, bust)) * 1600)
+      const t0 = performance.now()
+      const step = (now: number) => {
+        const p = Math.min(1, (now - t0) / duration)
+        // Ease-in hard: the rocket hugs the floor, then rips. On a log altitude
+        // axis a gentle ease still draws a near-straight diagonal — which reads
+        // as a progress bar, not a launch. 2.6 gives it a real hockey stick.
+        const eased = Math.pow(p, 2.6)
+        flightMult.value = Math.pow(bust, eased)
+        flightPts.value.push([p * 100, altitude(flightMult.value)])
+        if (p < 1) { flightRaf = requestAnimationFrame(step); return }
+        flightRaf = null
+        busted.value = true
+      }
+      flightRaf = requestAnimationFrame(step)
+    }
+
+    // Fly as soon as the chain reveals where it actually busted; clear the old
+    // trail the moment a new round starts (LAUNCH AGAIN goes straight to
+    // `climbing`, never back through `idle`, so both have to reset it).
+    watch(() => [props.state.phase, crashMult.value] as const, ([phase, bust]) => {
+      if (phase === 'resolved' && typeof bust === 'number') { runFlight(bust); return }
+      if (phase === 'idle' || phase === 'climbing') {
+        if (flightRaf !== null) { cancelAnimationFrame(flightRaf); flightRaf = null }
+        flightPts.value = []
+        busted.value = false
+        flightMult.value = 1
+      }
+    })
+
     // Readout (chosen vs. outcome) shows from cash-out through the result —
     // you can't cash out once it's committed, so keep both numbers on screen.
     const showReadout = computed(() =>
@@ -231,8 +322,9 @@ export default defineComponent({
       gaugeClass, gaugeText, gaugeSub,
       displayMult, lockedMult, minMult, targetMult, cashoutSats,
       showReadout, resultText, resultClass,
-      canLaunch, canCashOut,
-      onLaunch, onCashOut,
+      canLaunch, canLockIn, liveWinPct,
+      onLaunch, onLockIn,
+      showFlight, flightPath, lockedY, headX, headY, busted,
     }
   },
 })
@@ -246,7 +338,61 @@ export default defineComponent({
   gap: 14px;
   width: 100%;
 }
+/* The flight sits behind the readout so the number stays the focal point and
+   the trajectory reads as context, not decoration competing with it. */
+.flight {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+/* NB: `vector-effect: non-scaling-stroke` makes stroke-width SCREEN pixels, not
+   viewBox units — sub-pixel values render invisible. These are px. */
+.flight-lock {
+  stroke: var(--gold, #ffd700);
+  stroke-width: 2.5;
+  stroke-dasharray: 6 4;
+  opacity: 1;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px rgba(0, 0, 0, 0.9));
+}
+.flight-trail {
+  fill: none;
+  stroke: var(--blue, #38bdf8);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  opacity: 1;
+  filter: drop-shadow(0 0 4px currentColor);
+}
+.rocket-skin.lost .flight-trail { stroke: var(--red, #ff4444); }
+.rocket-skin.won .flight-trail { stroke: var(--green, #00ff88); }
+.flight-head {
+  fill: #fff;
+  filter: drop-shadow(0 0 3px var(--blue, #38bdf8));
+}
+.flight-boom {
+  fill: var(--red, #ff4444);
+  animation: boom 0.45s ease-out forwards;
+}
+.rocket-skin.won .flight-boom { fill: var(--green, #00ff88); }
+@keyframes boom {
+  0%   { r: 1.6; opacity: 1; }
+  60%  { r: 5;   opacity: 0.55; }
+  100% { r: 7;   opacity: 0; }
+}
+
+/* The readout sits over the trajectory, so it needs its own ground to stand on
+   or the two just interfere with each other. */
+.gauge-mult, .gauge-sub, .gauge-readout {
+  position: relative;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.95), 0 0 4px rgba(0, 0, 0, 0.9);
+}
+
 .gauge {
+  position: relative;
   width: 100%;
   min-height: 160px;
   display: flex;
@@ -380,4 +526,9 @@ export default defineComponent({
 .rocket-hint {
   font-size: 0.62rem; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted);
 }
+/* Win chance drains as the player holds — it turns red once the bet is a
+   longshot, so the cost of nerve is felt, not just read. */
+.hint-odds { color: var(--green, #00ff88); font-weight: 600; }
+.hint-odds.thin { color: var(--red, #ff4444); }
+.hint-sep { opacity: 0.4; margin: 0 5px; }
 </style>

@@ -234,17 +234,29 @@
                     <span class="tx-unit">sats</span>
                   </span>
                 </div>
+                <!-- What was actually bet, for game rows: stake · win chance · outcome. -->
+                <div v-if="detailOf(act)" class="tx-detail text-muted">{{ detailOf(act) }}</div>
                 <div class="tx-bottom">
                   <span class="tx-time text-muted">{{ formatRelative(act.createdAt) }}</span>
                   <span class="tx-status" :class="act.settled ? 'settled' : 'pending'">
                     {{ act.settled ? 'Settled' : 'Pending' }}
                   </span>
                 </div>
-                <div v-if="act.txs.length > 1" class="tx-id mono">
-                  {{ act.txs.length }} transactions grouped
-                </div>
-                <div v-else-if="act.txs[0]" class="tx-id mono" @click="copyText(txidOf(act.txs[0]))">
-                  {{ txidOf(act.txs[0]).slice(0, 12) }}…{{ txidOf(act.txs[0]).slice(-8) }}
+                <!-- Every member tx, not just the first: a game groups its co-fund
+                     and settle, and "3 transactions grouped" gave no way to look
+                     any of them up. Click the id to copy, ↗ to open the explorer. -->
+                <div v-for="(t, i) in act.txs" :key="`${i}:${txidOf(t)}`" class="tx-id-row">
+                  <span class="tx-id mono" :title="txidOf(t)" @click="copyText(txidOf(t))">
+                    {{ txidOf(t).slice(0, 12) }}…{{ txidOf(t).slice(-8) }}
+                  </span>
+                  <a
+                    v-if="explorerUrlFor(txidOf(t))"
+                    class="tx-explorer"
+                    :href="explorerUrlFor(txidOf(t))"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open in the Arkade explorer"
+                  >&#8599;</a>
                 </div>
               </div>
             </div>
@@ -368,6 +380,7 @@ import { isCredentialBackupSupported, saveWalletToBrowser } from '@/utils/creden
 import type { GameSummary } from '@/services/api'
 import { detectLnurlInput, resolveLnurlToInvoice } from '@/utils/lnurl'
 import { encodeBip21 } from '@/utils/bip21'
+import { explorerTxUrl } from '@/utils/explorerUrl'
 import { getErrorMessage, friendlyError } from '@/utils/errors'
 import { logDiag, formatDiagnostics } from '@/utils/diagnosticsLog'
 import { openLnurlSession, lnurlServerForNetwork, type LnurlSession } from '@/services/lnurlSession'
@@ -536,6 +549,14 @@ export default defineComponent({
     const txidOf = (tx: ArkTransaction): string =>
       tx.key.arkTxid || tx.key.commitmentTxid || tx.key.boardingTxid
 
+    // The one-line game summary the coinflip resolver attaches (stake · win
+    // chance · outcome). Typed loosely because `metadata` is the SDK's free-form
+    // Record<string, unknown> — anything but a string means "no summary".
+    const detailOf = (act: { intent?: { metadata?: Record<string, unknown> } }): string => {
+      const d = act.intent?.metadata?.detail
+      return typeof d === 'string' ? d : ''
+    }
+
     // ── LNURL session (amountless Lightning Address receive) ──────────
     // Mirrors the wallet's behaviour: open an SSE session against the
     // shared Arkade LNURL server, get back a static `lnurl1...` bech32
@@ -543,6 +564,11 @@ export default defineComponent({
     // via the same SSE stream; we just refresh the balance on receipt
     // (the contract watcher picks up the VTXO arrival anyway).
     const networkName = computed<string | null>(() => store.state.ark?.info?.network ?? null)
+    // Activity txids are Ark VIRTUAL txids, so these must point at an Arkade
+    // explorer, never mempool.space — explorerTxUrl owns that mapping and
+    // returns null on an unknown network, in which case the row shows the id
+    // as copy-only rather than a link that would 404.
+    const explorerUrlFor = (txid: string): string | null => explorerTxUrl(txid, networkName.value)
     const lnurlServerUrl = computed(() => lnurlServerForNetwork(networkName.value))
     const lnurlSession = ref<LnurlSession | null>(null)
     const lnurlString = computed(() => lnurlSession.value?.lnurl ?? '')
@@ -1001,6 +1027,7 @@ export default defineComponent({
       hasUnconfirmedBoarding, unconfirmedBoardingAmount,
       hasRecoverable, recoverableAmount,
       isMutinyTestnet, activityHistory, activityStatus, retryActivity, txidOf, formatRelative,
+      detailOf, explorerUrlFor,
       tab,
       depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
       showAmountForm, copySheetOpen, copyOptions,
@@ -1332,10 +1359,20 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
   &.boarding { background: rgba(247, 201, 72, 0.12); color: var(--gold); }
 }
+/* Game params (stake · win chance · outcome) — sits between the label and the
+   time/status line, so the row reads "what" then "how much" then "when". */
+.tx-detail { margin-top: 2px; font-size: 0.72rem; letter-spacing: 0.2px; }
+
+.tx-id-row { display: flex; align-items: center; gap: 6px; }
 .tx-id {
   margin-top: 6px; font-size: 0.68rem; color: var(--text-muted);
   cursor: pointer;
   &:hover { color: var(--blue); }
+}
+.tx-explorer {
+  margin-top: 6px; font-size: 0.7rem; line-height: 1;
+  color: var(--text-muted); text-decoration: none;
+  &:hover { color: var(--gold); }
 }
 
 .server-info {

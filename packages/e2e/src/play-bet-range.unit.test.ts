@@ -13,7 +13,18 @@ import { ArkAddress } from '@arkade-os/sdk'
 const { schnorr } = require('@noble/curves/secp256k1.js')
 const server = require('arkade-coinflip-server')
 const emulatorModule = require('arkade-coinflip-server/dist/emulator.js')
-const { BetExceedsCapacityError } = require('arkade-coinflip-server/dist/vtxo-pool.js')
+const { BetExceedsCapacityError, houseVtxoCache } = require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+// `houseVtxoCache` is a module singleton and `/play` now accepts a snapshot
+// younger than PLAY_VTXO_MAX_AGE_MS instead of force-syncing every call. These
+// cases swap `deps.wallet.getVtxos` wholesale between them — the empty-wallet
+// factory below would otherwise leave an empty snapshot that the later
+// capacity cases inherit, and they'd measure 0 sat free.
+//
+// Production never swaps a wallet under the cache; it mutates house VTXOs
+// through paths that already invalidate (settle) or drop the spent outpoint
+// (co-fund). This mirrors that discipline for the harness.
+beforeEach(() => houseVtxoCache.invalidate())
 
 const DUST = 330
 

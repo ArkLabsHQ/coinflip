@@ -348,3 +348,64 @@ describe('/play reuses a recent VTXO snapshot instead of syncing every time', ()
     expect(res.body.capacity).toBe(CAPACITY)
   })
 })
+
+/**
+ * A pinned reservation must be DOWNGRADED once the co-fund has spent those
+ * inputs — not merely tolerated by the split guard.
+ *
+ * Production showed "[house pool] split deferred — 1 outpoint(s) reserved by
+ * in-flight games" repeating forever while the admin dashboard listed the only
+ * existing coin as FREE. Both were right: the reservation named an input the
+ * co-fund had already spent. The split refuses on ANY live outpoint pin, so the
+ * pool stayed stuck at one VTXO — one concurrent game.
+ *
+ * Fixed at the source: v4/cofund.ts re-reserves liability-only the moment
+ * cofundArkTxid is set, mirroring what rebuildReservations already does on
+ * restart. Loosening the split guard instead would be WRONG — it deliberately
+ * fires even for a pin the pool's own free set does not contain, because the
+ * SDK's send() selects inputs from ALL spendable coins rather than from that
+ * set (reservation-safe-selfspend.unit.test.ts, P0 #53).
+ */
+describe('a co-funded game holds liability, not pins', () => {
+  const { reservations, freeStakeTotal: freeTotal } =
+    require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+  afterEach(() => {
+    for (const r of reservations.snapshot()) reservations.release(r.gameId)
+  })
+
+  it('the post-cofund shape pins no outpoints but keeps the liability', () => {
+    // What v4/cofund.ts now installs once the inputs are spent: the bankroll
+    // ceiling still holds, and nothing is left to defer the pool split on.
+    reservations.reserve('game-after-cofund', [], 50_000)
+    expect(reservations.reservedOutpoints().size).toBe(0)
+    expect(reservations.totalLiability()).toBe(50_000)
+  })
+
+  it('re-reserving a game REPLACES its pins rather than adding to them', () => {
+    // The downgrade depends on this: reserve() is a set(), not an append. If it
+    // appended, the pins would survive and the wedge would persist.
+    const op = `${'dd'.repeat(32)}:0`
+    reservations.reserve('g1', [op], 50_000)
+    expect(reservations.reservedOutpoints().has(op)).toBe(true)
+    reservations.reserve('g1', [], 50_000)
+    expect(reservations.reservedOutpoints().has(op)).toBe(false)
+    expect(reservations.totalLiability()).toBe(50_000)
+  })
+
+  it('a pre-cofund pin still excludes its coin from the free stake total', () => {
+    // Asserted so the downgrade cannot be mistaken for weakening pre-cofund
+    // protection, which is what actually guards an in-flight co-fund.
+    const before = freeTotal(VTXOS)
+    reservations.reserve('pre-cofund', [`${HEALTHY.txid}:${HEALTHY.vout}`], 50_000)
+    expect(freeTotal(VTXOS)).toBe(before - HEALTHY.value)
+  })
+
+  it('and the liability-only downgrade returns that coin to the free total', () => {
+    const before = freeTotal(VTXOS)
+    reservations.reserve('g', [`${HEALTHY.txid}:${HEALTHY.vout}`], 50_000)
+    expect(freeTotal(VTXOS)).toBe(before - HEALTHY.value)
+    reservations.reserve('g', [], 50_000)
+    expect(freeTotal(VTXOS)).toBe(before)
+  })
+})

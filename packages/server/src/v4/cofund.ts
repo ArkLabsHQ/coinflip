@@ -15,6 +15,7 @@ import { timeoutReject, ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
 import type { AppDeps } from '../deps.js'
 import { withArkSubmit, cofundLocks } from './concurrency.js'
 import { loadV4Game, toXOnly } from './shared.js'
+import { reservations } from '../vtxo-pool.js'
 import type { V4CofundRequest, V4CofundResult, V4CofundFinalizeRequest, V4CofundFinalizeResult } from './types.js'
 
 /**
@@ -114,6 +115,21 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   state.houseSignedCheckpoints = houseSignedCheckpoints
   state.playerInputCount = k
   await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
+
+  // The co-fund has spent the pinned house inputs, so pinning them is now
+  // meaningless — but NOT harmless: the pool-split guard defers on ANY live
+  // outpoint reservation, so stale pins blocked every split for the rest of the
+  // game's life, and forever if it never resolved. Observed in production as a
+  // repeating "[house pool] split deferred — 1 outpoint(s) reserved by in-flight
+  // games" while the admin correctly showed the only existing coin as free: the
+  // reservation named an outpoint that no longer existed.
+  //
+  // Downgrade to liability-only, which still holds the bankroll ceiling until
+  // the game resolves. `reserve` replaces the entry for this gameId, and this is
+  // exactly the transition `rebuildReservations` already applies on restart
+  // (`v4.cofundArkTxid ? [] : houseInputs`) — the live path simply never did it,
+  // so a restart "fixed" what a running server could not.
+  reservations.reserve(gameId, [], state.houseStake ?? 0)
 
   return { arkTxid, playerCheckpoints }
 }

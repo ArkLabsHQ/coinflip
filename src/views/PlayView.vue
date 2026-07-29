@@ -1217,6 +1217,11 @@ export default defineComponent({
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* .control-group is a centering flex column, so this collapses to content
+     width without it and space-between has nothing to distribute — the min and
+     max rail labels then render flush together ("3311,928"). Same fix as the
+     sibling .amount-readout above. */
+  width: 100%;
   font-size: 0.58rem;
   letter-spacing: 0.5px;
   text-transform: uppercase;

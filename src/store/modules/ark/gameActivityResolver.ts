@@ -10,6 +10,7 @@
  * module so the game-tagging logic is unit-testable without the Vuex store.
  */
 import type { ActivityResolver, ArkTransaction } from '@arkade-os/sdk'
+import { formatWinPct } from '@/utils/rungSnap'
 
 /** The odds a game was played at — the skin ladder rung, as the server saw it. */
 export interface GameOdds {
@@ -63,20 +64,10 @@ export function loadGameRecords(): CoinflipGameRecord[] {
   }
 }
 
-/**
- * Win chance as a percentage string, e.g. "49.5%" / "17%".
- *
- * Mirrors PlayView's `winPctLabel` — one decimal below 10%, whole numbers
- * above — so the activity row shows the player the same number the odds
- * slider showed them when they placed the bet. Duplicated rather than shared
- * because this module is deliberately Vue-free (the store loads it, and it's
- * unit-tested without a component); importing a view helper here would invert
- * the dependency for two lines of arithmetic.
- */
-export function formatWinPct(odds: GameOdds): string {
-  const p = ((odds.target - odds.lo) / odds.n) * 100
-  return (p >= 10 ? Math.round(p) : Math.round(p * 10) / 10) + '%'
-}
+// Re-exported from the shared ladder math. It used to be duplicated here to
+// keep this module Vue-free; `@/utils/rungSnap` is Vue-free too, so the copy
+// is gone and the formatting rule now lives in exactly one place.
+export { formatWinPct }
 
 /** Row label for a game — the skin actually played, e.g. "Rocket game". */
 export function gameLabel(g: CoinflipGameRecord): string {

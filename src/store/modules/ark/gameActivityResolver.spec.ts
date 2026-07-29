@@ -4,7 +4,6 @@ import {
   gameActivityResolver,
   loadGameRecords,
   txidOf,
-  formatWinPct,
   gameLabel,
   gameDetail,
   type CoinflipGameRecord,
@@ -35,14 +34,6 @@ describe('txidOf', () => {
     expect(txidOf(tx({ arkTxid: 'a', commitmentTxid: 'c', boardingTxid: 'b' }))).toBe('a')
     expect(txidOf(tx({ commitmentTxid: 'c', boardingTxid: 'b' }))).toBe('c')
     expect(txidOf(tx({ boardingTxid: 'b' }))).toBe('b')
-  })
-})
-
-describe('formatWinPct', () => {
-  it('shows whole percents at 10% and above, one decimal below', () => {
-    expect(formatWinPct({ n: 2, lo: 0, target: 1 })).toBe('50%')
-    expect(formatWinPct({ n: 100, lo: 0, target: 12 })).toBe('12%')
-    expect(formatWinPct({ n: 1000, lo: 0, target: 45 })).toBe('4.5%')
   })
 })
 

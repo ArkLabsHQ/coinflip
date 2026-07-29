@@ -87,6 +87,7 @@
           :max="usableMax"
           step="1"
           v-model.number="betAmount"
+          @change="rememberAmount"
           :disabled="isAutoRunning || !canBet"
           aria-label="Bet amount"
         />
@@ -129,6 +130,7 @@
           :max="maxStep"
           step="1"
           v-model.number="sliderIndex"
+          @change="rememberStep"
           :disabled="isAutoRunning"
           aria-label="Odds"
         />
@@ -815,13 +817,16 @@ export default defineComponent({
       betAmount.value = Math.min(Math.max(betAmount.value, b.min), usableMax.value)
     })
 
-    // Remember where the player left both controls. Declared AFTER the clamp
-    // watchers so that within one flush we persist the settled value, not an
-    // out-of-envelope intermediate that's about to be corrected. Writing on
-    // every change (rather than on flip) is what makes a reload mid-tweak keep
-    // the bet the player was actually looking at.
-    watch(betAmount, saveBetAmount)
-    watch(sliderIndex, (i) => saveStep(currentSkinId.value, i))
+    // Remember where the player left both controls — but ONLY on their own
+    // input, never on a clamp. Every other write to these refs above is the
+    // envelope pulling them into range, and persisting that would let a
+    // temporary dip in house capacity silently overwrite the player's chosen
+    // stake: restore 45,000 → clamp to 1,928 → save 1,928, and the 45,000 is
+    // gone for good. Saving only the gesture keeps the preference intact and
+    // lets the clamp govern the display alone, so it comes back on its own once
+    // capacity recovers. `change` (not `input`) also means one write per drag.
+    function rememberAmount() { saveBetAmount(betAmount.value) }
+    function rememberStep() { saveStep(currentSkinId.value, sliderIndex.value) }
 
     return {
       // Game config
@@ -836,6 +841,8 @@ export default defineComponent({
       autoOptions: AUTO_OPTIONS, autoCount, autoRemaining, isAutoRunning, isAutoMode, stopRequested,
       autoCountLabel, autoRemainingLabel, autoProgressLabel,
       winSatsLabel,
+      // Preference persistence (user gesture only — see rememberAmount above)
+      rememberAmount, rememberStep,
       // Skin
       skins: SKINS, currentSkinId, currentSkin, selectSkin,
       skinOwnsGesture, onSkinLaunch, onSkinCashout,

@@ -407,3 +407,98 @@ describe('outpoints arkd rejected as spent are not re-offered', () => {
     expect(before).toBeGreaterThan(0)
   })
 })
+
+/**
+ * `/play` reads a WARM snapshot rather than forcing a live wallet sync.
+ *
+ * Measured in production: `wallet:getVtxos` was 99.6% of /play — median 2,562ms
+ * of a 2,572ms request, with every other phase at 0ms — because it forced a full
+ * SDK re-sync per bet. That is what HOUSE_VTXO_CACHE_TTL_MS was designed to
+ * avoid; the forced refresh contradicted its own docstring.
+ *
+ * An earlier attempt at this (reverted) failed because a spent coin could be
+ * re-picked. The hole was that the CO-FUND spends house inputs without telling
+ * the cache — the split and the renewal settle both invalidate, the co-fund did
+ * not — and it is sharper since the post-co-fund reservation downgrade unpins
+ * those inputs. These pin the invariants that make the warm read safe.
+ */
+describe('warm snapshot for /play', () => {
+  const {
+    houseVtxoCache, HOUSE_VTXO_CACHE_TTL_MS, spentOutpoints, reservations, freeStakeTotal,
+  } = require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+  /** The pool-maintenance interval that keeps the snapshot warm. */
+  const POOL_TICK_MS = 120_000
+
+  beforeEach(() => {
+    houseVtxoCache.invalidate()
+    spentOutpoints.clear()
+    for (const r of reservations.snapshot()) reservations.release(r.gameId)
+  })
+
+  function countingDeps() {
+    const deps = makeDeps()
+    let calls = 0
+    deps.wallet.getVtxos = async () => { calls += 1; return VTXOS }
+    return { deps, calls: () => calls }
+  }
+
+  it('the TTL outlives the pool tick, or the hot path pays anyway', () => {
+    // At exactly the tick interval the TTL expires as the next tick is due, and
+    // whichever loses the race hands /play a full re-sync — the 2.5s this
+    // removes. A margin means the tick always refreshes first.
+    expect(HOUSE_VTXO_CACHE_TTL_MS).toBeGreaterThan(POOL_TICK_MS)
+  })
+
+  it('syncs once cold, then serves every later read from the snapshot', async () => {
+    const { deps, calls } = countingDeps()
+    await houseVtxoCache.get(deps)
+    expect(calls()).toBe(1) // cold start still pays once
+    await houseVtxoCache.get(deps)
+    await houseVtxoCache.get(deps)
+    expect(calls()).toBe(1) // the whole point: no per-bet sync
+  })
+
+  it('removeOutpoint drops a spent coin from the SAME snapshot a later read sees', async () => {
+    // The co-fund's eviction has to be visible to the next selection without a
+    // refetch, or the warm read re-offers a coin the co-fund just spent.
+    const { deps, calls } = countingDeps()
+    await houseVtxoCache.get(deps)
+    houseVtxoCache.removeOutpoint(HEALTHY.txid, HEALTHY.vout)
+    const after = await houseVtxoCache.get(deps)
+    expect(calls()).toBe(1) // served warm, not refetched
+    expect(after.map((v: any) => v.txid)).not.toContain(HEALTHY.txid)
+  })
+
+  it('and that eviction removes the coin from the free stake total too', async () => {
+    const { deps } = countingDeps()
+    const before = freeStakeTotal(await houseVtxoCache.get(deps))
+    houseVtxoCache.removeOutpoint(HEALTHY.txid, HEALTHY.vout)
+    expect(freeStakeTotal(await houseVtxoCache.get(deps))).toBe(before - HEALTHY.value)
+  })
+
+  it('an invalidate (split / renewal settle) still forces a fresh sync', async () => {
+    const { deps, calls } = countingDeps()
+    await houseVtxoCache.get(deps)
+    expect(calls()).toBe(1)
+    houseVtxoCache.invalidate()
+    await houseVtxoCache.get(deps)
+    expect(calls()).toBe(2)
+  })
+
+  it('a reservation still excludes its coin from a warm read', async () => {
+    // Snapshot age is irrelevant to this: selection re-checks isReserved under
+    // the mutex, so a coin another game just took can never be double-picked.
+    const { deps } = countingDeps()
+    const all = await houseVtxoCache.get(deps)
+    const before = freeStakeTotal(all)
+    reservations.reserve('other-game', [`${HEALTHY.txid}:${HEALTHY.vout}`], 1)
+    expect(freeStakeTotal(all)).toBe(before - HEALTHY.value)
+  })
+
+  it('the advertised capacity is unchanged by reading warm', async () => {
+    const deps = makeDeps()
+    const res = await request(mount(deps)).get('/api/tiers')
+    expect(res.body.capacity).toBe(CAPACITY)
+  })
+})

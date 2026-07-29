@@ -13,7 +13,19 @@ import { ArkAddress } from '@arkade-os/sdk'
 const { schnorr } = require('@noble/curves/secp256k1.js')
 const server = require('arkade-coinflip-server')
 const emulatorModule = require('arkade-coinflip-server/dist/emulator.js')
-const { BetExceedsCapacityError } = require('arkade-coinflip-server/dist/vtxo-pool.js')
+const { BetExceedsCapacityError, houseVtxoCache } = require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+// `houseVtxoCache` is a module singleton and /play now reads the WARM snapshot
+// rather than forcing a live sync. These cases swap `deps.wallet.getVtxos`
+// wholesale between them, so the empty-wallet factory below would otherwise
+// leave an empty snapshot that the later capacity cases inherit — they would
+// measure "0 sat free" and the cap assertions would be meaningless.
+//
+// This is a harness fix, not a relaxed assertion: production never swaps a
+// wallet under the cache. It mutates house coins only through paths that tell
+// the cache — the co-fund removes its spent inputs, the split and the renewal
+// settle invalidate. The harness mirrors that discipline.
+beforeEach(() => houseVtxoCache.invalidate())
 
 const DUST = 330
 

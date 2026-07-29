@@ -148,6 +148,14 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   state.playerInputCount = k
   await timer.step('db:update', () => deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) }))
 
+  // The co-fund has SPENT these house inputs. Drop them from the snapshot so no
+  // later selection can re-pick them — the one event that mutates the house coin
+  // set without telling the cache, which is why /play had to force a live sync
+  // to stay correct. The split and the renewal settle already invalidate; this
+  // was the hole. It matters more since the reservation downgrade below unpins
+  // them: unpinned AND still listed in the snapshot is exactly a re-pick.
+  for (const h of state.houseInputs) houseVtxoCache.removeOutpoint(h.txid, h.vout)
+
   // The co-fund has spent the pinned house inputs, so pinning them is now
   // meaningless — but NOT harmless: the pool-split guard defers on ANY live
   // outpoint reservation, so stale pins blocked every split for the rest of the

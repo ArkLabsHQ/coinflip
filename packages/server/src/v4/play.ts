@@ -18,6 +18,7 @@ import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
 import { hashSecret, networkHrpFromArkInfo } from '../house-wallet.js'
 import { reservations, selectionMutex, outpointKey, houseVtxoCache, freeStakeTotal, HouseBusyError, BetExceedsCapacityError, spentOutpoints } from '../vtxo-pool.js'
+import { startPhaseTimer } from '../phase-timer.js'
 import { loadEmulatorConfig } from '../emulator.js'
 import { computeHouseStake } from '../house-economics.js'
 import type { AppDeps } from '../deps.js'
@@ -89,7 +90,8 @@ const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
  * signing happens here; the co-fund is the next handshake step.
  */
 export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V4PlayResult> {
-  const tiers = await getTiers(deps)
+  const timer = startPhaseTimer('v4/play')
+  const tiers = await timer.step('cfg:tiers', () => getTiers(deps))
   const dust = Number(deps.arkInfo.dust ?? 546n)
   // `tiers` is now just the rails: any integer amount between them is playable.
   // The real constraint is on the house stake (dust <= stake <= capacity),
@@ -98,7 +100,8 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   if (!Number.isInteger(req.tier) || req.tier < railMin || req.tier > railMax) {
     throw new Error(`Invalid bet amount ${req.tier}: must be an integer in [${railMin}, ${railMax}]`)
   }
-  if ((await deps.repos.games.countPendingForPlayer(req.playerPubkey)) >= 3) {
+  const pending = await timer.step('db:pending', () => deps.repos.games.countPendingForPlayer(req.playerPubkey))
+  if (pending >= 3) {
     throw new Error('Too many pending games. Complete or wait for existing games to expire.')
   }
 
@@ -122,7 +125,8 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     if (!Number.isInteger(n) || n < 2 || !Number.isInteger(target) || !Number.isInteger(lo) || lo < 0 || target <= lo || target > n) {
       throw new Error(`Invalid odds: need oddsN>=2 and 0<=oddsLo<oddsTarget<=oddsN (got n=${n}, target=${target}, lo=${lo})`)
     }
-    houseStake = computeHouseStake(playerStake, n, target, lo, await getOddsEdgeBps(deps))
+    const edgeBps = await timer.step('cfg:edge', () => getOddsEdgeBps(deps))
+    houseStake = computeHouseStake(playerStake, n, target, lo, edgeBps)
     if (houseStake < dust) {
       throw new Error(`Odds [${lo},${target})/${n} at tier ${req.tier} give a sub-dust house stake (${houseStake}); raise the tier or win probability.`)
     }
@@ -136,7 +140,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   const houseHash = hashSecret(houseSecret) // hex string
   const houseHashBytes = hex.decode(houseHash)
 
-  const emulator = await loadEmulatorConfig()
+  const emulator = await timer.step('emulator', () => loadEmulatorConfig())
   if (!emulator) {
     throw new Error('Emulator not configured or unreachable. /api/v4/play requires arkade-script support.')
   }
@@ -156,12 +160,13 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   const cancelDelay = now + Math.max(1, Math.floor(windowSecs / 2))
   const setupExpiration = now + 600
 
-  const housePubkey = toXOnly(await deps.identity.compressedPublicKey())
+  const housePubkey = toXOnly(await timer.step('key:house', () => deps.identity.compressedPublicKey()))
   const serverPubkey = toXOnly(hex.decode(deps.arkInfo.signerPubkey))
   const playerPubkey = hex.decode(req.playerPubkey)
   const playerHashBytes = hex.decode(req.playerHash)
   const playerPayoutPkScript = ArkAddress.decode(req.playerPayoutAddress).pkScript
-  const housePayoutPkScript = ArkAddress.decode(await deps.wallet.getAddress()).pkScript
+  const houseAddr = await timer.step('wallet:getAddress', () => deps.wallet.getAddress())
+  const housePayoutPkScript = ArkAddress.decode(houseAddr).pkScript
 
   const gameId = uuidv4()
 
@@ -178,9 +183,10 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   // window, which stays safe by construction (vtxo-pool.ts): the under-lock isReserved
   // re-check excludes a coin another game just reserved, and a coin spent before the
   // co-fund only fails the escrow submit (caught + retried), never a double-spend.
-  const vtxos = await houseVtxoCache.refresh(deps)
-  const maxBetFractionBps = await getMaxBetFractionBps(deps)
-  await selectionMutex.runExclusive(async () => {
+  // Historically the single most expensive leg: a full SDK re-sync per bet.
+  const vtxos = await timer.step('wallet:getVtxos', () => houseVtxoCache.refresh(deps))
+  const maxBetFractionBps = await timer.step('cfg:maxBet', () => getMaxBetFractionBps(deps))
+  await timer.step('select+reserve', () => selectionMutex.runExclusive(async () => {
     const choose = (vtxos: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] | null => {
       // `spentOutpoints` excludes coins arkd has already refused to spend. A
       // fresh getVtxos() still LISTS a coin stranded in a settle intent that
@@ -240,12 +246,13 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       leaf: serializeTapLeaf(v.forfeitTapLeafScript), tapTree: hex.encode(v.tapTree),
     }))
     reservations.reserve(gameId, picked.map((v) => outpointKey(v.txid, v.vout)), houseStake)
-  })
+  }))
   if (houseInputs.length === 0) throw new HouseBusyError('House is busy. Try again shortly.')
 
   // Pot + covenant are derived AFTER the fold so the covenant embeds the (possibly
   // folded) houseStake and output 0 matches the agreed pot in Guard 1.
   const pot = playerStake + houseStake
+  timer.mark('covenant')
   const covenantScript = new CoinflipJointPotScript({
     creatorPubkey: housePubkey, playerPubkey, serverPubkey,
     creatorHash: houseHashBytes, playerHash: playerHashBytes,
@@ -277,7 +284,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     exitDelay, pot, houseStake, potAddress, houseInputs, covenant,
   }
   try {
-    await deps.repos.games.save({
+    await timer.step('db:save', () => deps.repos.games.save({
       id: gameId,
       tier: req.tier,
       playerPubkey: req.playerPubkey,
@@ -286,11 +293,20 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       playerChangeAddress: req.playerChangeAddress,
       houseSecretHex: Buffer.from(houseSecret).toString('hex'),
       houseVtxosJson: JSON.stringify(state),
-    })
+    }))
   } catch (err) {
     reservations.release(gameId)
+    // Log the breakdown even on the failure path — a slow /play that then throws
+    // is exactly the case worth seeing, and it would otherwise be invisible.
+    timer.done(true)
     throw err
   }
+
+  // Emits one line when the request was slow, e.g.
+  //   [timing] v4/play total=3451ms wallet:getVtxos=2980 select+reserve=310 …
+  // so the dominant leg is a reported fact rather than something inferred by
+  // reading the handler and guessing which await looks expensive.
+  timer.done()
 
   return {
     gameId, potAddress, networkHrp, pot, betAmount: req.tier, houseStake,

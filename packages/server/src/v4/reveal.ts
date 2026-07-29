@@ -21,6 +21,7 @@ import type { AppDeps } from '../deps.js'
 import { withArkSubmit, revealLocks, sleep } from './concurrency.js'
 import { rebuildCovenant } from './shared.js'
 import type { V4State, V4RevealRequest, V4RevealResult, V4CooperativeExitRequest, V4CooperativeExitResult } from './types.js'
+import { startPhaseTimer, type PhaseTimer } from '../phase-timer.js'
 
 /** Fail-closed: the house co-signs ONLY a tx byte-shape-identical to the split-back
  *  it rebuilt (single input at the pot outpoint + CSV sequence, exact split outputs).
@@ -123,11 +124,16 @@ export async function handleV4CooperativeExit(
  * marks the game resolved.
  */
 export async function handleV4Reveal(gameId: string, req: V4RevealRequest, deps: AppDeps): Promise<V4RevealResult> {
-  return revealLocks.runExclusive(gameId, () => handleV4RevealInner(gameId, req, deps))
+  // The timer starts OUTSIDE the lock so a queue behind a concurrent reveal for
+  // the same game shows up as `lock`, rather than silently inflating whatever
+  // phase happens to run first.
+  const timer = startPhaseTimer('v4/reveal', gameId)
+  timer.mark('lock')
+  return revealLocks.runExclusive(gameId, () => handleV4RevealInner(gameId, req, deps, timer))
 }
 
-async function handleV4RevealInner(gameId: string, req: V4RevealRequest, deps: AppDeps): Promise<V4RevealResult> {
-  const game = await deps.repos.games.get(gameId)
+async function handleV4RevealInner(gameId: string, req: V4RevealRequest, deps: AppDeps, timer: PhaseTimer): Promise<V4RevealResult> {
+  const game = await timer.step('db:get', () => deps.repos.games.get(gameId))
   if (!game) throw new Error('Game not found')
   const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
   if (state.protocolVersion !== 'v4') throw new Error('Not a v4 game')
@@ -167,7 +173,7 @@ async function handleV4RevealInner(gameId: string, req: V4RevealRequest, deps: A
   }
   let settleTxid = ''
   for (let a = 0; a < 10; a++) {
-    const res = await withArkSubmit(postOnce)
+    const res = await timer.step(`emulator:post${a > 0 ? ':retry' + a : ''}`, () => withArkSubmit(postOnce))
     if (res.ok) { settleTxid = res.txid; break }
     const transient = res.status >= 500 && /not found|VTXO_NOT_FOUND|failed to process/i.test(res.text)
     if (!transient || a === 9) throw new Error(`Emulator rejected settle: ${res.status} ${res.text}`)
@@ -176,12 +182,13 @@ async function handleV4RevealInner(gameId: string, req: V4RevealRequest, deps: A
 
   const winner: 'player' | 'house' = outcome === 'player' ? 'player' : 'house'
   reservations.release(gameId)
-  await deps.repos.games.update(gameId, {
+  await timer.step('db:update', () => deps.repos.games.update(gameId, {
     status: 'resolved',
     winner,
     payoutAmount: state.pot,
     playerSecretHex: req.playerSecretHex,
-  })
+  }))
+  timer.done()
 
   return { winner, settleTxid, payout: state.pot, houseSecretHex: game.house_secret_hex, roll }
 }

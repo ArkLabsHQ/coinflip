@@ -15,7 +15,7 @@ import { timeoutReject, ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
 import type { AppDeps } from '../deps.js'
 import { withArkSubmit, cofundLocks } from './concurrency.js'
 import { loadV4Game, toXOnly } from './shared.js'
-import { reservations } from '../vtxo-pool.js'
+import { reservations, spentOutpoints, houseVtxoCache } from '../vtxo-pool.js'
 import type { V4CofundRequest, V4CofundResult, V4CofundFinalizeRequest, V4CofundFinalizeResult } from './types.js'
 
 /**
@@ -83,12 +83,41 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   // checkpoints (trailing m), return the player checkpoints (leading k).
   const houseVins = Array.from({ length: m }, (_, i) => k + i)
   const signed = await deps.identity.sign(arkTx, houseVins)
-  const { arkTxid, signedCheckpointTxs } = await withArkSubmit(() =>
-    timeoutReject(
-      deps.wallet.arkProvider.submitTx(base64.encode(signed.toPSBT()), req.checkpoints),
-      ARK_SUBMIT_TIMEOUT_MS, 'arkd submitTx',
-    ),
-  )
+  let arkTxid: string
+  let signedCheckpointTxs: string[]
+  try {
+    ;({ arkTxid, signedCheckpointTxs } = await withArkSubmit(() =>
+      timeoutReject(
+        deps.wallet.arkProvider.submitTx(base64.encode(signed.toPSBT()), req.checkpoints),
+        ARK_SUBMIT_TIMEOUT_MS, 'arkd submitTx',
+      ),
+    ))
+  } catch (e) {
+    // arkd refused a house input as already spent. That is not the player's
+    // fault and, left alone, it REPEATS: a fresh getVtxos() still lists a coin
+    // stranded in a settle intent that failed to delete, so the next /play picks
+    // the same dead coin and the next game dies identically (seen in production
+    // as repeated VTXO_ALREADY_SPENT at co-fund).
+    //
+    // Deny the coins for this game so selection stops offering them. The
+    // deny-list only ever removes coins from selection — worst case the house
+    // reports itself busy, never a double-spend — and entries expire, because a
+    // coin held by a lingering intent becomes spendable again once arkd clears
+    // it. Behaviour is otherwise unchanged: the error still propagates.
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/already spent|ALREADY_SPENT/i.test(msg)) {
+      for (const h of state.houseInputs) {
+        spentOutpoints.mark(`${h.txid}:${h.vout}`)
+        houseVtxoCache.removeOutpoint(h.txid, h.vout)
+      }
+      console.warn(
+        `[v4/cofund] ${gameId} arkd rejected a house input as spent — denying ` +
+        `${state.houseInputs.length} outpoint(s) so the next game does not re-pick them: ` +
+        `${state.houseInputs.map((h) => `${h.txid}:${h.vout}`).join(', ')} :: ${msg}`,
+      )
+    }
+    throw e
+  }
   if (signedCheckpointTxs.length !== total) throw new Error(`Expected ${total} checkpoints back, got ${signedCheckpointTxs.length}`)
   // arkd returns the signed checkpoints in Go map-iteration order (randomized per
   // response), NOT the submitted vin order. So DEMUX by the outpoint each checkpoint

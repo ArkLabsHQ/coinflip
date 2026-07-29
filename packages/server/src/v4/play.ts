@@ -17,7 +17,7 @@ import {
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
 import { hashSecret, networkHrpFromArkInfo } from '../house-wallet.js'
-import { reservations, selectionMutex, outpointKey, houseVtxoCache, freeStakeTotal, HouseBusyError, BetExceedsCapacityError, PLAY_VTXO_MAX_AGE_MS } from '../vtxo-pool.js'
+import { reservations, selectionMutex, outpointKey, houseVtxoCache, freeStakeTotal, HouseBusyError, BetExceedsCapacityError } from '../vtxo-pool.js'
 import { loadEmulatorConfig } from '../emulator.js'
 import { computeHouseStake } from '../house-economics.js'
 import type { AppDeps } from '../deps.js'
@@ -178,15 +178,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   // window, which stays safe by construction (vtxo-pool.ts): the under-lock isReserved
   // re-check excludes a coin another game just reserved, and a coin spent before the
   // co-fund only fails the escrow submit (caught + retried), never a double-spend.
-  //
-  // Bounded-age rather than a forced refresh: on a real house wallet that live
-  // getVtxos() costs SECONDS (the same sync that made /api/tiers 4.9s until it
-  // was moved off a live read), and an autoplay burst paid it once per flip.
-  // Staleness was already tolerated here by the reasoning above; this just makes
-  // the window explicit and shares one sync across a burst. The cache is kept
-  // honest meanwhile — invalidate() on settle, removeOutpoint() on spend — and
-  // PLAY_VTXO_MAX_AGE_MS=0 restores the old behaviour.
-  const vtxos = await houseVtxoCache.getFresherThan(deps, PLAY_VTXO_MAX_AGE_MS)
+  const vtxos = await houseVtxoCache.refresh(deps)
   const maxBetFractionBps = await getMaxBetFractionBps(deps)
   await selectionMutex.runExclusive(async () => {
     const choose = (vtxos: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] | null => {

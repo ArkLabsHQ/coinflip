@@ -5,7 +5,7 @@ import { loadEmulatorConfig } from './emulator.js'
 import { newGameProtocolVersion, computeGameRoll, getMaxBetFractionBps, type V4State } from './trustless-game-v4.js'
 import { issueChallenge, verifyChallenge } from './restore-auth.js'
 import { RateLimiter } from './rate-limit.js'
-import { freeStakeTotal, houseVtxoCache } from './vtxo-pool.js'
+import { freeStakeTotal, spendableTotal, houseVtxoCache } from './vtxo-pool.js'
 
 // ── Restore-endpoint plumbing ────────────────────────────────────────────────
 
@@ -93,8 +93,16 @@ export function createPublicRoutes(deps: AppDeps): Router {
       const tiersStr = (await deps.repos.config.get('tiers')) || '[1000,5000,10000,50000]'
       const tiers: number[] = JSON.parse(tiersStr)
       const minBalance = parseInt((await deps.repos.config.get('min_house_balance')) || '100000', 10)
-      const balance = await deps.wallet.getBalance()
-      const available = balance.available
+      // ONE warm snapshot for both numbers below. This used to be
+      // `await deps.wallet.getBalance()`, a live SDK read that forces a full
+      // re-sync: measured at ~4.9s median in production, and since the client
+      // re-reads /api/tiers after every flip that burned about as much server
+      // time as placing the bets themselves — while overlapping, and slowing,
+      // the very /api/v4/play it ran alongside. Deriving it from the pool the
+      // capacity already uses also stops the advertised balance and the
+      // advertised capacity being sampled at two different moments.
+      const pool = await houseVtxoCache.get(deps)
+      const available = spendableTotal(pool)
 
       const maxAvailable = tiers.reduce((max, t) => (t <= available ? Math.max(max, t) : max), 0)
 
@@ -114,7 +122,7 @@ export function createPublicRoutes(deps: AppDeps): Router {
       // then rejects with BetExceedsCapacityError. Uses the SAME freeStakeTotal
       // /play caps against, so the advertised envelope and the enforced one
       // cannot drift. Reads the warm pool snapshot rather than re-syncing.
-      const freeTotal = freeStakeTotal(await houseVtxoCache.get(deps))
+      const freeTotal = freeStakeTotal(pool)
       const capacity = Math.floor((freeTotal * maxBetFractionBps) / 10000)
       // Same single definition /play validates against — they cannot drift.
       const { railMin, railMax } = betRails(tiers, dust)

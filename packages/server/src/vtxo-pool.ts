@@ -299,6 +299,24 @@ export function freeStakeTotal(vtxos: ExtendedVirtualCoin[]): number {
 }
 
 /**
+ * Total spendable value in a snapshot, IGNORING reservations — the pool-derived
+ * equivalent of the SDK's `balance.available`.
+ *
+ * Distinct from `freeStakeTotal`, which additionally excludes coins pinned to an
+ * in-flight game: that one answers "what can be committed to a NEW bet", this
+ * one answers "what does the house hold". `/api/tiers` needs both, and taking
+ * them from one snapshot means the advertised balance and the advertised
+ * capacity can't be from different moments.
+ *
+ * Exists so the hot path never has to call `wallet.getBalance()`, which forces a
+ * full SDK re-sync — that read alone was costing ~4.9s per `/api/tiers` in
+ * production, roughly as much server time as placing every bet in the session.
+ */
+export function spendableTotal(vtxos: ExtendedVirtualCoin[]): number {
+  return vtxos.filter(settledOrPre).reduce((s, v) => s + v.value, 0)
+}
+
+/**
  * Pool floor: minimum number of free VTXOs we always try to keep around.
  * Below this, splitting fires aggressively. Configurable via env.
  */

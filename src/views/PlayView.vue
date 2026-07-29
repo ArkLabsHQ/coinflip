@@ -78,7 +78,18 @@
       <div class="control-group amount-slider">
         <div class="amount-readout">
           <span class="amount-label">Bet</span>
-          <span class="amount-value">{{ betAmount.toLocaleString() }} sats</span>
+          <!-- The value IS the input — typing is the precise alternative to
+               dragging, and replacing the readout in place costs no height. -->
+          <span class="amount-value">
+            <NumberField
+              :model-value="betAmount"
+              :format="formatSats"
+              :disabled="isAutoRunning || !canBet"
+              aria-label="Bet amount in sats"
+              @commit="commitAmount"
+            />
+            sats
+          </span>
         </div>
         <input
           class="amount-range"
@@ -118,7 +129,14 @@
         <div class="odds-readout">
           <span class="odds-step-label">{{ stepLabel }}</span>
           <span class="odds-stats">
-            <span class="win-pct">{{ winPctLabel }} win</span>
+            <span class="win-pct">
+              <NumberField
+                :model-value="winPctValue"
+                :disabled="isAutoRunning"
+                aria-label="Win chance percent"
+                @commit="commitWinPct"
+              />% win
+            </span>
             <span class="payout-mult">{{ payoutMult(selectedBet) }}</span>
             <span class="win-amt" v-if="canBet">→ {{ winSatsLabel(selectedBet) }}</span>
           </span>
@@ -222,6 +240,8 @@ import StalledBets from '@/components/StalledBets.vue'
 import { getTiers } from '@/services/api'
 import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState, type OddsBet } from '@/skins'
 import { getSavedBetAmount, saveBetAmount, getSavedStep, saveStep } from '@/utils/betPrefs'
+import NumberField from '@/components/NumberField.vue'
+import { winPctOf, roundWinPct, nearestRungByWinPct } from '@/utils/rungSnap'
 import { getErrorMessage, friendlyError } from '@/utils/errors'
 import { logDiag } from '@/utils/diagnosticsLog'
 // House-stake / odds formula — single-sourced in the lib so this preview can't
@@ -252,7 +272,7 @@ interface SlabResult { won: boolean; amount: number }
 
 export default defineComponent({
   name: 'PlayView',
-  components: { GameHistoryList, GameDetailsModal, StalledBets },
+  components: { GameHistoryList, GameDetailsModal, StalledBets, NumberField },
   emits: ['open-wallet'],
   setup(_props, { emit }) {
     const store = useStore()
@@ -334,11 +354,11 @@ export default defineComponent({
     const safeStep = computed(() => Math.min(Math.max(sliderIndex.value, minStep.value), maxStep.value))
     const selectedBet = computed<OddsBet>(() => currentSkinLadder.value[safeStep.value])
     const stepLabel = computed(() => currentSkin.value.stepLabel(selectedBet.value, safeStep.value))
-    const winPctLabel = computed(() => {
-      const b = selectedBet.value
-      const p = ((b.target - b.lo) / b.n) * 100
-      return (p >= 10 ? Math.round(p) : Math.round(p * 10) / 10) + '%'
-    })
+    // The win chance as a NUMBER, already rounded for display — the odds field
+    // both shows and edits this, so keeping it pre-rounded means focusing the
+    // field reveals "32", not "32.432432432432435". Snapping still measures
+    // against each rung's exact win chance, so nothing is lost.
+    const winPctValue = computed(() => roundWinPct(winPctOf(selectedBet.value)))
     // ACTUAL payout multiple — what the player really receives, after the house
     // edge trims the house stake (computeHouseStake) AND the rake is taken off
     // the pot (calculateRake). The win% is exact (fees never touch probability);
@@ -828,13 +848,43 @@ export default defineComponent({
     function rememberAmount() { saveBetAmount(betAmount.value) }
     function rememberStep() { saveStep(currentSkinId.value, sliderIndex.value) }
 
+    /** Grouped digits for the resting state of the bet field, e.g. "7,777". */
+    function formatSats(n: number): string { return n.toLocaleString() }
+
+    /**
+     * A typed stake. Forced into the live envelope before it reaches
+     * `betAmount` — the field deliberately has no idea what the bounds are, so
+     * this is where an over-capacity or sub-minimum entry gets corrected. The
+     * readout then re-renders to the clamped number, so the player sees what
+     * they actually bet rather than what they typed.
+     */
+    function commitAmount(value: number) {
+      const wanted = Math.round(value)
+      betAmount.value = Math.min(Math.max(wanted, amountBounds.value.min), usableMax.value)
+      rememberAmount()
+    }
+
+    /**
+     * A typed win chance. Snapped to the nearest rung the house can currently
+     * cover, which on a coarse ladder can be a visible jump (the coin skin has
+     * only 6 rungs, so 32% lands on 25%). That is why the readout re-renders to
+     * the snapped value instead of keeping the typed text: showing "32" while
+     * betting 25% would misreport the bet.
+     */
+    function commitWinPct(pct: number) {
+      sliderIndex.value = nearestRungByWinPct(
+        currentSkinLadder.value, minStep.value, maxStep.value, pct,
+      )
+      rememberStep()
+    }
+
     return {
       // Game config
       tiers, maxAvailable, houseReady, tiersLoaded,
       // Amount slider
       betAmount, amountBounds, usableMax, balanceCapped, canAffordRung, canBet,
       // Odds slider
-      sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctLabel, payoutMult,
+      sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctValue, payoutMult,
       // Lifecycle
       isFlipping, error, skinState, phase,
       // Auto
@@ -843,6 +893,8 @@ export default defineComponent({
       winSatsLabel,
       // Preference persistence (user gesture only — see rememberAmount above)
       rememberAmount, rememberStep,
+      // Typed entry — the sliders' precise alternative
+      commitAmount, commitWinPct, formatSats,
       // Skin
       skins: SKINS, currentSkinId, currentSkin, selectSkin,
       skinOwnsGesture, onSkinLaunch, onSkinCashout,

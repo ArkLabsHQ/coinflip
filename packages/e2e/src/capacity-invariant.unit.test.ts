@@ -33,7 +33,7 @@ const server = require('arkade-coinflip-server')
 const emulatorModule = require('arkade-coinflip-server/dist/emulator.js')
 const { createPublicRoutes } = require('arkade-coinflip-server/dist/public-routes.js')
 const {
-  BetExceedsCapacityError, reservations, freeStakeTotal, freeHouseVtxos,
+  BetExceedsCapacityError, reservations, freeStakeTotal, freeHouseVtxos, spendableTotal,
 } = require('arkade-coinflip-server/dist/vtxo-pool.js')
 
 const DUST = 330
@@ -211,5 +211,70 @@ describe('advertised capacity === enforced capacity', () => {
     }
     expect(err).toBeInstanceOf(BetExceedsCapacityError)
     expect((err as Error).message).toContain(`per-bet cap is ${advertised} sat`)
+  })
+})
+
+/**
+ * `/api/tiers` is on the hot path — the play view re-reads it after EVERY flip.
+ * It must therefore never make a live wallet read: `wallet.getBalance()` forces
+ * a full SDK re-sync, measured at ~4.9s median in production, which burned about
+ * as much server time across a session as placing every bet, and overlapped (and
+ * slowed) the very `/api/v4/play` it ran alongside.
+ *
+ * This pins the property as CORRECTNESS rather than performance: the handler is
+ * given a wallet whose `getBalance` throws, so any reintroduction of that call
+ * fails the suite rather than quietly costing five seconds a flip.
+ */
+describe('/api/tiers never makes a live balance read', () => {
+  /** Deps whose getBalance is a landmine, and whose floor is low enough that
+   *  houseReady is true either way (so these assertions are about the SOURCE of
+   *  the balance, not about the readiness threshold). */
+  function depsWithExplodingBalance() {
+    const deps = makeDeps({ min_house_balance: '1000' })
+    deps.wallet.getBalance = async () => {
+      throw new Error('getBalance() must not be called on the /api/tiers hot path')
+    }
+    return deps
+  }
+
+  it('answers without touching wallet.getBalance()', async () => {
+    const res = await request(mount(depsWithExplodingBalance())).get('/api/tiers')
+    expect(res.status).toBe(200)
+  })
+
+  it('reports the pool-derived spendable total as houseBankroll', async () => {
+    const res = await request(mount(depsWithExplodingBalance())).get('/api/tiers')
+    // 40,005 + 12,345. NOT the 1,000,000 the wallet balance used to report, and
+    // not 9,052,350 — the swept coin is not spendable and must not be counted.
+    expect(spendableTotal(VTXOS)).toBe(FREE_TOTAL)
+    expect(res.body.houseBankroll).toBe(FREE_TOTAL)
+    expect(res.body.houseBankroll).not.toBe(AVAILABLE)
+  })
+
+  it('still derives houseReady and maxAvailable from that same total', async () => {
+    const res = await request(mount(depsWithExplodingBalance())).get('/api/tiers')
+    // Largest tier <= 52,350 out of [330,1000,5000,10000,50000].
+    expect(res.body.maxAvailable).toBe(50_000)
+    // capacity (13,087) >= dust AND 52,350 >= the 1,000 floor set above.
+    expect(res.body.houseReady).toBe(true)
+  })
+
+  it('reports NOT ready when the pool total falls under the configured floor', async () => {
+    const deps = makeDeps({ min_house_balance: '100000' })
+    deps.wallet.getBalance = async () => {
+      throw new Error('getBalance() must not be called on the /api/tiers hot path')
+    }
+    const res = await request(mount(deps)).get('/api/tiers')
+    // 52,350 < 100,000. The old live read would have said ready off a balance
+    // that did not correspond to actually-spendable coins.
+    expect(res.body.houseReady).toBe(false)
+  })
+
+  it('advertises a balance and a capacity sampled from ONE snapshot', async () => {
+    const res = await request(mount(depsWithExplodingBalance())).get('/api/tiers')
+    // Both now come from the same houseVtxoCache read, so they cannot be from
+    // two different moments the way a live getBalance() + cached pool could.
+    expect(res.body.houseBankroll).toBe(spendableTotal(VTXOS))
+    expect(res.body.capacity).toBe(CAPACITY)
   })
 })

@@ -514,13 +514,19 @@ export default defineComponent({
     const arkStatus = computed(() => store.state.ark?.status as string)
     const walletBalanceLabel = computed(() => Number(store.getters['ark/balance'] || 0).toLocaleString())
 
-    // Spendable offchain balance (settled + preconfirmed). Was previously
-    // returning the whole WalletBalance object (truthy), so `tier > balance`
-    // was always false and tier options above the wallet balance were
-    // staying enabled. Fall back to Infinity only when the wallet isn't
-    // connected yet (state.walletBalance === null) so we don't gate the UI
-    // on a stale-empty balance during boot.
-    const playerBalance = computed(() => store.state.walletBalance?.available ?? Infinity)
+    // Spendable offchain balance (settled + preconfirmed). Infinity only while
+    // the wallet is still connecting (ark.walletBalance === null), so the UI
+    // isn't gated on a stale-empty balance during boot.
+    //
+    // NB the `ark.` — the SDK balance object lives in the ark MODULE. The root
+    // `state.walletBalance` is a stale legacy scalar (declared `number`,
+    // initialised 0, and its SET_BALANCE mutation is never committed anywhere),
+    // so reading it gave `(0)?.available` → undefined → Infinity and every
+    // balance guard below silently did nothing: no wallet cap on the slider, no
+    // "capped by your balance" / "too low" warning, and the affordability check
+    // in flipOnce could never fire. Broken since 0.3.9; `useStore()` is untyped
+    // here, so nothing flagged the wrong path.
+    const playerBalance = computed(() => store.state.ark.walletBalance?.available ?? Infinity)
     // The player can never bet more than they hold, even when the house could
     // cover it. `amountBounds` stays the house-side envelope alone (so it's
     // still exactly what the server would independently compute); this folds

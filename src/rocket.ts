@@ -98,9 +98,9 @@ export function effectivePayoutMultiplier(bet: number, multiplier: number, edgeB
   return (bet + rocketHouseStake(bet, rocketToOdds(multiplier), edgeBps)) / bet
 }
 
-/**
- * Auto-cashout targets offered by the slider. Clamped at runtime to the
- * affordable window — a low M makes the house stake sub-dust, a high M pushes
- * it past the bankroll — exactly like the odds-slider ladder in PlayView.
+/*
+ * The auto-cashout targets used to live here as a hand-written multiplier list.
+ * They are now DERIVED from the shared odds ladder (multiplier = n / win), so
+ * the rocket offers exactly the win chances every other skin does instead of a
+ * parallel set of its own — see src/skins/ladder.ts.
  */
-export const ROCKET_LADDER: number[] = [1.2, 1.5, 2, 3, 5, 10, 20, 50, 100]

@@ -24,23 +24,28 @@ export default defineComponent({
     state: { type: Object as PropType<SkinState>, required: true },
   },
   setup(props) {
-    // A variable-odds n=2^k bet renders as k coins; the player wins only if
-    // EVERY coin lands heads (roll 0). The classic 50/50 (odds null) is one coin.
+    // n = 2^k renders as k coins. Every rung uses the same k now — what varies
+    // is how wide the winning band is — so the count no longer encodes the odds.
     const coinCount = computed(() => {
       const o = props.state.odds
       return o ? Math.max(1, Math.round(Math.log2(o.n))) : 1
     })
 
-    // Per-coin face class. While flipping, all spin. On resolve: the classic
-    // coin shows the called side; a multi-coin bet shows the roll's bits — coin
-    // i is heads if bit i is 0, tails if 1, so an all-heads row is the win.
+    // Per-coin face. While flipping, all spin. On resolve the classic 50/50
+    // shows the called side; a multi-coin bet shows the roll's bits.
+    //
+    // HEADS IS BIT 1, deliberately: the roll is read as a binary number and the
+    // winning band is the TOP of the range, so more heads = a bigger number =
+    // closer to winning, and an all-heads row is a win at every rung. Under the
+    // old mapping (heads = bit 0) the win was roll 0 — all heads — which only
+    // worked because the band was always exactly one outcome wide.
     const coins = computed<string[]>(() => {
       const count = coinCount.value
       if (props.state.phase === 'flipping') return Array(count).fill('flipping')
       if (props.state.phase === 'resolved' && props.state.outcome) {
         if (!props.state.odds) return [props.state.outcome.side]
         const roll = props.state.outcome.roll ?? 0
-        return Array.from({ length: count }, (_, i) => ((roll >> i) & 1) ? 'tails' : 'heads')
+        return Array.from({ length: count }, (_, i) => ((roll >> i) & 1) ? 'heads' : 'tails')
       }
       return Array(count).fill('idle')
     })
@@ -73,6 +78,12 @@ export default defineComponent({
 .coins-4 .coin-unit { width: 84px; height: 84px; }
 .coins-5 .coin-unit,
 .coins-6 .coin-unit { width: 76px; height: 76px; }
+/* Seven is the shared-ladder count (2^7 = 128 outcomes, fine enough for a 1%
+   rung), so it is the common case rather than an edge one. */
+.coins-7 .coin-unit { width: 64px; height: 64px; }
+/* Seven in a row wraps 6+1, which reads as a mistake. Cap the row so it breaks
+   evenly into 4+3 instead. */
+.coins-7 { max-width: 300px; }
 
 .coin {
   width: 100%;

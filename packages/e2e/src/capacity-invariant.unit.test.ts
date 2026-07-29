@@ -278,3 +278,73 @@ describe('/api/tiers never makes a live balance read', () => {
     expect(res.body.capacity).toBe(CAPACITY)
   })
 })
+
+/**
+ * `/play` pins the EXACT outpoints a co-fund spends, so it used to force a full
+ * `getVtxos()` every call. On a real house wallet that live sync costs seconds —
+ * the same one that made `/api/tiers` 4.9s until it was moved off a live read —
+ * and an autoplay burst paid it once per flip.
+ *
+ * It now accepts a snapshot younger than PLAY_VTXO_MAX_AGE_MS. These pin the
+ * safety properties that make that sound: the window is real, a settle-driven
+ * invalidate() still forces a fresh sync, and the bound is far tighter than the
+ * advertising TTL.
+ */
+describe('/play reuses a recent VTXO snapshot instead of syncing every time', () => {
+  const { houseVtxoCache, PLAY_VTXO_MAX_AGE_MS, HOUSE_VTXO_CACHE_TTL_MS } =
+    require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+  function countingDeps() {
+    const deps = makeDeps()
+    let calls = 0
+    deps.wallet.getVtxos = async () => { calls += 1; return VTXOS }
+    return { deps, calls: () => calls }
+  }
+
+  beforeEach(() => houseVtxoCache.invalidate())
+
+  it('is bounded far tighter than the advertising TTL', () => {
+    // The advertising path only mis-sizes a slider when stale; this one picks
+    // the coins a co-fund spends, so it must not inherit that 120s window.
+    expect(PLAY_VTXO_MAX_AGE_MS).toBeGreaterThan(0)
+    expect(PLAY_VTXO_MAX_AGE_MS).toBeLessThan(HOUSE_VTXO_CACHE_TTL_MS / 4)
+  })
+
+  it('syncs once, then serves a second call from the snapshot', async () => {
+    const { deps, calls } = countingDeps()
+    await houseVtxoCache.getFresherThan(deps, PLAY_VTXO_MAX_AGE_MS)
+    expect(calls()).toBe(1)
+    await houseVtxoCache.getFresherThan(deps, PLAY_VTXO_MAX_AGE_MS)
+    expect(calls()).toBe(1) // the whole point: a burst shares one sync
+  })
+
+  it('re-syncs once the snapshot ages past the bound', async () => {
+    const { deps, calls } = countingDeps()
+    await houseVtxoCache.getFresherThan(deps, PLAY_VTXO_MAX_AGE_MS)
+    expect(calls()).toBe(1)
+    // A zero-age bound is "always fresh" — the old behaviour, still reachable
+    // via PLAY_VTXO_MAX_AGE_MS=0.
+    await houseVtxoCache.getFresherThan(deps, 0)
+    expect(calls()).toBe(2)
+  })
+
+  it('re-syncs after a settle invalidates the snapshot', async () => {
+    // game-engine calls invalidate() when a settle spends and mints house
+    // VTXOs. If that did not force a fresh fetch, /play could pin a coin the
+    // settle already spent — the property this optimisation depends on.
+    const { deps, calls } = countingDeps()
+    await houseVtxoCache.getFresherThan(deps, PLAY_VTXO_MAX_AGE_MS)
+    expect(calls()).toBe(1)
+    houseVtxoCache.invalidate()
+    await houseVtxoCache.getFresherThan(deps, PLAY_VTXO_MAX_AGE_MS)
+    expect(calls()).toBe(2)
+  })
+
+  it('still advertises the same capacity from the reused snapshot', async () => {
+    // The optimisation must not change what /api/tiers reports.
+    const { deps } = countingDeps()
+    await houseVtxoCache.getFresherThan(deps, PLAY_VTXO_MAX_AGE_MS)
+    const res = await request(mount(deps)).get('/api/tiers')
+    expect(res.body.capacity).toBe(CAPACITY)
+  })
+})

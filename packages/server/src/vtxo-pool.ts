@@ -194,23 +194,6 @@ export class HouseVtxoCache {
     return this.refresh(deps)
   }
 
-  /**
-   * Snapshot if younger than `maxAgeMs`, else a fresh fetch — a caller-chosen
-   * staleness bound, much tighter than the shared TTL.
-   *
-   * `/play` pins EXACT outpoints, so it forced a full `refresh()` every time. On
-   * a real house wallet that live `getVtxos()` costs seconds — the same sync that
-   * made `/api/tiers` take 4.9s until it was moved off a live read — and an
-   * autoplay burst paid it once per flip. A few seconds of staleness is already
-   * tolerated by construction there (see the call site), so this converts a
-   * guaranteed per-flip sync into one shared across a burst, without adopting the
-   * 120s TTL the advertising path uses.
-   */
-  async getFresherThan(deps: AppDeps, maxAgeMs: number): Promise<ExtendedVirtualCoin[]> {
-    if (this.snapshot && Date.now() - this.fetchedAt < maxAgeMs) return this.snapshot
-    return this.refresh(deps)
-  }
-
   /** Force a live fetch, collapsing concurrent refreshes onto one getVtxos(). */
   async refresh(deps: AppDeps): Promise<ExtendedVirtualCoin[]> {
     if (this.inflight) return this.inflight
@@ -257,16 +240,6 @@ export class HouseVtxoCache {
  * never pays for a live sync.
  */
 export const HOUSE_VTXO_CACHE_TTL_MS = Number(process.env.HOUSE_VTXO_CACHE_TTL_MS || 120_000)
-
-/**
- * How stale a snapshot `/play` will accept before re-syncing. Deliberately tiny
- * next to HOUSE_VTXO_CACHE_TTL_MS: that TTL serves the ADVERTISING path, where a
- * slightly old balance only mis-sizes a slider, whereas this one picks the exact
- * coins a co-fund spends. Sized to cover one autoplay burst (~7s per flip) so a
- * batch shares a sync, while an idle player's next bet still syncs fresh.
- * Set to 0 to restore the old always-refresh behaviour.
- */
-export const PLAY_VTXO_MAX_AGE_MS = Number(process.env.PLAY_VTXO_MAX_AGE_MS ?? 10_000)
 export const houseVtxoCache = new HouseVtxoCache(HOUSE_VTXO_CACHE_TTL_MS)
 
 /**

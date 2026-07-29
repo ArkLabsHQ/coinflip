@@ -51,6 +51,7 @@ const ark: Module<ArkState, RootState> = {
     activityHistory: [],
     activityStatus: 'idle',
     claimingGames: {},
+    flipStage: null,
   },
 
   mutations: {
@@ -101,6 +102,10 @@ const ark: Module<ArkState, RootState> = {
     },
     SET_ACTIVITY_STATUS(state, status: ArkState['activityStatus']) {
       state.activityStatus = status
+    },
+    /** Which leg of the bet is in flight; null once it settles or fails. */
+    SET_FLIP_STAGE(state, stage: ArkState['flipStage']) {
+      state.flipStage = stage
     },
     SET_CLAIMING(state, { gameId, info }: { gameId: string; info: ClaimingInfo }) {
       state.claimingGames = { ...state.claimingGames, [gameId]: info }
@@ -239,11 +244,18 @@ const ark: Module<ArkState, RootState> = {
      * entry point the UI dispatches.
      */
     async placeTrustlessBet(
-      { dispatch },
+      { dispatch, commit },
       payload: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
     ) {
-      const net = await getNetwork()
-      return dispatch('playV4Game', { ...payload, emulatorUrl: net.emulator?.url })
+      // The stage is cleared HERE rather than inside playV4Game so that any
+      // throw — a rejected bet, a stalled leg, a timeout — leaves no stale
+      // "Settling…" on screen. This is the one place every bet passes through.
+      try {
+        const net = await getNetwork()
+        return await dispatch('playV4Game', { ...payload, emulatorUrl: net.emulator?.url })
+      } finally {
+        commit('SET_FLIP_STAGE', null)
+      }
     },
 
     /** Locally-stashed stalled bets (escrows reclaimable if the server stalled). */

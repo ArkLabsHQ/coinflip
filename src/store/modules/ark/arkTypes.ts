@@ -138,4 +138,16 @@ export interface ArkState {
    *  as an error the user can retry — not as a genuinely empty "No activity yet". */
   activityStatus: 'idle' | 'loading' | 'ready' | 'error'
   claimingGames: Record<string, ClaimingInfo>
+  /**
+   * Which leg of the v4 bet is in flight, so the play view can say what it is
+   * waiting on instead of a static "FLIPPING…" for the whole round trip.
+   *
+   * A production HAR measured an 8.2s median autoplay cycle — ~5s of it inside
+   * `/api/v4/play` alone — during which the UI said nothing, which reads as the
+   * game having stopped. Null when no bet is in flight.
+   */
+  flipStage: FlipStage | null
 }
+
+/** The v4 bet's network legs, in the order `playV4Game` performs them. */
+export type FlipStage = 'placing' | 'funding' | 'signing' | 'settling'

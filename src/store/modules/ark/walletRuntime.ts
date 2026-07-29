@@ -577,7 +577,7 @@ export async function settle(_ctx: ArkCtx, params?: { eventCallback?: (event: un
  * with guidance. Only the happy path is wired; recovery is a follow-up.
  */
 export async function playV4Game(
-  { state, rootState }: ArkCtx,
+  { state, rootState, commit }: ArkCtx,
   { tier, side, oddsN, oddsTarget, oddsLo, emulatorUrl }: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number; emulatorUrl?: string },
 ) {
   const { wallet, privateKey } = requireWalletAndKey(rootState)
@@ -641,7 +641,10 @@ export async function playV4Game(
   const stakeTopUp = change > 0 && change <= dust ? change : 0
   const betAmount = tier + stakeTopUp // == playerSum when folding, else the tier
 
-  // 1. /play — reserve the house stake + get the covenant params.
+  // 1. /play — reserve the house stake + get the covenant params. Measured at
+  // ~5s median in production, so this is the leg the player spends most of the
+  // wait inside; naming it is most of what stops the flip reading as hung.
+  commit('SET_FLIP_STAGE', 'placing')
   const playRes = await v4Play(
     tier, playerPubkey, playerHash, playerAddress, playerAddress,
     isVariable ? { oddsN: oddsN as number, oddsTarget: oddsTarget as number, oddsLo: oddsLo ?? 0 } : undefined,
@@ -663,6 +666,7 @@ export async function playV4Game(
   })
   // Sign our input vins — the LEADING k.
   const k = playerInputs.length
+  commit('SET_FLIP_STAGE', 'funding')
   const arkTxSigned = await identity.sign(cof.arkTx, Array.from({ length: k }, (_, i) => i))
   const cofundRes = await v4Cofund(
     playRes.gameId,
@@ -684,6 +688,7 @@ export async function playV4Game(
       return base64.encode(s.toPSBT())
     }),
   )
+  commit('SET_FLIP_STAGE', 'signing')
   const finRes = await v4CofundFinalize(playRes.gameId, signedPlayerCheckpoints).catch((e) => {
     logDiag('error', 'v4cofund', `game ${playRes.gameId} finalize failed: ${getErrorMessage(e)}`)
     throw e
@@ -705,6 +710,7 @@ export async function playV4Game(
   // 3. Reveal → the server settles the whole pot to the winner. On success
   // the pot is spent, so the recovery stash is moot; clear it best-effort
   // (the auto-claim poll GCs it anyway if this misses).
+  commit('SET_FLIP_STAGE', 'settling')
   const result = await v4Reveal(playRes.gameId, playerSecretHex)
   await deleteV4Forfeit(playRes.gameId).catch(() => { /* leave for poll GC */ })
   // Surface the on-chain txids so the activity history can collapse this

@@ -16,7 +16,11 @@
           }"
           :style="slotStyle(i - 1)"
         >
-          <span class="slot-num mono">{{ i - 1 }}</span>
+          <!-- At 100 pockets the per-pocket numbers collide into an unreadable
+               smear. The signal that matters is the continuous winning ARC and
+               the landed pocket, so show a number only on a wheel sparse enough
+               to read it, plus always on the one it landed on. -->
+          <span v-if="showNumbers || (phase === 'resolved' && roll === (i - 1))" class="slot-num mono">{{ i - 1 }}</span>
         </div>
       </div>
 
@@ -56,6 +60,8 @@ export default defineComponent({
   },
   setup(props) {
     const n = computed(() => props.state.odds?.n ?? 37)
+    /** Pocket labels only while they still fit — see the template. */
+    const showNumbers = computed(() => n.value <= 40)
     const lo = computed(() => props.state.odds?.lo ?? 0)
     const target = computed(() => props.state.odds?.target ?? n.value)
     const winSize = computed(() => target.value - lo.value)
@@ -167,6 +173,7 @@ export default defineComponent({
     })
 
     return {
+      showNumbers,
       n, roll, phase, isInBand, slotStyle,
       wheelClass, centreText, centreSub, centreClass,
       winPctLabel, bandLabel,

@@ -350,22 +350,23 @@ describe('/play reuses a recent VTXO snapshot instead of syncing every time', ()
 })
 
 /**
- * A reservation pinned to an outpoint that no longer exists must not block the
- * house pool from splitting.
+ * A pinned reservation must be DOWNGRADED once the co-fund has spent those
+ * inputs — not merely tolerated by the split guard.
  *
- * Seen in production: "[house pool] split deferred — 1 outpoint(s) reserved by
- * in-flight games" repeating forever while the admin dashboard showed the only
- * existing coin as FREE. Both were right — the reservation named an input the
- * co-fund had already spent. The split guard refused on ANY live outpoint
- * reservation, so the pool stayed stuck at one VTXO (one concurrent game).
+ * Production showed "[house pool] split deferred — 1 outpoint(s) reserved by
+ * in-flight games" repeating forever while the admin dashboard listed the only
+ * existing coin as FREE. Both were right: the reservation named an input the
+ * co-fund had already spent. The split refuses on ANY live outpoint pin, so the
+ * pool stayed stuck at one VTXO — one concurrent game.
  *
- * Root cause: the live path never downgraded the pinned reservation to
- * liability-only after the co-fund spent those inputs, even though
- * rebuildReservations already does exactly that on restart
- * (`v4.cofundArkTxid ? [] : houseInputs`) — so a restart "fixed" what a running
- * server could not.
+ * Fixed at the source: v4/cofund.ts re-reserves liability-only the moment
+ * cofundArkTxid is set, mirroring what rebuildReservations already does on
+ * restart. Loosening the split guard instead would be WRONG — it deliberately
+ * fires even for a pin the pool's own free set does not contain, because the
+ * SDK's send() selects inputs from ALL spendable coins rather than from that
+ * set (reservation-safe-selfspend.unit.test.ts, P0 #53).
  */
-describe('a reservation for a spent outpoint does not wedge the pool split', () => {
+describe('a co-funded game holds liability, not pins', () => {
   const { reservations, freeStakeTotal: freeTotal } =
     require('arkade-coinflip-server/dist/vtxo-pool.js')
 
@@ -373,37 +374,38 @@ describe('a reservation for a spent outpoint does not wedge the pool split', () 
     for (const r of reservations.snapshot()) reservations.release(r.gameId)
   })
 
-  it('a liability-only reservation pins no outpoints', () => {
-    // The post-cofund shape: bankroll ceiling held, nothing pinned.
+  it('the post-cofund shape pins no outpoints but keeps the liability', () => {
+    // What v4/cofund.ts now installs once the inputs are spent: the bankroll
+    // ceiling still holds, and nothing is left to defer the pool split on.
     reservations.reserve('game-after-cofund', [], 50_000)
     expect(reservations.reservedOutpoints().size).toBe(0)
     expect(reservations.totalLiability()).toBe(50_000)
   })
 
-  it('a stale pin names an outpoint absent from the live set', () => {
-    // The exact production shape: the pinned input is gone, the remaining coin
-    // is unreserved — which is why the admin showed it free.
-    reservations.reserve('stuck-game', ['deadbeef'.repeat(8) + ':2'], 50_000)
-    const live = new Set(VTXOS.map((v: any) => `${v.txid}:${v.vout}`))
-    const blocking = [...reservations.reservedOutpoints()].filter((op) => live.has(op))
-    expect(reservations.reservedOutpoints().size).toBe(1) // a reservation exists
-    expect(blocking).toHaveLength(0)                      // but nothing it names is live
+  it('re-reserving a game REPLACES its pins rather than adding to them', () => {
+    // The downgrade depends on this: reserve() is a set(), not an append. If it
+    // appended, the pins would survive and the wedge would persist.
+    const op = `${'dd'.repeat(32)}:0`
+    reservations.reserve('g1', [op], 50_000)
+    expect(reservations.reservedOutpoints().has(op)).toBe(true)
+    reservations.reserve('g1', [], 50_000)
+    expect(reservations.reservedOutpoints().has(op)).toBe(false)
+    expect(reservations.totalLiability()).toBe(50_000)
   })
 
-  it('STILL blocks when the reservation names a coin that is actually live', () => {
-    // The guard must not become permissive: this is the P0 #53 case the deferral
-    // exists for — splitting could spend a coin an in-flight co-fund needs.
-    reservations.reserve('live-game', [`${HEALTHY.txid}:${HEALTHY.vout}`], 50_000)
-    const live = new Set(VTXOS.map((v: any) => `${v.txid}:${v.vout}`))
-    const blocking = [...reservations.reservedOutpoints()].filter((op) => live.has(op))
-    expect(blocking).toHaveLength(1)
-  })
-
-  it('a stale pin does not shrink the free stake total either', () => {
-    // freeStakeTotal filters on isReserved, so a pin naming a live coin removes
-    // it from the sizing — a pin naming a vanished one must not.
+  it('a pre-cofund pin still excludes its coin from the free stake total', () => {
+    // Asserted so the downgrade cannot be mistaken for weakening pre-cofund
+    // protection, which is what actually guards an in-flight co-fund.
     const before = freeTotal(VTXOS)
-    reservations.reserve('stuck-game', ['deadbeef'.repeat(8) + ':2'], 50_000)
+    reservations.reserve('pre-cofund', [`${HEALTHY.txid}:${HEALTHY.vout}`], 50_000)
+    expect(freeTotal(VTXOS)).toBe(before - HEALTHY.value)
+  })
+
+  it('and the liability-only downgrade returns that coin to the free total', () => {
+    const before = freeTotal(VTXOS)
+    reservations.reserve('g', [`${HEALTHY.txid}:${HEALTHY.vout}`], 50_000)
+    expect(freeTotal(VTXOS)).toBe(before - HEALTHY.value)
+    reservations.reserve('g', [], 50_000)
     expect(freeTotal(VTXOS)).toBe(before)
   })
 })

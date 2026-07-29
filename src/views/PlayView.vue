@@ -183,11 +183,18 @@
         >
           <template v-if="stopRequested">STOPPING AFTER THIS FLIP…</template>
           <template v-else-if="isAutoRunning">STOP · {{ autoProgressLabel }}</template>
-          <template v-else-if="isAutoMode">{{ isFlipping ? 'FLIPPING...' : `AUTO ×${autoCountLabel}` }}</template>
-          <template v-else>{{ isFlipping ? 'FLIPPING...' : 'FLIP IT' }}</template>
+          <template v-else-if="isAutoMode">{{ isFlipping ? flipStageLabel : `AUTO ×${autoCountLabel}` }}</template>
+          <template v-else>{{ isFlipping ? flipStageLabel : 'FLIP IT' }}</template>
         </button>
 
-        <div class="hotkey-hint" v-if="!isAutoMode && !isFlipping && canFlip">Press Enter to flip</div>
+        <!-- During autoplay the button is the STOP control and shows the batch
+             count, so the stage goes here instead — otherwise the one case the
+             wait feels longest (a whole batch) is the one with no feedback.
+             The dot animates, so even a slow leg is visibly still moving. -->
+        <div v-if="isFlipping && isAutoRunning" class="flip-stage-hint">
+          <span class="stage-dot" aria-hidden="true"></span>{{ flipStageLabel }}
+        </div>
+        <div class="hotkey-hint" v-else-if="!isAutoMode && !isFlipping && canFlip">Press Enter to flip</div>
       </template>
     </div>
 
@@ -394,6 +401,25 @@ export default defineComponent({
     const phase = ref<'idle' | 'flipping' | 'resolved' | 'climbing' | 'settling'>('idle')
     const outcome = ref<{ won: boolean; side: 'heads' | 'tails'; roll: number | null } | null>(null)
     const isFlipping = ref(false)
+    /**
+     * What the in-flight bet is actually waiting on, so an ~8s round trip reads
+     * as progress rather than a frozen button. The wording names the leg in the
+     * player's terms, not the endpoint's: "placing" is /api/v4/play (the ~5s
+     * one), "funding" the co-fund handshake, "signing" the checkpoint finalize,
+     * "settling" the reveal.
+     */
+    const FLIP_STAGE_TEXT: Record<string, string> = {
+      placing: 'PLACING BET',
+      funding: 'FUNDING POT',
+      signing: 'SIGNING',
+      settling: 'SETTLING',
+    }
+    const flipStageLabel = computed(() => {
+      const s = store.state.ark?.flipStage
+      // Falls back to the old wording until the first stage lands, so there's
+      // never a blank button in the gap before /play is dispatched.
+      return (s && FLIP_STAGE_TEXT[s]) || 'FLIPPING...'
+    })
     const error = ref<string | null>(null)
 
     const skinState = computed<SkinState>(() => ({
@@ -892,7 +918,7 @@ export default defineComponent({
       // Odds slider
       sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctValue, payoutMult,
       // Lifecycle
-      isFlipping, error, skinState, phase,
+      isFlipping, error, skinState, phase, flipStageLabel,
       // Auto
       autoOptions: AUTO_OPTIONS, autoCount, autoRemaining, isAutoRunning, isAutoMode, stopRequested,
       autoCountLabel, autoRemainingLabel, autoProgressLabel,
@@ -1440,6 +1466,29 @@ export default defineComponent({
   letter-spacing: 2px;
   margin-top: -8px;
   opacity: 0.6;
+}
+
+/* Sits where the hotkey hint does, so adding it costs no height. */
+.flip-stage-hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  letter-spacing: 2px;
+  margin-top: -8px;
+}
+/* A pulsing dot, not a spinner: the point is "still alive", and a pulse reads
+   that at a glance without implying a determinate progress bar we can't honour
+   (leg durations vary by an order of magnitude). */
+.stage-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--gold);
+  animation: stage-pulse 1.1s ease-in-out infinite;
+}
+@keyframes stage-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.25; transform: scale(0.7); }
 }
 
 /* ── Error toast ────────────────────────────────────────────────── */

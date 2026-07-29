@@ -99,7 +99,11 @@ export const SKINS: SkinMeta[] = [
     oddsLadder: coinBets, defaultStep: nearHalf(coinBets),
     // Every rung is the same COIN_COUNT coins now — what changes is how many of
     // the 2^k orderings win — so the count alone no longer describes the bet.
-    stepLabel: (b) => `TOP ${b.target - b.lo} OF ${b.n}`,
+    // Just the visual, not the band: "TOP 115 OF 128" was the longest label of
+    // any skin and wrapped the odds row onto two lines, while restating what
+    // the adjacent "90% win" already says. Every rung shows COIN_COUNT coins,
+    // so this is honest and constant by design.
+    stepLabel: () => `${COIN_COUNT} COINS`,
   },
   {
     id: 'slot', name: 'Slot', icon: '♦', component: SlotSkin,

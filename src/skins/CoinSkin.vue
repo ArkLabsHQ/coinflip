@@ -58,7 +58,7 @@ export default defineComponent({
 <style scoped>
 .coin-wrapper {
   width: 100%;
-  min-height: 190px;
+  min-height: 120px;
   margin: 8px auto;
   display: flex;
   flex-wrap: wrap;
@@ -80,10 +80,12 @@ export default defineComponent({
 .coins-6 .coin-unit { width: 76px; height: 76px; }
 /* Seven is the shared-ladder count (2^7 = 128 outcomes, fine enough for a 1%
    rung), so it is the common case rather than an edge one. */
-.coins-7 .coin-unit { width: 64px; height: 64px; }
-/* Seven in a row wraps 6+1, which reads as a mistake. Cap the row so it breaks
-   evenly into 4+3 instead. */
-.coins-7 { max-width: 300px; }
+/* Seven is the shared-ladder count, so it is the COMMON case, not an edge one.
+   Sized to sit on ONE row: as a wrapped 3-3-1 pyramid it cost ~310px of height
+   to say one thing, and since every rung now shows seven coins the arrangement
+   carried no information for all that space. */
+.coins-7 .coin-unit { width: 42px; height: 42px; }
+.coins-7 { flex-wrap: nowrap; gap: 10px; min-height: 0; }
 
 .coin {
   width: 100%;

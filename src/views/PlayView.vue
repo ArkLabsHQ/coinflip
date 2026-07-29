@@ -1255,6 +1255,7 @@ export default defineComponent({
   justify-content: space-between;
   gap: 10px;
   width: 100%;
+  white-space: nowrap;
 }
 .amount-label {
   font-size: 0.68rem;
@@ -1342,11 +1343,23 @@ export default defineComponent({
   font-weight: 800;
   letter-spacing: 1px;
   color: var(--gold);
+  /* The row is label | stats. Without these the label wrapped and dragged the
+     stats onto second lines with it, so "TOP 115 OF 128  90% win  1.09x -> 3,274
+     sats" rendered as six fragments. The label yields first (it is the least
+     load-bearing of the two) and truncates rather than wrapping. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 .odds-readout .odds-stats {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  /* Never wrap or shrink: the win chance, multiple and payout are the numbers
+     the bet is actually made on. */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .win-pct {
   font-size: 0.75rem;

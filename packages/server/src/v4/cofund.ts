@@ -15,6 +15,7 @@ import { timeoutReject, ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
 import type { AppDeps } from '../deps.js'
 import { withArkSubmit, cofundLocks } from './concurrency.js'
 import { loadV4Game, toXOnly } from './shared.js'
+import { startPhaseTimer } from '../phase-timer.js'
 import { reservations, spentOutpoints, houseVtxoCache } from '../vtxo-pool.js'
 import type { V4CofundRequest, V4CofundResult, V4CofundFinalizeRequest, V4CofundFinalizeResult } from './types.js'
 
@@ -82,16 +83,17 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   // Sign the house input vins (trailing m), submit (serialized), sign the house
   // checkpoints (trailing m), return the player checkpoints (leading k).
   const houseVins = Array.from({ length: m }, (_, i) => k + i)
-  const signed = await deps.identity.sign(arkTx, houseVins)
+  const timer = startPhaseTimer('v4/cofund', gameId)
+  const signed = await timer.step('sign:houseVins', () => deps.identity.sign(arkTx, houseVins))
   let arkTxid: string
   let signedCheckpointTxs: string[]
   try {
-    ;({ arkTxid, signedCheckpointTxs } = await withArkSubmit(() =>
+    ;({ arkTxid, signedCheckpointTxs } = await timer.step('arkd:submitTx', () => withArkSubmit(() =>
       timeoutReject(
         deps.wallet.arkProvider.submitTx(base64.encode(signed.toPSBT()), req.checkpoints),
         ARK_SUBMIT_TIMEOUT_MS, 'arkd submitTx',
       ),
-    ))
+    )))
   } catch (e) {
     // arkd refused a house input as already spent. That is not the player's
     // fault and, left alone, it REPEATS: a fresh getVtxos() still lists a coin
@@ -116,6 +118,7 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
         `${state.houseInputs.map((h) => `${h.txid}:${h.vout}`).join(', ')} :: ${msg}`,
       )
     }
+    timer.done(true)
     throw e
   }
   if (signedCheckpointTxs.length !== total) throw new Error(`Expected ${total} checkpoints back, got ${signedCheckpointTxs.length}`)
@@ -143,7 +146,7 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   state.cofundArkTxid = arkTxid
   state.houseSignedCheckpoints = houseSignedCheckpoints
   state.playerInputCount = k
-  await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
+  await timer.step('db:update', () => deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) }))
 
   // The co-fund has spent the pinned house inputs, so pinning them is now
   // meaningless — but NOT harmless: the pool-split guard defers on ANY live
@@ -159,6 +162,7 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   // (`v4.cofundArkTxid ? [] : houseInputs`) — the live path simply never did it,
   // so a restart "fixed" what a running server could not.
   reservations.reserve(gameId, [], state.houseStake ?? 0)
+  timer.done()
 
   return { arkTxid, playerCheckpoints }
 }
@@ -179,14 +183,15 @@ export async function handleV4CofundFinalize(gameId: string, req: V4CofundFinali
   }
 
   // finalizeTx takes checkpoints in vin order: [player (leading k), house (trailing m)].
+  const ftimer = startPhaseTimer('v4/cofund-finalize', gameId)
   const allCheckpoints = [...req.playerCheckpoints, ...state.houseSignedCheckpoints!]
   try {
-    await withArkSubmit(() =>
+    await ftimer.step('arkd:finalizeTx', () => withArkSubmit(() =>
       timeoutReject(
         deps.wallet.arkProvider.finalizeTx(state.cofundArkTxid!, allCheckpoints),
         ARK_SUBMIT_TIMEOUT_MS, 'arkd finalizeTx',
       ),
-    )
+    ))
   } catch (e) {
     // Log-only diagnostic (behaviour unchanged — the error is re-thrown): dump each
     // checkpoint's spend-leaf keys + which keys actually signed, next to the house/
@@ -211,10 +216,12 @@ export async function handleV4CofundFinalize(gameId: string, req: V4CofundFinali
     } catch (diagErr) {
       console.error(`[v4/finalize] ${gameId} finalizeTx failed; diag dump errored: ${diagErr instanceof Error ? diagErr.message : String(diagErr)}`)
     }
+    ftimer.done(true)
     throw e
   }
   state.cofundTxid = state.cofundArkTxid
-  await deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) })
+  await ftimer.step('db:update', () => deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) }))
+  ftimer.done()
 
   return { cofundTxid: state.cofundArkTxid, potOutpoint: { txid: state.cofundArkTxid, vout: 0, value: state.pot } }
 }

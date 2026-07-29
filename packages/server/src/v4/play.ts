@@ -17,7 +17,7 @@ import {
 import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
 import { hashSecret, networkHrpFromArkInfo } from '../house-wallet.js'
-import { reservations, selectionMutex, outpointKey, houseVtxoCache, freeStakeTotal, HouseBusyError, BetExceedsCapacityError } from '../vtxo-pool.js'
+import { reservations, selectionMutex, outpointKey, houseVtxoCache, freeStakeTotal, HouseBusyError, BetExceedsCapacityError, spentOutpoints } from '../vtxo-pool.js'
 import { loadEmulatorConfig } from '../emulator.js'
 import { computeHouseStake } from '../house-economics.js'
 import type { AppDeps } from '../deps.js'
@@ -182,8 +182,14 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   const maxBetFractionBps = await getMaxBetFractionBps(deps)
   await selectionMutex.runExclusive(async () => {
     const choose = (vtxos: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] | null => {
+      // `spentOutpoints` excludes coins arkd has already refused to spend. A
+      // fresh getVtxos() still LISTS a coin stranded in a settle intent that
+      // failed to delete, so without this the same dead coin is re-picked and
+      // the next player's game dies identically.
       const free = vtxos
-        .filter((v) => settledOrPre(v) && !reservations.isReserved(outpointKey(v.txid, v.vout)))
+        .filter((v) => settledOrPre(v)
+          && !reservations.isReserved(outpointKey(v.txid, v.vout))
+          && !spentOutpoints.isDenied(outpointKey(v.txid, v.vout)))
         .sort((a, b) => b.value - a.value)
       // Only contribute coins the HOUSE can actually co-sign. A coin whose forfeit
       // leaf doesn't carry the CURRENT house key (e.g. a prior-payout coin that landed

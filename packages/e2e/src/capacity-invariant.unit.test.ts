@@ -339,3 +339,71 @@ describe('a co-funded game holds liability, not pins', () => {
     expect(freeTotal(VTXOS)).toBe(before)
   })
 })
+/**
+ * A coin arkd has refused to spend must stop being offered.
+ *
+ * Production failed three games with "VTXO_ALREADY_SPENT (6): 8ef2dcc2…:5
+ * already spent" at /api/v4/game/:id/cofund. That coin was one of ten inputs
+ * stuck in a settle intent a failed renewal batch could not delete.
+ *
+ * A cache eviction alone does NOT fix it: refresh() replaces the snapshot
+ * wholesale, and arkd keeps LISTING a stranded coin while refusing to spend it —
+ * so selection re-picks it and the next player's game dies the same way. Hence a
+ * deny-list that survives a refresh.
+ */
+describe('outpoints arkd rejected as spent are not re-offered', () => {
+  const { spentOutpoints, freeStakeTotal: freeTotal, reservations, houseVtxoCache } =
+    require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+  beforeEach(() => {
+    spentOutpoints.clear()
+    for (const r of reservations.snapshot()) reservations.release(r.gameId)
+  })
+  afterEach(() => spentOutpoints.clear())
+
+  it('a denied coin drops out of the free stake total', () => {
+    const before = freeTotal(VTXOS)
+    spentOutpoints.mark(`${HEALTHY.txid}:${HEALTHY.vout}`)
+    expect(freeTotal(VTXOS)).toBe(before - HEALTHY.value)
+  })
+
+  it('survives a snapshot refresh — the whole point', async () => {
+    // The coin is still LISTED by getVtxos (arkd advertises it), but must not be
+    // spendable-by-us. Re-fetching must not resurrect it.
+    spentOutpoints.mark(`${HEALTHY.txid}:${HEALTHY.vout}`)
+    const deps = makeDeps()
+    houseVtxoCache.invalidate()
+    const fresh = await houseVtxoCache.refresh(deps)
+    expect(fresh.map((v: any) => v.txid)).toContain(HEALTHY.txid) // still listed
+    expect(freeTotal(fresh)).toBe(freeTotal(VTXOS))               // still excluded
+  })
+
+  it('the advertised capacity drops to match what /play can deliver', async () => {
+    const deps = makeDeps()
+    houseVtxoCache.invalidate()
+    const before = (await request(mount(deps)).get('/api/tiers')).body.capacity
+    expect(before).toBe(CAPACITY)
+    spentOutpoints.mark(`${HEALTHY.txid}:${HEALTHY.vout}`)
+    houseVtxoCache.invalidate()
+    const after = (await request(mount(deps)).get('/api/tiers')).body.capacity
+    // Advertising a capacity /play cannot fund is what produces a 400 mid-batch.
+    expect(after).toBeLessThan(before)
+  })
+
+  it('expires, so a coin freed when arkd clears the intent returns', () => {
+    const { SPENT_OUTPOINT_DENY_TTL_MS } =
+      require('arkade-coinflip-server/dist/vtxo-pool.js')
+    // "Already spent" can be transient — a lingering intent eventually clears.
+    // A permanent deny-list would strand the coin until restart.
+    expect(SPENT_OUTPOINT_DENY_TTL_MS).toBeGreaterThan(0)
+    expect(SPENT_OUTPOINT_DENY_TTL_MS).toBeLessThanOrEqual(3_600_000)
+  })
+
+  it('only ever removes coins — it cannot invent spendable value', () => {
+    const before = freeTotal(VTXOS)
+    for (const v of VTXOS) spentOutpoints.mark(`${v.txid}:${v.vout}`)
+    // Worst case is the house declaring itself busy, never a double-spend.
+    expect(freeTotal(VTXOS)).toBe(0)
+    expect(before).toBeGreaterThan(0)
+  })
+})

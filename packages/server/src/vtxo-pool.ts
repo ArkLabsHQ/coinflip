@@ -278,6 +278,58 @@ export function freeHouseVtxos(all: ExtendedVirtualCoin[]): ExtendedVirtualCoin[
   return selectable.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
 }
 
+/**
+ * Outpoints arkd has REJECTED as already spent, with the time we learned it.
+ *
+ * A cache eviction is not enough. `refresh()` replaces the snapshot wholesale,
+ * so `removeOutpoint` is erased by the very next `/play` — and a coin stranded
+ * in a settle intent that failed to delete keeps being LISTED by `getVtxos()`
+ * while arkd refuses to spend it. Selection therefore picks it again, and the
+ * next player's game dies the same way. Seen in production: repeated
+ * "VTXO_ALREADY_SPENT (6): 8ef2dcc2…:5 already spent" at co-fund.
+ *
+ * So this is a deny-list that survives a refresh, keyed by outpoint. It is
+ * advisory and one-directional: it only ever REMOVES coins from selection, so
+ * the worst case is the house declaring itself busy — never a double-spend.
+ *
+ * Entries expire because "already spent" can be transient: a coin held by a
+ * lingering intent becomes spendable again once arkd clears it, and we would
+ * otherwise strand it until restart.
+ */
+export const SPENT_OUTPOINT_DENY_TTL_MS = Number(process.env.SPENT_OUTPOINT_DENY_TTL_MS || 900_000)
+
+class SpentOutpointDenyList {
+  private readonly seen = new Map<string, number>()
+
+  /** Record that arkd refused to spend this outpoint. */
+  mark(outpoint: string): void {
+    this.seen.set(outpoint, Date.now())
+  }
+
+  /** True while the rejection is still recent enough to trust. */
+  isDenied(outpoint: string): boolean {
+    const at = this.seen.get(outpoint)
+    if (at === undefined) return false
+    if (Date.now() - at >= SPENT_OUTPOINT_DENY_TTL_MS) {
+      this.seen.delete(outpoint)
+      return false
+    }
+    return true
+  }
+
+  /** Currently-denied outpoints (introspection/tests); prunes as it goes. */
+  active(): string[] {
+    return [...this.seen.keys()].filter((op) => this.isDenied(op))
+  }
+
+  clear(): void {
+    this.seen.clear()
+  }
+}
+
+/** Process-wide deny-list of outpoints arkd rejected as already spent. */
+export const spentOutpoints = new SpentOutpointDenyList()
+
 /** Settled or preconfirmed — a coin state usable to fund a NEW bet. */
 const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
   v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed'
@@ -294,7 +346,11 @@ const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
  */
 export function freeStakeTotal(vtxos: ExtendedVirtualCoin[]): number {
   return vtxos
-    .filter((v) => settledOrPre(v) && !reservations.isReserved(outpointKey(v.txid, v.vout)))
+    .filter((v) => settledOrPre(v)
+      && !reservations.isReserved(outpointKey(v.txid, v.vout))
+      // Denied coins cannot fund a bet, so advertising them would size the
+      // slider off capacity /play can't actually deliver.
+      && !spentOutpoints.isDenied(outpointKey(v.txid, v.vout)))
     .reduce((s, v) => s + v.value, 0)
 }
 

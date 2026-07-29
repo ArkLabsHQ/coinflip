@@ -348,3 +348,62 @@ describe('/play reuses a recent VTXO snapshot instead of syncing every time', ()
     expect(res.body.capacity).toBe(CAPACITY)
   })
 })
+
+/**
+ * A reservation pinned to an outpoint that no longer exists must not block the
+ * house pool from splitting.
+ *
+ * Seen in production: "[house pool] split deferred — 1 outpoint(s) reserved by
+ * in-flight games" repeating forever while the admin dashboard showed the only
+ * existing coin as FREE. Both were right — the reservation named an input the
+ * co-fund had already spent. The split guard refused on ANY live outpoint
+ * reservation, so the pool stayed stuck at one VTXO (one concurrent game).
+ *
+ * Root cause: the live path never downgraded the pinned reservation to
+ * liability-only after the co-fund spent those inputs, even though
+ * rebuildReservations already does exactly that on restart
+ * (`v4.cofundArkTxid ? [] : houseInputs`) — so a restart "fixed" what a running
+ * server could not.
+ */
+describe('a reservation for a spent outpoint does not wedge the pool split', () => {
+  const { reservations, freeStakeTotal: freeTotal } =
+    require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+  afterEach(() => {
+    for (const r of reservations.snapshot()) reservations.release(r.gameId)
+  })
+
+  it('a liability-only reservation pins no outpoints', () => {
+    // The post-cofund shape: bankroll ceiling held, nothing pinned.
+    reservations.reserve('game-after-cofund', [], 50_000)
+    expect(reservations.reservedOutpoints().size).toBe(0)
+    expect(reservations.totalLiability()).toBe(50_000)
+  })
+
+  it('a stale pin names an outpoint absent from the live set', () => {
+    // The exact production shape: the pinned input is gone, the remaining coin
+    // is unreserved — which is why the admin showed it free.
+    reservations.reserve('stuck-game', ['deadbeef'.repeat(8) + ':2'], 50_000)
+    const live = new Set(VTXOS.map((v: any) => `${v.txid}:${v.vout}`))
+    const blocking = [...reservations.reservedOutpoints()].filter((op) => live.has(op))
+    expect(reservations.reservedOutpoints().size).toBe(1) // a reservation exists
+    expect(blocking).toHaveLength(0)                      // but nothing it names is live
+  })
+
+  it('STILL blocks when the reservation names a coin that is actually live', () => {
+    // The guard must not become permissive: this is the P0 #53 case the deferral
+    // exists for — splitting could spend a coin an in-flight co-fund needs.
+    reservations.reserve('live-game', [`${HEALTHY.txid}:${HEALTHY.vout}`], 50_000)
+    const live = new Set(VTXOS.map((v: any) => `${v.txid}:${v.vout}`))
+    const blocking = [...reservations.reservedOutpoints()].filter((op) => live.has(op))
+    expect(blocking).toHaveLength(1)
+  })
+
+  it('a stale pin does not shrink the free stake total either', () => {
+    // freeStakeTotal filters on isReserved, so a pin naming a live coin removes
+    // it from the sizing — a pin naming a vanished one must not.
+    const before = freeTotal(VTXOS)
+    reservations.reserve('stuck-game', ['deadbeef'.repeat(8) + ':2'], 50_000)
+    expect(freeTotal(VTXOS)).toBe(before)
+  })
+})

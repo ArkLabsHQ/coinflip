@@ -428,9 +428,19 @@ export async function ensureHouseVtxoPool(
     // reservations (no outpoints) don't block. The send is timeout-bounded so
     // a wedged arkd can't hold the mutex — and /play — hostage.
     const sent = await selectionMutex.runExclusive(async () => {
-      const reservedNow = reservations.reservedOutpoints()
-      if (reservedNow.size > 0) {
-        console.log(`[house pool] split deferred — ${reservedNow.size} outpoint(s) reserved by in-flight games`)
+      // Only reservations naming a coin that STILL EXISTS can conflict — `send`
+      // cannot spend an outpoint that is already gone. Filtering by the live set
+      // makes this self-healing: a reservation left pinned to a spent input (the
+      // shape seen in production, where the split deferred forever while the
+      // admin showed the only coin as free) no longer blocks the pool from
+      // splitting. The root cause of that particular leak is fixed at the source
+      // in v4/cofund.ts, which now downgrades to a liability-only reservation
+      // once the co-fund has spent the inputs; this is the backstop for any
+      // other way a stale pin could arise.
+      const live = new Set(all.map((v) => outpointKey(v.txid, v.vout)))
+      const reservedNow = [...reservations.reservedOutpoints()].filter((op) => live.has(op))
+      if (reservedNow.length > 0) {
+        console.log(`[house pool] split deferred — ${reservedNow.length} outpoint(s) reserved by in-flight games`)
         return false
       }
       await timeoutReject(

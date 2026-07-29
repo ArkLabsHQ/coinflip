@@ -4,6 +4,9 @@ import {
   gameActivityResolver,
   loadGameRecords,
   txidOf,
+  formatWinPct,
+  gameLabel,
+  gameDetail,
   type CoinflipGameRecord,
 } from './gameActivityResolver'
 
@@ -19,8 +22,12 @@ function tx(key: Partial<ArkTransaction['key']>): ArkTransaction {
 }
 
 const games: CoinflipGameRecord[] = [
-  { id: 'g1', tier: 1000, winner: 'player', txids: ['cofund1', 'settle1'] },
-  { id: 'g2', tier: 2000, winner: 'house', txids: ['cofund2'] },
+  {
+    id: 'g1', tier: 1000, winner: 'player', txids: ['cofund1', 'settle1'],
+    skinId: 'rocket', skinName: 'Rocket', odds: { n: 100, lo: 0, target: 12 },
+  },
+  // No skin/odds — a game recorded before those were stored.
+  { id: 'g2', tier: 2000, winner: 'house', txids: ['cofund2'], skinId: null, skinName: null, odds: null },
 ]
 
 describe('txidOf', () => {
@@ -31,8 +38,37 @@ describe('txidOf', () => {
   })
 })
 
+describe('formatWinPct', () => {
+  it('shows whole percents at 10% and above, one decimal below', () => {
+    expect(formatWinPct({ n: 2, lo: 0, target: 1 })).toBe('50%')
+    expect(formatWinPct({ n: 100, lo: 0, target: 12 })).toBe('12%')
+    expect(formatWinPct({ n: 1000, lo: 0, target: 45 })).toBe('4.5%')
+  })
+})
+
+describe('gameLabel', () => {
+  it('names the skin that was played', () => {
+    expect(gameLabel(games[0])).toBe('Rocket game')
+  })
+
+  it('stays generic for a record with no skin, rather than guessing "Dice"', () => {
+    expect(gameLabel(games[1])).toBe('Coinflip game')
+  })
+})
+
+describe('gameDetail', () => {
+  it('summarises stake, win chance and outcome', () => {
+    expect(gameDetail(games[0])).toBe('1,000 sats · 12% win · won')
+  })
+
+  it('drops the parts it does not know', () => {
+    expect(gameDetail(games[1])).toBe('2,000 sats · lost')
+    expect(gameDetail({ ...games[1], tier: 0, winner: null })).toBe('')
+  })
+})
+
 describe('gameActivityResolver', () => {
-  it('tags a game tx as one "Dice game" group with the game metadata', async () => {
+  it('tags a game tx as one group labelled with the skin, carrying the params', async () => {
     const r = gameActivityResolver(() => games)
     await r.prepare!()
 
@@ -40,11 +76,26 @@ describe('gameActivityResolver', () => {
     expect(ms).toEqual([
       {
         groupId: 'game:g1',
-        label: 'Dice game',
+        label: 'Rocket game',
         kind: 'game',
-        metadata: { gameId: 'g1', tier: 1000, winner: 'player' },
+        metadata: {
+          gameId: 'g1',
+          tier: 1000,
+          winner: 'player',
+          skinId: 'rocket',
+          odds: { n: 100, lo: 0, target: 12 },
+          detail: '1,000 sats · 12% win · won',
+        },
       },
     ])
+  })
+
+  it('labels each skin distinctly instead of calling everything a dice game', async () => {
+    const skinned = games.map((g, i) => ({ ...g, skinName: ['Coin', 'Roulette'][i] }))
+    const r = gameActivityResolver(() => skinned)
+    await r.prepare!()
+    expect(r.resolve(tx({ arkTxid: 'settle1' }))?.[0].label).toBe('Coin game')
+    expect(r.resolve(tx({ arkTxid: 'cofund2' }))?.[0].label).toBe('Roulette game')
   })
 
   it('groups every txid of a game under the same groupId', async () => {
@@ -88,14 +139,36 @@ describe('loadGameRecords', () => {
     localStorage.setItem(
       'gameHistory',
       JSON.stringify([
-        { id: 'a', tier: 1000, winner: 'player', txids: ['t1'] },
+        {
+          id: 'a', tier: 1000, winner: 'player', txids: ['t1'],
+          skinId: 'dice', skinName: 'Dice', odds: { n: 6, lo: 0, target: 3 },
+        },
         { id: 'b', txids: [] }, // no txids → skipped
         { tier: 5, txids: ['t2'] }, // no id → skipped
         'garbage',
       ]),
     )
     const recs = loadGameRecords()
-    expect(recs).toEqual([{ id: 'a', tier: 1000, winner: 'player', txids: ['t1'] }])
+    expect(recs).toEqual([{
+      id: 'a', tier: 1000, winner: 'player', txids: ['t1'],
+      skinId: 'dice', skinName: 'Dice', odds: { n: 6, lo: 0, target: 3 },
+    }])
+  })
+
+  it('nulls the skin/odds of a record written before they were stored', () => {
+    localStorage.setItem('gameHistory', JSON.stringify([
+      { id: 'old', tier: 500, winner: 'house', txids: ['t9'] },
+    ]))
+    expect(loadGameRecords()[0]).toMatchObject({ skinId: null, skinName: null, odds: null })
+  })
+
+  it('drops a partial or unusable odds blob instead of rendering a broken win%', () => {
+    localStorage.setItem('gameHistory', JSON.stringify([
+      { id: 'p', tier: 500, winner: 'house', txids: ['t1'], odds: { n: 6, lo: 0 } }, // no target
+      { id: 'z', tier: 500, winner: 'house', txids: ['t2'], odds: { n: 0, lo: 0, target: 1 } }, // ÷0
+      { id: 'i', tier: 500, winner: 'house', txids: ['t3'], odds: { n: 6, lo: 3, target: 3 } }, // empty window
+    ]))
+    expect(loadGameRecords().map((g) => g.odds)).toEqual([null, null, null])
   })
 
   it('returns [] when the key is absent or corrupt', () => {

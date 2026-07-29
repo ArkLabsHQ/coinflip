@@ -219,6 +219,7 @@ import GameDetailsModal from '@/components/GameDetailsModal.vue'
 import StalledBets from '@/components/StalledBets.vue'
 import { getTiers } from '@/services/api'
 import { SKINS, getSavedSkinId, saveSkinId, findSkin, type SkinState, type OddsBet } from '@/skins'
+import { getSavedBetAmount, saveBetAmount, getSavedStep, saveStep } from '@/utils/betPrefs'
 import { getErrorMessage, friendlyError } from '@/utils/errors'
 import { logDiag } from '@/utils/diagnosticsLog'
 // House-stake / odds formula — single-sourced in the lib so this preview can't
@@ -277,9 +278,12 @@ export default defineComponent({
     const capacity = ref(0)
     const betMin = ref(331)
     const betMax = ref(50_000)
-    // The bet amount is now continuous. Starts at the low rail; the watchers
-    // below keep it inside the envelope as the odds or capacity move.
-    const betAmount = ref(betMin.value)
+    // The bet amount is now continuous. Starts at the stake the player last
+    // used (or the low rail on a first visit); the watchers below keep it inside
+    // the envelope as the odds or capacity move — which is also what makes
+    // restoring a stale saved stake safe, since the real bounds only arrive with
+    // /api/tiers and may well have moved since the last session.
+    const betAmount = ref(getSavedBetAmount() ?? betMin.value)
 
     // ── Skin selection (early, so the odds slider can read the ladder) ──
     const currentSkinId = ref(getSavedSkinId())
@@ -288,7 +292,7 @@ export default defineComponent({
     // ── Odds slider ───────────────────────────────────────────────────
     // The slider walks the active skin's bet ladder (strictly decreasing win
     // rate — more coins / reels / dice). `sliderIndex` is the position.
-    const sliderIndex = ref(currentSkin.value.defaultStep)
+    const sliderIndex = ref(getSavedStep(currentSkinId.value) ?? currentSkin.value.defaultStep)
     const currentSkinLadder = computed(() => currentSkin.value.oddsLadder)
     // The house escrow for a bet, via the shared computeHouseStake
     // (house-edged): tier·(n−win)/win, trimmed by the edge. House stake RISES
@@ -660,8 +664,14 @@ export default defineComponent({
           resolvedAt: new Date().toISOString(),
           // On-chain txids this game touched (v4 co-fund + settle), so the
           // SDK activity history can group its wallet transactions into one
-          // "Dice game" row via the resolver registered in store/modules/ark.
+          // row via the resolver registered in store/modules/ark.
           txids: [result.cofundTxid, result.settleTxid, result.txid].filter(Boolean),
+          // What the game actually WAS. Without these the activity resolver has
+          // nothing to label with and every game reads "Dice game" regardless of
+          // which skin was played, with no odds to show.
+          skinId: currentSkinId.value,
+          skinName: currentSkin.value.name,
+          odds: { n: bet.n, lo: bet.lo, target: bet.target },
         }
         const history = JSON.parse(localStorage.getItem('gameHistory') || '[]')
         history.unshift(historyEntry)
@@ -765,10 +775,14 @@ export default defineComponent({
       if (slabTimer) clearTimeout(slabTimer)
     })
 
-    // Switching skins swaps in that skin's own ladder — reset the slider to the
-    // new skin's default step, clamped into the playable [dust, capacity] window.
-    watch(currentSkinId, () => {
-      sliderIndex.value = Math.min(Math.max(currentSkin.value.defaultStep, minStep.value), maxStep.value)
+    // Switching skins swaps in that skin's own ladder — restore the step the
+    // player last used on THAT skin (falling back to its default), clamped into
+    // the playable [dust, capacity] window. Per-skin, because a step index only
+    // means anything against one ladder: step 3 of the coin ladder and step 3 of
+    // the roulette ladder are different bets entirely.
+    watch(currentSkinId, (id) => {
+      const want = getSavedStep(id) ?? currentSkin.value.defaultStep
+      sliderIndex.value = Math.min(Math.max(want, minStep.value), maxStep.value)
     })
     // Keep the thumb inside the playable window when the stake changes — the
     // capacity ceiling drops and the dust floor rises as the amount moves.
@@ -800,6 +814,14 @@ export default defineComponent({
       const b = amountBounds.value
       betAmount.value = Math.min(Math.max(betAmount.value, b.min), usableMax.value)
     })
+
+    // Remember where the player left both controls. Declared AFTER the clamp
+    // watchers so that within one flush we persist the settled value, not an
+    // out-of-envelope intermediate that's about to be corrected. Writing on
+    // every change (rather than on flip) is what makes a reload mid-tweak keep
+    // the bet the player was actually looking at.
+    watch(betAmount, saveBetAmount)
+    watch(sliderIndex, (i) => saveStep(currentSkinId.value, i))
 
     return {
       // Game config

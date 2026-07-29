@@ -27,7 +27,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, computed, ref, watch } from 'vue'
+import { defineComponent, computed, ref, watch, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import { useRoute, useRouter } from 'vue-router'
 import WalletDrawer from '@/components/WalletDrawer.vue'
@@ -60,16 +60,38 @@ export default defineComponent({
     // A connected wallet with a zero balance can't play — force the drawer open
     // (and non-dismissible, via :dismissible below) so the user funds it first.
     // Gate on the SDK balance having ACTUALLY loaded (state.ark.walletBalance != null),
-    // not just 'connected' + a transient 0: the balance reads 0 for a beat during the
-    // initial sync, and firing on that popped the drawer open before it updated —
-    // an unnecessary UX hurdle.
-    const forceWalletOpen = computed(() =>
+    // not just 'connected' + a transient 0.
+    const looksUnfunded = computed(() =>
       isInitialized.value
       && arkStatus.value === 'connected'
       && store.state.ark?.walletBalance != null
       && walletBalance.value === 0,
     )
-    watch(forceWalletOpen, (force) => { if (force) walletOpen.value = true }, { immediate: true })
+    // ...but the null check alone isn't enough: the SDK publishes a balance OBJECT
+    // as soon as it has one, and `settled` legitimately reads 0 for a beat while the
+    // vtxos are still syncing. That passed the null check and popped the drawer open,
+    // then the real balance landed and the prompt was never needed.
+    //
+    // So require the zero to PERSIST before acting on it. `forceWalletOpen` is the
+    // CONFIRMED-empty signal, and both consumers read it — the auto-open below and
+    // the drawer's `dismissible` binding. Deriving dismissible from the raw signal
+    // instead would swap one bug for another: a user who opened the wallet themselves
+    // would find it un-closable for the whole grace window on any transient zero.
+    const ZERO_BALANCE_GRACE_MS = 2000
+    const forceWalletOpen = ref(false)
+    let zeroTimer: ReturnType<typeof setTimeout> | null = null
+    watch(looksUnfunded, (unfunded) => {
+      if (zeroTimer !== null) { clearTimeout(zeroTimer); zeroTimer = null }
+      if (!unfunded) { forceWalletOpen.value = false; return }
+      zeroTimer = setTimeout(() => {
+        zeroTimer = null
+        // Re-check at fire time: the balance may have arrived while we waited.
+        if (!looksUnfunded.value) return
+        forceWalletOpen.value = true
+        walletOpen.value = true
+      }, ZERO_BALANCE_GRACE_MS)
+    }, { immediate: true })
+    onUnmounted(() => { if (zeroTimer !== null) clearTimeout(zeroTimer) })
 
     // Deep-link support: /wallet (legacy) or /?wallet=open both open the drawer.
     function maybeOpenFromRoute() {

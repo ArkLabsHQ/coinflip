@@ -175,14 +175,22 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   // co-fund spends. Greedy largest-first keeps the input count small; the house
   // change (Hsum − houseStake) returns to the house in the co-fund.
   let houseInputs: SerializedHouseInput[] = []
-  // Fetch the house VTXO set BEFORE taking the selection lock so concurrent /play
-  // calls collapse onto ONE inflight getVtxos() (HouseVtxoCache.refresh de-dupes by
-  // inflight promise). Under the lock this fetch serializes — N cold plays = N
-  // sequential ≤45s syncs and the collapse never fires. Still a FRESH fetch (not the
-  // cached get()): v4 pins exact outpoints. Fetching pre-lock only grows the staleness
-  // window, which stays safe by construction (vtxo-pool.ts): the under-lock isReserved
-  // re-check excludes a coin another game just reserved, and a coin spent before the
-  // co-fund only fails the escrow submit (caught + retried), never a double-spend.
+  // The snapshot is read INSIDE the selection lock (below), not before it.
+  //
+  // It used to be read pre-lock so concurrent /play calls would collapse onto one
+  // inflight getVtxos() rather than serialising N cold ~45s syncs — sound while
+  // the read was a forced live refresh. It is not sound now. The read is warm, so
+  // the reason to hoist it is gone, and hoisting actively hurts: the pool split
+  // holds this same mutex around its wallet.send, so a /play arriving during a
+  // split waits (MEASURED at 9,389ms) and then selects from a snapshot taken
+  // BEFORE the split spent its coins. That produced the session's only
+  // VTXO_ALREADY_SPENT, 10ms after a "[house pool] split into 1 new 50000-sat
+  // VTXO(s)" line, on the coin the split had just consumed.
+  //
+  // Reading under the lock costs nothing now precisely BECAUSE the read is warm:
+  // a cache hit is synchronous-fast, and the one case that does fetch is a split
+  // having just invalidated — which is exactly when a refetch is required.
+  //
   // MEASURED: this was 99.6% of /play — median 2,562ms of a 2,572ms request,
   // every other phase 0ms — because refresh() forces a full SDK wallet re-sync
   // per bet. The warm snapshot is what HOUSE_VTXO_CACHE_TTL_MS was designed for
@@ -199,9 +207,11 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   //     just took is excluded regardless of snapshot age;
   //   - spentOutpoints denies anything arkd rejects, so a coin spent by
   //     something we cannot observe costs one game, not every game.
-  const vtxos = await timer.step('wallet:getVtxos', () => houseVtxoCache.get(deps))
   const maxBetFractionBps = await timer.step('cfg:maxBet', () => getMaxBetFractionBps(deps))
   await timer.step('select+reserve', () => selectionMutex.runExclusive(async () => {
+    // Read AFTER acquiring the lock, so a split that finished while we queued is
+    // reflected instead of being selected against.
+    const vtxos = await timer.step('wallet:getVtxos', () => houseVtxoCache.get(deps))
     const choose = (vtxos: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] | null => {
       // `spentOutpoints` excludes coins arkd has already refused to spend. A
       // fresh getVtxos() still LISTS a coin stranded in a settle intent that

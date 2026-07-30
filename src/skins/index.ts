@@ -8,18 +8,18 @@
  */
 
 import type { SkinMeta, OddsBet } from './types'
-import CoinSkin from './CoinSkin.vue'
+import { resolveSkinId } from './selection'
 import SlotSkin from './SlotSkin.vue'
 import DiceSkin from './DiceSkin.vue'
 import RocketSkin from './RocketSkin.vue'
 import RouletteSkin from './RouletteSkin.vue'
 import { ROCKET_ODDS_N } from '@/rocket'
 import {
-  SHARED_WIN_PCTS, COIN_COUNT, ROULETTE_N, SLOT_BASE, SLOT_REELS, DICE_N, sharedLadder,
+  SHARED_WIN_PCTS, ROULETTE_N, SLOT_BASE, SLOT_REELS, DICE_N, sharedLadder,
 } from './ladder'
 
 // Re-exported so consumers keep importing skin constants from '@/skins'.
-export { SHARED_WIN_PCTS, COIN_COUNT, ROULETTE_N, SLOT_BASE, SLOT_REELS, DICE_N, sharedLadder }
+export { SHARED_WIN_PCTS, ROULETTE_N, SLOT_BASE, SLOT_REELS, DICE_N, sharedLadder }
 
 
 
@@ -31,21 +31,6 @@ const nearHalf = (ladder: OddsBet[]): number => {
   let best = 0, bestD = Infinity
   ladder.forEach((b, i) => { const d = Math.abs(winRate(b) - 0.5); if (d < bestD) { bestD = d; best = i } })
   return best
-}
-
-/**
- * Coin: COIN_COUNT coins read as one binary number, heads = 1. More heads is a
- * bigger number, and you win when it lands in the top band — so an all-heads row
- * is always a win, and the narrowest band (win = 1) is exactly the old
- * "every coin must be heads" parlay.
- *
- * That generalisation is what lets a binary skin sit on the shared ladder at
- * all: the old design won only on roll 0, fixing its odds to 1/2^k, so it could
- * offer nothing between 50% and 25%. Seven coins give 1/128 granularity, enough
- * to hit every rung within 0.34pp.
- */
-function coinLadder(): OddsBet[] {
-  return sharedLadder(2 ** COIN_COUNT)
 }
 
 // Slot: 3 reels of SLOT_BASE ranked symbols read as one base-SLOT_BASE number;
@@ -87,33 +72,31 @@ function rocketLadder(): OddsBet[] {
   return sharedLadder(ROCKET_ODDS_N)
 }
 
-const coinBets = coinLadder()
 const slotBets = slotLadder()
 const diceBets = diceLadder()
 const rouletteBets = rouletteLadder()
 const rocketBets = rocketLadder()
 
+/**
+ * Order matters twice over: SKINS[0] is the default for a new player AND the
+ * fallback `getSavedSkinId` returns when a stored id no longer exists — which
+ * is every player who had the retired 'coin' skin selected.
+ *
+ * Dice leads for that reason. "ROLL 51+" is the most self-explanatory rung
+ * label of any skin, and a d100 at 50% is the closest analogue to the coin
+ * flip that was removed, so a returning coin player lands somewhere familiar
+ * rather than on "BEAT THE REELS".
+ */
 export const SKINS: SkinMeta[] = [
   {
-    id: 'coin', name: 'Coin', icon: '₿', component: CoinSkin,
-    oddsLadder: coinBets, defaultStep: nearHalf(coinBets),
-    // Every rung is the same COIN_COUNT coins now — what changes is how many of
-    // the 2^k orderings win — so the count alone no longer describes the bet.
-    // Just the visual, not the band: "TOP 115 OF 128" was the longest label of
-    // any skin and wrapped the odds row onto two lines, while restating what
-    // the adjacent "90% win" already says. Every rung shows COIN_COUNT coins,
-    // so this is honest and constant by design.
-    stepLabel: () => `${COIN_COUNT} COINS`,
+    id: 'dice', name: 'Dice', icon: '⚅', component: DiceSkin,
+    oddsLadder: diceBets, defaultStep: nearHalf(diceBets),
+    stepLabel: (b) => `ROLL ${b.lo + 1}+`,
   },
   {
     id: 'slot', name: 'Slot', icon: '♦', component: SlotSkin,
     oddsLadder: slotBets, defaultStep: nearHalf(slotBets),
     stepLabel: () => 'BEAT THE REELS',
-  },
-  {
-    id: 'dice', name: 'Dice', icon: '⚅', component: DiceSkin,
-    oddsLadder: diceBets, defaultStep: nearHalf(diceBets),
-    stepLabel: (b) => `ROLL ${b.lo + 1}+`,
   },
   {
     id: 'roulette', name: 'Roulette', icon: '🎡', component: RouletteSkin,
@@ -139,9 +122,10 @@ export const SKINS: SkinMeta[] = [
 const STORAGE_KEY = 'coinflip.selected_skin'
 
 export function getSavedSkinId(): string {
-  const saved = localStorage.getItem(STORAGE_KEY)
-  if (saved && SKINS.some((s) => s.id === saved)) return saved
-  return SKINS[0].id
+  // Resolution lives in selection.ts so it is unit-testable — index.ts pulls in
+  // the skin .vue components, which vitest can't load. The case that matters is
+  // a stored id for a RETIRED skin ('coin'), which must land on the default.
+  return resolveSkinId(localStorage.getItem(STORAGE_KEY), SKINS.map((s) => s.id), SKINS[0].id)
 }
 
 export function saveSkinId(id: string): void {

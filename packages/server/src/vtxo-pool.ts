@@ -27,6 +27,7 @@ import {
 } from './vtxo-denominations.js'
 import { selectableHouseVtxos } from './game-engine.js'
 import { timeoutReject, ARK_SYNC_TIMEOUT_MS, ARK_SUBMIT_TIMEOUT_MS } from './async-timeout.js'
+import { makeLogDedup } from './log-dedup.js'
 
 /** Worst-case house payout for a game of `tier` sats (full pot to player). */
 export function maxLiabilityForTier(tier: number): number {
@@ -668,13 +669,26 @@ async function pieceSizeFromTiers(deps: AppDeps): Promise<number> {
  * concurrent games can each reserve their own.
  */
 export function startPoolMaintenance(deps: AppDeps, intervalMs = 120_000): NodeJS.Timeout {
+  // A healthy pool no-ops on every tick, which at 120s would be ~720 identical
+  // lines a day — noise that buries the reason it exists to surface. Dedup logs
+  // the first occurrence and any CHANGE immediately (the operator-relevant
+  // event), then repeats an unchanged reason only on the 5-minute heartbeat.
+  const noSplitLog = makeLogDedup()
+
   const tick = async () => {
     try {
       // No pieceSize: that would collapse the ladder to a single 50,000-sat
       // rung, which is the shape this replaced. Let ensureHouseVtxoPool read
       // HOUSE_VTXO_DENOMINATIONS, or derive the default from `tiers`.
       const { created, reason } = await ensureHouseVtxoPool(deps)
-      if (created === 0) console.log(`[house pool] no split this tick — ${reason}`)
+      if (created === 0) {
+        if (noSplitLog.shouldLog('no-split', reason)) {
+          console.log(`[house pool] no split this tick — ${reason}`)
+        }
+      } else {
+        // A run that did work makes the next no-op worth hearing about again.
+        noSplitLog.clear('no-split')
+      }
     } catch (err) {
       console.warn('[house pool] maintenance tick failed:', err instanceof Error ? err.message : err)
     }

@@ -33,12 +33,28 @@
     margin-bottom: 24px;
     letter-spacing: 2px;
   }
+  /* Bands group related numbers; a FIXED 4-column track keeps rows even.
+     `auto-fit` reflowed to a different count at every width and left a ragged
+     last row, which is most of why the grid read as messy. */
+  .stat-band { margin-bottom: 24px; }
+  .band-label {
+    color: var(--muted);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    font-weight: 600;
+    margin: 0 0 10px 2px;
+  }
   .stats {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(4, 1fr);
     gap: 16px;
-    margin-bottom: 32px;
   }
+  /* A band with fewer cards gets its own track count so it still fills the row
+     — two cards in a 4-column grid left a conspicuous half-empty gap. */
+  .stats.cols-2 { grid-template-columns: repeat(2, 1fr); }
+  @media (max-width: 900px) { .stats, .stats.cols-2 { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 520px) { .stats, .stats.cols-2 { grid-template-columns: 1fr; } }
   .stat-card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -46,6 +62,9 @@
     padding: 20px;
     text-align: center;
   }
+  /* One number is the one an operator looks for first; the rest are context. */
+  .stat-card.primary { border-color: var(--gold); }
+  .stat-card.primary .value { font-size: 2.1rem; }
   .stat-card .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
   .stat-card .value { font-size: 1.8rem; font-weight: 700; margin-top: 8px; font-family: 'SF Mono', 'Fira Code', monospace; }
   .stat-card .value.balance { color: var(--gold); }
@@ -239,46 +258,72 @@
 <body>
   <h1>&#9824; COINFLIP HOUSE</h1>
 
-  <div class="stats">
-    <div class="stat-card">
-      <div class="label">Available Balance</div>
-      <div class="value balance" id="balance">—</div>
+  <!--
+    Grouped into three bands rather than one run of ten equal cards.
+
+    Previously all ten sat in a single `auto-fit minmax(180px,1fr)` grid, so
+    every number carried the same visual weight, the last row was ragged at most
+    widths, and unrelated things stood side by side — the wallet's balance next
+    to in-flight liability. Banding gives each number a context, and a fixed
+    4-column track keeps rows even instead of reflowing unpredictably.
+
+    Every id is unchanged so the polling code keeps working untouched.
+  -->
+  <div class="stat-band">
+    <h3 class="band-label">Bankroll</h3>
+    <div class="stats">
+      <div class="stat-card primary">
+        <div class="label">Available Balance</div>
+        <div class="value balance" id="balance">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Settled / Preconfirmed</div>
+        <div class="value balance" id="balanceDetail">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Boarding (on-chain)</div>
+        <div class="value games" id="boardingBalance">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Recoverable (swept)</div>
+        <div class="value balance" id="recoverableBalance">—</div>
+      </div>
     </div>
-    <div class="stat-card">
-      <div class="label">Settled / Preconfirmed</div>
-      <div class="value balance" id="balanceDetail">—</div>
+  </div>
+
+  <div class="stat-band">
+    <h3 class="band-label">Games &amp; P/L</h3>
+    <div class="stats">
+      <div class="stat-card">
+        <div class="label">Games Today</div>
+        <div class="value games" id="gamesToday">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Profit (24h)</div>
+        <div class="value profit" id="profit24h">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Active Games</div>
+        <div class="value games" id="activeGames">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">In-flight Liability</div>
+        <div class="value negative" id="liability">—</div>
+      </div>
     </div>
-    <div class="stat-card">
-      <div class="label">Boarding (on-chain)</div>
-      <div class="value games" id="boardingBalance">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Recoverable (swept)</div>
-      <div class="value balance" id="recoverableBalance">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Pending Recovery</div>
-      <div class="value games" id="pendingRecovery">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Games Today</div>
-      <div class="value games" id="gamesToday">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Profit (24h)</div>
-      <div class="value profit" id="profit24h">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">VTXOs</div>
-      <div class="value games" id="vtxoCount">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Active Games</div>
-      <div class="value games" id="activeGames">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">In-flight Liability</div>
-      <div class="value negative" id="liability">—</div>
+  </div>
+
+  <div class="stat-band">
+    <h3 class="band-label">Pool Health</h3>
+    <div class="stats cols-2">
+      <div class="stat-card">
+        <div class="label">VTXOs</div>
+        <div class="value games" id="vtxoCount">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Pending Recovery</div>
+        <div class="value games" id="pendingRecovery">—</div>
+      </div>
     </div>
   </div>
 

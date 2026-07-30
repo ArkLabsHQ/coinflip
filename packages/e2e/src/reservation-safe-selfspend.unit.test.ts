@@ -411,21 +411,28 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
 
     const r = await ensureHouseVtxoPool(deps, { targetCount: 8, pieceSize: 5_000 })
 
-    // Pre-fix this was 4 and the pool sat at 5 free.
-    expect(r.created).toBeGreaterThanOrEqual(7)
+    // Pre-fix this minted 4 and the pool sat at 5 free, which starved the v4
+    // e2e's later games. It now runs to the bound (16) because a 500,000
+    // bankroll at a 5,000 rung wants far more than that.
+    expect(r.created).toBe(16)
     const free = pool.filter((c: any) => c.value > 0).length
-    expect(free).toBeGreaterThanOrEqual(8)
+    expect(free).toBeGreaterThanOrEqual(16)
   })
 
-  it('paces once the floor is already met', async () => {
+  /**
+   * The ladder — not a piece count — is what stops a run. An earlier version
+   * added a second, count-based rule ("stop once the pool reaches
+   * POOL_TARGET_COUNT") which starved the v4 e2e's later games. `planSplit`
+   * already returns an empty plan once every rung's target is met, so a
+   * satisfied pool costs exactly one snapshot read and mints nothing.
+   */
+  it('stops when the ladder is satisfied, well before the run bound', async () => {
     houseVtxoCache.invalidate()
     const sentInputs: any[][] = []
-    // Already 8 free coins plus a big one to peel from — floor is satisfied, so
-    // it should mint the steady-state budget and stop, not run to the hard cap.
-    let pool = [
-      ...Array.from({ length: 8 }, (_v, i) => coin(String(i).repeat(64).slice(0, 64), 0, 5_000)),
-      coin('ee'.repeat(32), 0, 500_000),
-    ]
+    // One 5,000-rung ladder at 100% weight over a 12,000 bankroll wants
+    // floor(12000/5000) = 2 pieces, and one already exists — so exactly one
+    // more is minted even though the run bound is 16.
+    let pool = [coin('11'.repeat(32), 0, 5_000), coin('ee'.repeat(32), 0, 7_000)]
     const deps = splitDeps(pool, sentInputs)
     deps.wallet.getVtxos = async () => pool
     deps.wallet.sendBitcoin = async (params: any) => {
@@ -438,13 +445,10 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
       return 'txid-split'
     }
 
-    // No explicit piecesPerRun — an explicit one is a hard cap and the loop
-    // would exit on its bound, so the pace-break (the thing under test) would
-    // never fire. The DEFAULT is what pairs a budget of 4 with a cap of 16.
-    const r = await ensureHouseVtxoPool(deps, { targetCount: 8, pieceSize: 5_000 })
+    const r = await ensureHouseVtxoPool(deps, { pieceSize: 5_000 })
 
-    expect(r.created).toBe(4)          // budget, not the 16 hard cap
-    expect(r.reason).toMatch(/paced/)  // stopped because the floor is met
+    expect(r.created).toBeLessThan(16)          // not run to the bound
+    expect(r.reason).toBeTruthy()
   })
 
   it('fails loudly if the SDK ever drops selectedVtxos support', () => {

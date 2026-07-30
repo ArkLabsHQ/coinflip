@@ -20,10 +20,6 @@
         </button>
       </div>
       <div class="hud-right">
-        <div class="pnl-pill" :class="pnlClass" @click="togglePnlScope" :title="`Click to switch — currently ${pnlScope}`">
-          <span class="pnl-scope">{{ pnlScope }}</span>
-          <span class="pnl-amount mono">{{ formattedPnl }}</span>
-        </div>
         <button class="history-btn" title="Game history" @click="openHistory">&#9827;</button>
         <router-link to="/how-it-works" class="history-btn help-btn" title="How it works">?</router-link>
         <!-- Wallet balance folded into the one HUD (the global float-pill is hidden
@@ -40,15 +36,36 @@
          escrowed stake is reclaimable here (no trust in the server). -->
     <StalledBets />
 
-    <!-- Sparkline row: last-50 win/loss results. Rollbit pattern. -->
-    <div class="sparkline" v-if="sparkline.length">
-      <span
-        v-for="(r, i) in sparkline"
-        :key="r.key"
-        class="spark-dot"
-        :class="r.won ? 'win' : 'loss'"
-        :style="{ animationDelay: `${(sparkline.length - 1 - i) * 12}ms` }"
-      />
+    <!-- ONE always-present status row: last-50 results + the streak badge.
+         Both used to come and go independently — and the streak was absolutely
+         positioned at a hardcoded top:120px, which now lands on the wheel — so
+         the top of the screen moved every time a streak started or the first
+         result arrived. The row reserves its height whether or not it has
+         content, so nothing below it shifts. -->
+    <div class="status-row">
+      <!-- P/L lives here rather than in the top row: with it up there, row 1
+           could not fit on a phone without either wrapping (the original
+           behaviour) or clipping the last skin chip (what tightening it did).
+           Moving one item down solves both, and P/L is status anyway. -->
+      <div class="pnl-pill" :class="pnlClass" @click="togglePnlScope" :title="`Click to switch — currently ${pnlScope}`">
+        <span class="pnl-scope">{{ pnlScope }}</span>
+        <span class="pnl-amount mono">{{ formattedPnl }}</span>
+      </div>
+      <div class="sparkline" v-if="sparkline.length">
+        <span
+          v-for="(r, i) in sparkline"
+          :key="r.key"
+          class="spark-dot"
+          :class="r.won ? 'win' : 'loss'"
+          :style="{ animationDelay: `${(sparkline.length - 1 - i) * 12}ms` }"
+        />
+      </div>
+      <transition name="streak-pop">
+        <div v-if="streak.count >= 3" class="streak-badge" :class="streak.kind">
+          <span class="streak-icon">{{ streak.kind === 'win' ? '🔥' : '❄' }}</span>
+          STREAK ×{{ streak.count }}
+        </div>
+      </transition>
     </div>
 
     <!-- Centerpiece skin. For skins that own their play gesture (Rocket),
@@ -65,14 +82,6 @@
         @cashout="onSkinCashout"
       />
     </div>
-
-    <!-- Streak badge — appears at 3+ in a row. -->
-    <transition name="streak-pop">
-      <div v-if="streak.count >= 3" class="streak-badge" :class="streak.kind">
-        <span class="streak-icon">{{ streak.kind === 'win' ? '🔥' : '❄' }}</span>
-        STREAK ×{{ streak.count }}
-      </div>
-    </transition>
 
     <div class="controls" :class="{ inert: isFlipping && !isAutoRunning }">
       <div class="control-group amount-slider">
@@ -105,13 +114,30 @@
         <div class="amount-ends">
           <span>{{ tiersLoaded ? amountBounds.min.toLocaleString() : '—' }}</span>
           <span v-if="!tiersLoaded">Loading bet range…</span>
-          <!-- An infeasible rung (min > max, including once the top-up headroom
-               is reserved) is ALWAYS a house-side reason — no amount at this win
-               chance produces a stake in [dust, capacity] — so it must not read
-               as a wallet problem. Checked before canAffordRung, which folds
-               both reasons into one flag. -->
+          <!-- ORDER MATTERS, and it is about which lever the player can pull.
+               A high win chance needs a BIG stake (the house side must clear
+               dust), so a modest balance is blocked at 95% but fine at 50% —
+               lowering the win chance is the fix, and it is the odds slider, not
+               this one. Reported live at 95% with 4,790 sats against a 6,464
+               minimum: the amount slider went inert and the row said the house
+               couldn't cover, so the one control that would have unstuck the
+               player looked irrelevant. Both constraints were in fact binding;
+               naming only the house's hid the actionable one.
+               So: if a LOWER win chance would work, say that first. -->
+          <span v-else-if="lowerOddsWouldHelp" class="amount-warn">
+            Lower the win chance — {{ winPctValue }}% needs {{ amountBounds.min.toLocaleString() }} sats
+          </span>
+          <!-- feasible BEFORE canAffordRung, as it always was: canAffordRung
+               folds both reasons into one flag (`feasible && balance >= min`),
+               so checking it first misreports a house shortfall as the player's
+               wallet. Verified: at capacity 340 no rung is feasible at all, and
+               the inverted order claimed "balance too low" when the house was
+               the blocker. Only `lowerOddsWouldHelp` belongs ahead of both,
+               because it is the one case with a lever the player can pull. -->
           <span v-else-if="!amountBounds.feasible" class="amount-warn">House can't cover a bet at this win chance</span>
-          <span v-else-if="!canAffordRung" class="amount-warn">Your balance is too low for this bet</span>
+          <span v-else-if="!canAffordRung" class="amount-warn">
+            Balance too low — add funds to bet at {{ winPctValue }}%
+          </span>
           <span v-else-if="!canBet" class="amount-warn">House has no capacity right now</span>
           <span v-else-if="balanceCapped" class="amount-warn">Capped by your wallet balance</span>
           <span>{{ tiersLoaded && canAffordRung ? usableMax.toLocaleString() : '—' }}</span>
@@ -569,6 +595,34 @@ export default defineComponent({
     // canBet folds this in so the FLIP button can never stay enabled on a bet
     // the wallet cannot fund.
     const canAffordRung = computed(() => amountBounds.value.feasible && playerBalance.value >= amountBounds.value.min)
+    /**
+     * True when the CURRENT rung is unplayable but a SAFER one (lower win
+     * chance) is affordable — i.e. the odds slider is the way out.
+     *
+     * Only claims this when it is actually true: it walks toward LOWER win
+     * chances and asks whether any rung there is both house-feasible AND within
+     * the balance. Telling a player to lower the win chance when nothing lower
+     * helps either would just be a different wrong message.
+     *
+     * Direction matters and is easy to get backwards (it was, first time). The
+     * minimum stake is ceil(dust*D/K) with D = win*10000 and K = (n-win)*edge:
+     * a HIGH win chance makes D big and K small, so the minimum explodes — 6,464
+     * sats at 95% against 331 at the bottom. Lowering the win chance shrinks it,
+     * and lower win chance means a HIGHER ladder index, since the ladder
+     * decreases in win rate as the index rises.
+     */
+    const lowerOddsWouldHelp = computed(() => {
+      if (!tiersLoaded.value || canAffordRung.value) return false
+      const ladder = currentSkinLadder.value
+      for (let i = safeStep.value + 1; i < ladder.length; i++) {
+        const b = amountBoundsForOdds(ladder[i], {
+          edgeBps: oddsEdgeBps.value, dust: dust.value, capacity: capacity.value,
+          railMin: betMin.value, railMax: betMax.value, topUpHeadroom: dust.value,
+        })
+        if (b.feasible && playerBalance.value >= b.min) return true
+      }
+      return false
+    })
     // Only a valid bet is required now — the side defaults to 'random', so a
     // fresh player can flip immediately after load.
     const canFlip = computed(() => !isFlipping.value && canBet.value)
@@ -918,7 +972,7 @@ export default defineComponent({
       // Odds slider
       sliderIndex, minStep, maxStep, selectedBet, stepLabel, winPctValue, payoutMult,
       // Lifecycle
-      isFlipping, error, skinState, phase, flipStageLabel,
+      isFlipping, error, skinState, phase, flipStageLabel, lowerOddsWouldHelp,
       // Auto
       autoOptions: AUTO_OPTIONS, autoCount, autoRemaining, isAutoRunning, isAutoMode, stopRequested,
       autoCountLabel, autoRemainingLabel, autoProgressLabel,
@@ -981,10 +1035,12 @@ export default defineComponent({
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  /* Wrap to a second line on very narrow phones rather than shrinking the
-     skin-selector until its last chip (rocket) spills out of the pill. */
-  flex-wrap: wrap;
-  row-gap: 8px;
+  /* Deliberately NO wrap. Wrapping put the wallet/help/history on a second row
+     on a phone, which is half of what read as "things in different rows,
+     jumping around": the row count changed with the viewport AND with the P/L
+     width. The skin chips shrink instead (see .skin-selector) — a slightly
+     tighter chip is a much smaller cost than a HUD whose shape moves. */
+  flex-wrap: nowrap;
 }
 
 .skin-selector {
@@ -994,8 +1050,9 @@ export default defineComponent({
   border: 1px solid var(--border-light);
   border-radius: 999px;
   padding: 3px;
-  /* Never shrink below the chips' width — a shrunk pill let its last chip (rocket)
-     spill outside the rounded background. If the whole HUD can't fit, .top-hud wraps. */
+  /* Never shrink or clip: a squeezed pill pushes its last chip (rocket) outside
+     the rounded background. Row 1 fits without it because the P/L pill moved to
+     the status row. */
   flex-shrink: 0;
 }
 .skin-chip {
@@ -1096,7 +1153,15 @@ export default defineComponent({
   color: var(--text-muted);
   font-weight: 700;
 }
-.pnl-amount { font-family: ui-monospace, monospace; }
+.pnl-amount {
+  font-family: ui-monospace, monospace;
+  /* Tabular figures + a floor width so the pill does NOT resize as the number
+     moves 0 -> +3,018 -> -8,724. Its width was changing after every single bet
+     and dragging the whole HUD with it. */
+  font-variant-numeric: tabular-nums;
+  min-width: 7ch;
+  text-align: right;
+}
 .pnl-pill.up .pnl-amount { color: var(--green, #22c55e); }
 .pnl-pill.down .pnl-amount { color: var(--red); }
 .pnl-pill.neutral .pnl-amount { color: var(--text-muted); }
@@ -1105,10 +1170,15 @@ export default defineComponent({
 
 /* ── Sparkline ──────────────────────────────────────────────────── */
 .sparkline {
-  width: 100%;
+  /* Shares the status row with the P/L pill and the streak badge now, so it
+     takes the leftover space rather than the full width. */
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   gap: 3px;
-  justify-content: flex-end;
+  /* Centred, not right-hugged: flush right it read as a detached strip floating
+     away from the HUD rather than part of it. */
+  justify-content: center;
   flex-wrap: nowrap;
   overflow: hidden;
   min-height: 14px;
@@ -1141,11 +1211,19 @@ export default defineComponent({
 .skin-area.playing { filter: brightness(1.1); }
 
 /* ── Streak badge ───────────────────────────────────────────────── */
+.status-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  /* Holds its height with or without content, so a first result or a starting
+     streak never pushes the centrepiece down. */
+  min-height: 22px;
+}
 .streak-badge {
-  position: absolute;
-  top: 120px;
-  right: 18px;
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 6px;
   padding: 6px 12px;

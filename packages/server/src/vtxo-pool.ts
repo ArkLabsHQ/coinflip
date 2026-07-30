@@ -491,15 +491,15 @@ export async function ensureHouseVtxoPool(
     piecesPerRun?: number
   } = {},
 ): Promise<SplitOutcome> {
-  const targetCount = opts.targetCount ?? POOL_TARGET_COUNT
-  const maxCount = opts.maxCount ?? POOL_MAX_COUNT
-  const piecesPerRun = opts.piecesPerRun ?? SPLIT_PIECES_PER_RUN
-  const ladder =
-    opts.ladder ??
-    (opts.pieceSize ? [{ size: opts.pieceSize, weightPct: 100 }] : null) ??
-    parseLadder(process.env.HOUSE_VTXO_DENOMINATIONS) ??
-    defaultLadder(await pieceSizeFromTiers(deps))
-
+  // Claim the run before doing any work, so a call that will be refused does
+  // not first pay for a config read to resolve the ladder.
+  //
+  // NOT a correctness requirement, and it is worth being precise about why: the
+  // check-and-set below is synchronous, so it is atomic on a single-threaded
+  // event loop no matter what preceded it. Two callers arriving in the same
+  // tick suspend, resume in FIFO order, and the first sets the flag before the
+  // second resumes. What would actually break the guard is an `await` BETWEEN
+  // the check and the assignment — never add one.
   if (splitInFlight) {
     return { created: 0, reason: 'a split is already running — skipped this attempt' }
   }
@@ -507,6 +507,15 @@ export async function ensureHouseVtxoPool(
   const runId = `${SPLIT_RESERVATION_ID}#${++splitRunSeq}`
 
   try {
+    const targetCount = opts.targetCount ?? POOL_TARGET_COUNT
+    const maxCount = opts.maxCount ?? POOL_MAX_COUNT
+    const piecesPerRun = opts.piecesPerRun ?? SPLIT_PIECES_PER_RUN
+    const ladder =
+      opts.ladder ??
+      (opts.pieceSize ? [{ size: opts.pieceSize, weightPct: 100 }] : null) ??
+      parseLadder(process.env.HOUSE_VTXO_DENOMINATIONS) ??
+      defaultLadder(await pieceSizeFromTiers(deps))
+
     return await runSplit(deps, { targetCount, maxCount, piecesPerRun, ladder, runId })
   } finally {
     splitInFlight = false

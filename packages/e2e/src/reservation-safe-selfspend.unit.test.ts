@@ -282,6 +282,49 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     expect(reservations.isReserved(`${free.txid}:0`)).toBe(false)
   })
 
+  /**
+   * Same-tick arrival: both calls are launched with NO await between them, so
+   * neither has had a chance to set the flag when the other starts.
+   *
+   * Verified honestly — this passes against BOTH the current ordering and one
+   * that checks the flag after an await, because the check-and-set pair is
+   * synchronous and therefore atomic on a single-threaded event loop. It pins
+   * the observable behaviour (exactly one run, one send, no overlap), not the
+   * placement of the check. The ordering that WOULD break the guard is an
+   * `await` between the check and the assignment, which no test can catch
+   * without introducing one.
+   */
+  it('holds when both callers arrive in the same tick', async () => {
+    houseVtxoCache.invalidate()
+    const free = coin('ee'.repeat(32), 0, 400_000)
+    const sentInputs: any[][] = []
+    const deps = splitDeps([free], sentInputs, [])
+    let concurrentSends = 0
+    let maxConcurrent = 0
+    deps.wallet.sendBitcoin = async (params: any) => {
+      concurrentSends++
+      maxConcurrent = Math.max(maxConcurrent, concurrentSends)
+      sentInputs.push(params.selectedVtxos)
+      await new Promise((r) => setTimeout(r, 20))
+      concurrentSends--
+      return 'txid-split'
+    }
+
+    // No await between them — both enter while the flag is still false.
+    const [a, b] = await Promise.all([
+      ensureHouseVtxoPool(deps, { piecesPerRun: 1 }),
+      ensureHouseVtxoPool(deps, { piecesPerRun: 1 }),
+    ])
+
+    // Exactly one ran; the other was refused.
+    const refused = [a, b].filter((r: any) => /already running/.test(r.reason))
+    expect(refused).toHaveLength(1)
+    expect([a, b].filter((r: any) => r.created === 1)).toHaveLength(1)
+    // The decisive assertion: two sends never overlapped on the same coin.
+    expect(maxConcurrent).toBe(1)
+    expect(sentInputs).toHaveLength(1)
+  })
+
   it('releases the in-flight guard even when a run throws', async () => {
     houseVtxoCache.invalidate()
     const free = coin('ee'.repeat(32), 0, 200_000)

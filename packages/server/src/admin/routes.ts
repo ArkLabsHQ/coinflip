@@ -3,7 +3,7 @@ import path from 'path'
 import { isVtxoExpiringSoon, selectVirtualCoins } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
 import type { V4State } from '../v4/types.js'
-import { houseVtxoCache, reservations, ensureHouseVtxoPool, selectionMutex, outpointKey } from '../vtxo-pool.js'
+import { houseVtxoCache, reservations, ensureHouseVtxoPool, selectionMutex, outpointKey, freeHouseVtxos } from '../vtxo-pool.js'
 import { ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
 import { buildReservationSafeSettleParams } from '../game-engine.js'
 import { makeSettlementHandler } from '../settlement-events.js'
@@ -353,7 +353,12 @@ export function createAdminRoutes(deps: AppDeps): Router {
         boardingAddress,
         balance,
         pubkey: Buffer.from(pubkeyBytes).toString('hex'),
+        // Raw length counts swept and spent-but-still-listed coins (arkd keeps
+        // listing a stranded outpoint), so on its own it overstates the pool —
+        // badly, under a "Pool Health" heading. `freeVtxoCount` is what /play
+        // can actually select: selectable, unreserved, not denied.
         vtxoCount: vtxos.length,
+        freeVtxoCount: freeHouseVtxos(vtxos).length,
       })
     } catch (err) {
       res.status(500).json({ error: String(err) })

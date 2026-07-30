@@ -317,7 +317,7 @@
     <h3 class="band-label">Pool Health</h3>
     <div class="stats cols-2">
       <div class="stat-card">
-        <div class="label">VTXOs</div>
+        <div class="label">VTXOs (free / total)</div>
         <div class="value games" id="vtxoCount">—</div>
       </div>
       <div class="stat-card">
@@ -587,7 +587,13 @@
     const data = await res.json();
     document.getElementById('houseAddress').textContent = data.address;
     document.getElementById('boardingAddress').textContent = data.boardingAddress;
-    document.getElementById('vtxoCount').textContent = data.vtxoCount;
+    // Free / total, not the raw count. The raw snapshot includes swept and
+    // spent-but-still-listed coins, so "VTXOs: 64" could sit above a pool with
+    // 5 usable inputs — precisely the confusion that made a swept bankroll look
+    // healthy before the 1M-sat loss. The free number is what /play can select.
+    const freeN = data.freeVtxoCount;
+    document.getElementById('vtxoCount').textContent =
+      (freeN === undefined ? data.vtxoCount : freeN + ' / ' + data.vtxoCount);
   }
 
   async function revealKey() {

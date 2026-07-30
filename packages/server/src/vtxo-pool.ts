@@ -101,6 +101,18 @@ export class KeyedMutex {
   }
 }
 
+/**
+ * Reservation holder id used by the pool splitter to pin the coin it spends.
+ *
+ * Declared here (above the ledger) because `activeGames()` must exclude it —
+ * it is not a game. Not restorable on purpose: `rebuildReservations` only
+ * re-pins outpoints listed by PENDING GAMES, so a split killed mid-flight
+ * leaves nothing behind after a restart. Failing toward "this coin is briefly
+ * unusable" is the right direction; failing toward "/play may also spend it"
+ * is not.
+ */
+export const SPLIT_RESERVATION_ID = '__house_pool_split__'
+
 interface Reservation {
   outpoints: Set<string>
   liability: number
@@ -144,8 +156,18 @@ export class VtxoReservations {
     return sum
   }
 
+  /**
+   * In-flight GAMES. Not `byGame.size`: the pool splitter also holds a
+   * reservation (SPLIT_RESERVATION_ID) to pin the coin it is spending, and
+   * counting that as a game made the admin dashboard's "Active Games" read one
+   * too high for the duration of every split.
+   */
   activeGames(): number {
-    return this.byGame.size
+    let n = 0
+    for (const gameId of this.byGame.keys()) {
+      if (!gameId.startsWith(SPLIT_RESERVATION_ID)) n++
+    }
+    return n
   }
 
   /** Point-in-time view of the ledger for admin introspection (read-only). */
@@ -401,17 +423,6 @@ export const POOL_MAX_COUNT = Number(process.env.HOUSE_VTXO_POOL_MAX || 64)
  * and it is what lets us pin the inputs), so tx weight is no longer the
  * binding constraint — SPLIT_PIECES_PER_RUN bounds a tick instead.
  */
-
-/**
- * Synthetic reservation holder for the splitter's own inputs.
- *
- * Not a game id, and deliberately not restorable: `rebuildReservations` only
- * re-pins outpoints listed by PENDING GAMES, so a split killed mid-flight
- * leaves nothing behind after a restart. Failing toward "this coin is briefly
- * unusable" is the right direction; failing toward "/play may also spend it"
- * is not.
- */
-export const SPLIT_RESERVATION_ID = '__house_pool_split__'
 
 /**
  * Only one split runs at a time.

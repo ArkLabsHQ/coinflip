@@ -158,6 +158,19 @@ describe('house profit (24h) uses real stakes, not tier', () => {
     expect(profit).toBe(0)
   })
 
+  it('the 24h window excludes older resolved games', async () => {
+    const { db, exec } = makeExecutor()
+    // Two days ago — outside the window, so it must not move the number.
+    db.prepare(`
+      INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, status, house_vtxos_json, winner, rake_amount, payout_amount, created_at, resolved_at)
+      VALUES ('old', 1000, 'a', 'trustless-v4', 'h', 's', 'resolved', ?, 'player', 0, NULL, datetime('now','-2 days'), NULL)
+    `).run(v4State(20_000, 19_000))
+    insert(db, { id: 'new', tier: 1_000, winner: 'house', house_vtxos_json: v4State(20_000, 19_000) })
+
+    const { profit24h } = await new SQLiteGameRepository(exec).stats()
+    expect(profit24h).toBe(1_000) // only the new one
+  })
+
   it('rake_amount is not added — v4 never writes it', async () => {
     // Even with a stale rake on the row, profit must not move: the whole pot
     // goes to the winner, so there is no rake to collect.

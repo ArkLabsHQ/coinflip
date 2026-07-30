@@ -3,7 +3,7 @@ import path from 'path'
 import { isVtxoExpiringSoon, selectVirtualCoins } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
 import type { V4State } from '../v4/types.js'
-import { houseVtxoCache, reservations, ensureHouseVtxoPool, selectionMutex, outpointKey } from '../vtxo-pool.js'
+import { houseVtxoCache, reservations, ensureHouseVtxoPool, selectionMutex, outpointKey, freeHouseVtxos } from '../vtxo-pool.js'
 import { ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
 import { buildReservationSafeSettleParams } from '../game-engine.js'
 import { makeSettlementHandler } from '../settlement-events.js'
@@ -353,7 +353,12 @@ export function createAdminRoutes(deps: AppDeps): Router {
         boardingAddress,
         balance,
         pubkey: Buffer.from(pubkeyBytes).toString('hex'),
+        // Raw length counts swept and spent-but-still-listed coins (arkd keeps
+        // listing a stranded outpoint), so on its own it overstates the pool —
+        // badly, under a "Pool Health" heading. `freeVtxoCount` is what /play
+        // can actually select: selectable, unreserved, not denied.
         vtxoCount: vtxos.length,
+        freeVtxoCount: freeHouseVtxos(vtxos).length,
       })
     } catch (err) {
       res.status(500).json({ error: String(err) })
@@ -571,9 +576,22 @@ export function createAdminRoutes(deps: AppDeps): Router {
         res.status(400).json({ error: 'targetCount must be a positive number' })
         return
       }
-      const created = await ensureHouseVtxoPool(deps, { targetCount, pieceSize })
+      // `reason` is always populated, including when created === 0. Without it
+      // this endpoint answered `{created: 0}` with HTTP 200 for four different
+      // give-up paths — at the ceiling, bankroll too small, deferred behind a
+      // live reservation, send failed — which is why it read as "it ran but
+      // nothing happened, and there was no error".
+      const { created, reason } = await ensureHouseVtxoPool(deps, {
+        targetCount,
+        // Only force a single-size ladder when the caller explicitly asked for
+        // one; otherwise use the configured/derived denomination ladder.
+        ...(req.body.pieceSize !== undefined ? { pieceSize } : {}),
+        ...(req.body.piecesPerRun !== undefined
+          ? { piecesPerRun: parseInt(String(req.body.piecesPerRun), 10) }
+          : {}),
+      })
       const vtxos = await deps.wallet.getVtxos()
-      res.json({ created, vtxoCount: vtxos.length })
+      res.json({ created, reason, vtxoCount: vtxos.length })
     } catch (err) {
       res.status(500).json({ error: String(err instanceof Error ? err.message : err) })
     }

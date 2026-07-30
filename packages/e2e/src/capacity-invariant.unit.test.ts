@@ -584,3 +584,46 @@ describe('/play selects against post-lock state', () => {
     expect(order).toEqual(['a:start', 'a:end', 'b:start', 'b:end'])
   })
 })
+
+/**
+ * Admin "Active Games" must count GAMES.
+ *
+ * The pool splitter also holds a reservation (SPLIT_RESERVATION_ID) to pin the
+ * coin it is spending — that is what lets it send outside the selection mutex.
+ * But `activeGames()` returned `byGame.size`, so introducing that holder would
+ * have made the dashboard read one game too high for the duration of every
+ * split: an inaccuracy added to the very stat panel it was meant to fix.
+ */
+describe('activeGames counts games, not the splitter', () => {
+  const { reservations, SPLIT_RESERVATION_ID } =
+    require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+  afterEach(() => {
+    for (const r of reservations.snapshot()) reservations.release(r.gameId)
+  })
+
+  it('excludes the split holder from the count but still pins its outpoint', () => {
+    reservations.reserve('game-1', ['aa:0'], 2_000)
+    expect(reservations.activeGames()).toBe(1)
+
+    reservations.reserve(`${SPLIT_RESERVATION_ID}#7`, ['bb:0'], 0)
+    // Still ONE game...
+    expect(reservations.activeGames()).toBe(1)
+    // ...but the split's coin is genuinely reserved, so /play skips it.
+    expect(reservations.isReserved('bb:0')).toBe(true)
+    // ...and it adds no phantom liability.
+    expect(reservations.totalLiability()).toBe(2_000)
+  })
+
+  it('reports zero games while only a split is running', () => {
+    reservations.reserve(`${SPLIT_RESERVATION_ID}#1`, ['cc:0'], 0)
+    expect(reservations.activeGames()).toBe(0)
+    expect(reservations.isReserved('cc:0')).toBe(true)
+  })
+
+  it('the split holder is still visible in the snapshot, for on-call diagnosis', () => {
+    reservations.reserve(`${SPLIT_RESERVATION_ID}#3`, ['dd:0'], 0)
+    const ids = reservations.snapshot().map((r: any) => r.gameId)
+    expect(ids).toContain(`${SPLIT_RESERVATION_ID}#3`)
+  })
+})

@@ -148,11 +148,49 @@ export class SQLiteGameRepository implements GameRepository {
     const today = await this.db.get<{ count: number }>(
       "SELECT COUNT(*) as count FROM games WHERE status = 'resolved' AND date(created_at) = date('now')",
     )
+    // House profit per resolved game, from the REAL stakes.
+    //
+    // The previous formula was `winner='house' THEN tier` /
+    // `winner='player' THEN rake_amount - tier`, which is wrong twice over for
+    // v4:
+    //
+    //   * v4 is VARIABLE-ODDS. The house stake is derived from the win chance
+    //     and reaches roughly 19x the player's at a 95% win chance, so a player
+    //     win costs the house `houseStake`, not `tier`. Booking it as `-tier`
+    //     understated losses by up to ~19x and made profit read far too high.
+    //   * `rake_amount` is NEVER WRITTEN by v4 — it is only read for display,
+    //     and the house edge lives entirely in `variable_odds_edge_bps`, baked
+    //     into the odds. `buildJointPotSettleTx` pays the WHOLE pot to the
+    //     winner, so there is no rake to add.
+    //
+    // Both stakes are recoverable: /play persists the V4State into
+    // `house_vtxos_json`, which carries `pot` and `houseStake` at the top level,
+    // and playerStake = pot - houseStake.
+    //
+    // `json_valid` guards the extract so a legacy or malformed blob cannot fail
+    // the whole stats query and blank the dashboard. Pre-v4 rows stored a plain
+    // `string[]` of outpoints, and those games WERE even-money — so the `tier`
+    // fallback is not a guess, it is correct for exactly the rows that hit it.
     const profit = await this.db.get<{ profit: number }>(`
       SELECT COALESCE(SUM(
-        CASE WHEN winner = 'house' THEN tier
-             WHEN winner = 'player' THEN rake_amount - tier
-             ELSE 0 END
+        CASE
+          WHEN winner = 'house' THEN
+            COALESCE(
+              CASE WHEN json_valid(house_vtxos_json)
+                THEN json_extract(house_vtxos_json, '$.pot')
+                     - json_extract(house_vtxos_json, '$.houseStake')
+              END,
+              tier
+            )
+          WHEN winner = 'player' THEN
+            -COALESCE(
+              CASE WHEN json_valid(house_vtxos_json)
+                THEN json_extract(house_vtxos_json, '$.houseStake')
+              END,
+              tier
+            )
+          ELSE 0
+        END
       ), 0) as profit FROM games
       WHERE status = 'resolved' AND created_at > datetime('now', '-1 day')
     `)

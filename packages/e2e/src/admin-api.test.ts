@@ -224,6 +224,10 @@ describe('admin HTTP API: operator endpoints', () => {
     expect(res.body).toHaveProperty('created')
     expect(typeof res.body.vtxoCount).toBe('number')
     expect(res.body.created).toBeGreaterThanOrEqual(0)
+    // A `created: 0` with no explanation is what made this endpoint look like it
+    // "ran but did nothing" — the reason must always be present, both ways.
+    expect(typeof res.body.reason).toBe('string')
+    expect(res.body.reason.length).toBeGreaterThan(0)
   }, 60_000)
 
   it('POST /api/wallet/settle is wired and never hangs the request', async () => {

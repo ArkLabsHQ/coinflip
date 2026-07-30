@@ -244,6 +244,60 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     expect(sentInputs).toHaveLength(1)
   })
 
+  /**
+   * The background tick and an admin POST /api/wallet/fragment can fire at the
+   * same time. `reservations.reserve()` REPLACES a holder's pins rather than
+   * merging them, so two runs sharing one reservation id would have the second
+   * wipe the first's pin WHILE ITS SEND WAS IN FLIGHT — handing the coin back
+   * to /play mid-spend, which is the P0 #53 hazard this design closes.
+   */
+  it('a concurrent split is refused, and cannot unpin the running one', async () => {
+    houseVtxoCache.invalidate()
+    const free = coin('ee'.repeat(32), 0, 400_000)
+    const deps = splitDeps([free], [], [])
+
+    let releaseSend: (() => void) | null = null
+    const sendStarted = new Promise<void>((startResolve) => {
+      deps.wallet.sendBitcoin = async () => {
+        startResolve()
+        await new Promise<void>((r) => { releaseSend = r })
+        return 'txid-split'
+      }
+    })
+
+    const first = ensureHouseVtxoPool(deps, { piecesPerRun: 1 })
+    await sendStarted // the first run is now mid-send, holding its pin
+
+    // Second caller arrives while the first is in flight.
+    const second = await ensureHouseVtxoPool(deps, { piecesPerRun: 1 })
+    expect(second.created).toBe(0)
+    expect(second.reason).toMatch(/already running/)
+    // The decisive assertion: the running split's pin is UNTOUCHED.
+    expect(reservations.isReserved(`${free.txid}:0`)).toBe(true)
+
+    ;(releaseSend as unknown as () => void)()
+    const r = await first
+    expect(r.created).toBe(1)
+    // Both runs are done, so nothing stays pinned.
+    expect(reservations.isReserved(`${free.txid}:0`)).toBe(false)
+  })
+
+  it('releases the in-flight guard even when a run throws', async () => {
+    houseVtxoCache.invalidate()
+    const free = coin('ee'.repeat(32), 0, 200_000)
+    const deps = splitDeps([free], [], [])
+    // Throw from getAddress — before the per-piece try/finally exists.
+    deps.wallet.getAddress = async () => { throw new Error('address lookup died') }
+
+    await expect(ensureHouseVtxoPool(deps, { piecesPerRun: 1 })).rejects.toThrow(/address lookup died/)
+
+    // A stuck guard would wedge the splitter until restart — the shape of the
+    // 1M-sat loss (a tick that left `renewing = true` forever).
+    const deps2 = splitDeps([free], [], [])
+    const r = await ensureHouseVtxoPool(deps2, { piecesPerRun: 1 })
+    expect(r.reason).not.toMatch(/already running/)
+  })
+
   it('fails loudly if the SDK ever drops selectedVtxos support', () => {
     const { assertSelectedVtxosSupported } =
       require('arkade-coinflip-server/dist/vtxo-pool.js')

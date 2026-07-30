@@ -412,6 +412,24 @@ export const POOL_MAX_COUNT = Number(process.env.HOUSE_VTXO_POOL_MAX || 64)
  */
 export const SPLIT_RESERVATION_ID = '__house_pool_split__'
 
+/**
+ * Only one split runs at a time.
+ *
+ * The background tick and an admin POST /api/wallet/fragment can fire
+ * concurrently, and `reservations.reserve()` REPLACES a holder's pins rather
+ * than merging them — so two runs sharing one reservation id would have the
+ * second wipe the first's pin while its send was still in flight, handing the
+ * coin back to /play mid-spend. That is precisely the P0 #53 hazard this
+ * design closes, so it must not be reintroduced by concurrency.
+ *
+ * Guarded rather than queued: a second caller is told the splitter is already
+ * running instead of waiting behind a run whose work makes theirs redundant.
+ */
+let splitInFlight = false
+
+/** Per-run reservation id, so two runs can never collide on one ledger key. */
+let splitRunSeq = 0
+
 /** How many pieces one run will mint before leaving the rest to the next tick. */
 export const SPLIT_PIECES_PER_RUN = Number(process.env.HOUSE_VTXO_SPLIT_PIECES_PER_RUN || 4)
 
@@ -482,6 +500,33 @@ export async function ensureHouseVtxoPool(
     parseLadder(process.env.HOUSE_VTXO_DENOMINATIONS) ??
     defaultLadder(await pieceSizeFromTiers(deps))
 
+  if (splitInFlight) {
+    return { created: 0, reason: 'a split is already running — skipped this attempt' }
+  }
+  splitInFlight = true
+  const runId = `${SPLIT_RESERVATION_ID}#${++splitRunSeq}`
+
+  try {
+    return await runSplit(deps, { targetCount, maxCount, piecesPerRun, ladder, runId })
+  } finally {
+    splitInFlight = false
+    // Belt and braces: the per-piece finally already releases, but a throw
+    // between pinning and the try would otherwise leak a pin for this run.
+    reservations.release(runId)
+  }
+}
+
+async function runSplit(
+  deps: AppDeps,
+  cfg: {
+    targetCount: number
+    maxCount: number
+    piecesPerRun: number
+    ladder: Denomination[]
+    runId: string
+  },
+): Promise<SplitOutcome> {
+  const { targetCount, maxCount, piecesPerRun, ladder, runId } = cfg
   const dust = Number(deps.arkInfo.dust)
   const ownAddress = await deps.wallet.getAddress()
 
@@ -528,7 +573,7 @@ export async function ensureHouseVtxoPool(
           reason: `no free coin can fund a ${amount}-sat piece without dust change (largest free ${Math.max(0, ...free.map((v) => v.value))} sat)`,
         }
       }
-      reservations.reserve(SPLIT_RESERVATION_ID, [outpointKey(candidate.txid, candidate.vout)], 0)
+      reservations.reserve(runId, [outpointKey(candidate.txid, candidate.vout)], 0)
       return { input: candidate, amount, reason: plan.reason }
     })
 
@@ -558,7 +603,7 @@ export async function ensureHouseVtxoPool(
       // why the snapshot is dropped too — the refreshed view is what decides
       // whether the coin is really gone, and the spentOutpoints deny-list
       // catches one that arkd keeps listing after it has been spent.
-      reservations.release(SPLIT_RESERVATION_ID)
+      reservations.release(runId)
       houseVtxoCache.invalidate()
     }
   }

@@ -274,14 +274,10 @@
             <span class="sub-hint">the on-chain script that decides the winner</span>
           </button>
           <div v-if="open.cond" class="sub-body">
-            <div class="variant-tabs">
-              <button :class="['variant-tab', { active: condVariant === 'coin' }]" @click="condVariant = 'coin'">Coin (50/50)</button>
-              <button :class="['variant-tab', { active: condVariant === 'odds' }]" @click="condVariant = 'odds'">Variable odds</button>
-            </div>
-            <p class="variant-note" v-if="condVariant === 'odds'">
-              Example shown: <span class="mono">n = 6, lo = 0, target = 3</span> — a "roll under 3 on a d6" bet (player wins ~50%). Other skins just change <span class="mono">n / lo / target</span>.
+            <p class="variant-note">
+              Example shown: <span class="mono">n = 6, lo = 0, target = 3</span> — a "roll under 3 on a d6" bet (player wins ~50%). Every skin just changes <span class="mono">n / lo / target</span>.
             </p>
-            <StepList :steps="condVariant === 'coin' ? WIN_COIN : WIN_ODDS" />
+            <StepList :steps="WIN_ODDS" />
             <p class="ops-note">Result: <span class="mono">1</span> → player wins, <span class="mono">0</span> → house wins. <span class="mono">creatorWin*</span> leaves wrap this in <span class="mono">OP_NOT</span>. An invalid secret length <em>loses</em> (it can't void the game).</p>
           </div>
         </div>
@@ -375,7 +371,6 @@ import { getNetwork } from '@/services/api'
 // Expand state, keyed by leaf name (+ 'cond' for the shared win-condition).
 const open = ref<Record<string, boolean>>({})
 const toggle = (k: string) => { open.value = { ...open.value, [k]: !open.value[k] } }
-const condVariant = ref<'coin' | 'odds'>('coin')
 
 // ── Design evolution tabs ─────────────────────────────────────────
 //
@@ -559,17 +554,6 @@ interface Step { ops: string[]; explain: string }
 //    (packages/lib), grouped into steps with plain-language explanations. ──
 
 // Coin win-determination condition (buildCoinflipConditionScript).
-const WIN_COIN: Step[] = [
-  { ops: ['OP_2DUP', 'OP_SHA256', '<playerHash>', 'OP_EQUALVERIFY', 'OP_SHA256', '<houseHash>', 'OP_EQUALVERIFY'],
-    explain: 'Verify both reveals: SHA-256 each secret and require it to equal the hash committed at /play. A wrong secret fails here.' },
-  { ops: ['OP_SIZE', 'OP_DUP', 'OP_16', 'OP_EQUAL', 'OP_SWAP', 'OP_15', 'OP_EQUAL', 'OP_BOOLOR', 'OP_NOTIF', 'OP_2DROP', 'OP_0', 'OP_ELSE'],
-    explain: "Validate the player's secret length — it must be 15 (heads) or 16 (tails). If neither, push 0 → house wins (a bad length loses)." },
-  { ops: ['OP_SWAP', 'OP_SIZE', 'OP_DUP', 'OP_16', 'OP_EQUAL', 'OP_SWAP', 'OP_15', 'OP_EQUAL', 'OP_BOOLOR', 'OP_NOTIF', 'OP_2DROP', 'OP_1', 'OP_ELSE'],
-    explain: "Same length check on the house's secret. If the house's length is invalid, push 1 → player wins." },
-  { ops: ['OP_SIZE', 'OP_SWAP', 'OP_DROP', 'OP_SWAP', 'OP_SIZE', 'OP_SWAP', 'OP_DROP', 'OP_EQUAL', 'OP_ENDIF', 'OP_ENDIF'],
-    explain: 'Both lengths valid → compare them. Equal → 1 (player wins); different → 0 (house wins). That is the coin flip.' },
-]
-
 // Variable-odds condition (buildVariableOddsConditionScript), shown for n=6, lo=0, target=3.
 const WIN_ODDS: Step[] = [
   { ops: ['OP_2DUP', 'OP_SHA256', '<playerHash>', 'OP_EQUALVERIFY', 'OP_SHA256', '<houseHash>', 'OP_EQUALVERIFY'],

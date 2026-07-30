@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  SHARED_WIN_PCTS, COIN_COUNT, ROULETTE_N, SLOT_BASE, SLOT_REELS, DICE_N,
+  SHARED_WIN_PCTS, ROULETTE_N, SLOT_BASE, SLOT_REELS, DICE_N,
   sharedLadder, winPctOfRung, ladderIsSane,
 } from './ladder'
 
@@ -8,9 +8,8 @@ import {
  *  can't be imported here — it pulls in the skin `.vue` components and
  *  vitest.config.ts registers no Vue plugin. */
 const SKIN_RANGES: Array<[string, number]> = [
-  ['coin', 2 ** COIN_COUNT],
-  ['slot', SLOT_BASE ** SLOT_REELS],
   ['dice', DICE_N],
+  ['slot', SLOT_BASE ** SLOT_REELS],
   ['roulette', ROULETTE_N],
   ['rocket', 100],
 ]
@@ -72,9 +71,13 @@ describe('sharedLadder', () => {
   })
 
   it('reduces to a single winning outcome at the longest odds', () => {
-    // The coin's narrowest band is exactly the old "every coin must be heads".
-    const coin = sharedLadder(2 ** COIN_COUNT)
-    const narrowest = coin[coin.length - 1]
-    expect(narrowest.target - narrowest.lo).toBe(1)
+    // Was asserted only for the coin (its narrowest band being the old "every
+    // coin must be heads"). The invariant is not coin-specific, so with the
+    // coin skin retired it is asserted for EVERY skin rather than dropped.
+    for (const [id, n] of SKIN_RANGES) {
+      const ladder = sharedLadder(n)
+      const narrowest = ladder[ladder.length - 1]
+      expect(narrowest.target - narrowest.lo, `${id} narrowest band`).toBe(1)
+    }
   })
 })

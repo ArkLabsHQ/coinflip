@@ -31,9 +31,9 @@ describe('bet amount', () => {
 
 describe('odds step', () => {
   it('round-trips a step per skin, keeping the skins independent', () => {
-    saveStep('coin', 2)
+    saveStep('dice', 2)
     saveStep('roulette', 7)
-    expect(getSavedStep('coin')).toBe(2)
+    expect(getSavedStep('dice')).toBe(2)
     expect(getSavedStep('roulette')).toBe(7)
     // A skin that was never played has no preference of its own.
     expect(getSavedStep('rocket')).toBeNull()
@@ -45,27 +45,27 @@ describe('odds step', () => {
   })
 
   it('overwrites one skin without disturbing the others', () => {
-    saveStep('coin', 2)
+    saveStep('dice', 2)
     saveStep('slot', 5)
-    saveStep('coin', 4)
-    expect(getSavedStep('coin')).toBe(4)
+    saveStep('dice', 4)
+    expect(getSavedStep('dice')).toBe(4)
     expect(getSavedStep('slot')).toBe(5)
   })
 
   it('survives a corrupt or wrongly-shaped map', () => {
     for (const bad of ['{not json', '[]', 'null', '"a string"']) {
       localStorage.setItem('coinflip.odds_steps', bad)
-      expect(getSavedStep('coin')).toBeNull()
+      expect(getSavedStep('dice')).toBeNull()
       // ...and a later write repairs the key rather than throwing.
-      saveStep('coin', 3)
-      expect(getSavedStep('coin')).toBe(3)
+      saveStep('dice', 3)
+      expect(getSavedStep('dice')).toBe(3)
       localStorage.clear()
     }
   })
 
   it('rejects a negative / fractional step', () => {
     localStorage.setItem('coinflip.odds_steps', JSON.stringify({ coin: -1, slot: 1.5 }))
-    expect(getSavedStep('coin')).toBeNull()
+    expect(getSavedStep('dice')).toBeNull()
     expect(getSavedStep('slot')).toBeNull()
   })
 })

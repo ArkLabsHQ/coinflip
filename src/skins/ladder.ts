@@ -22,8 +22,6 @@ import type { OddsBet } from './types'
  */
 export const SHARED_WIN_PCTS = [95, 90, 80, 70, 60, 50, 40, 32, 25, 20, 15, 10, 7, 5, 3, 2, 1] as const
 
-/** Coins per bet. 2^7 = 128 outcomes — fine enough to hit every rung to 0.34pp. */
-export const COIN_COUNT = 7
 
 /**
  * Pockets on the wheel. 100, not the real-roulette 37: a 37-pocket wheel cannot

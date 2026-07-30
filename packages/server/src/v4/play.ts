@@ -183,8 +183,23 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   // window, which stays safe by construction (vtxo-pool.ts): the under-lock isReserved
   // re-check excludes a coin another game just reserved, and a coin spent before the
   // co-fund only fails the escrow submit (caught + retried), never a double-spend.
-  // Historically the single most expensive leg: a full SDK re-sync per bet.
-  const vtxos = await timer.step('wallet:getVtxos', () => houseVtxoCache.refresh(deps))
+  // MEASURED: this was 99.6% of /play — median 2,562ms of a 2,572ms request,
+  // every other phase 0ms — because refresh() forces a full SDK wallet re-sync
+  // per bet. The warm snapshot is what HOUSE_VTXO_CACHE_TTL_MS was designed for
+  // ("the background tick refreshes the snapshot before it expires and /play
+  // almost never pays for a live sync"); the forced refresh contradicted that.
+  //
+  // Correctness does NOT come from freshness — a coin stranded in a failed
+  // settle intent stays LISTED by getVtxos, so a live fetch re-offers it and
+  // the forced sync never protected against it (two such failures happened
+  // with it in place). It comes from three things that now hold:
+  //   - every event that spends house coins tells the cache: the co-fund
+  //     removes its inputs, the split and the renewal settle invalidate;
+  //   - selection re-checks isReserved under the mutex, so a coin another game
+  //     just took is excluded regardless of snapshot age;
+  //   - spentOutpoints denies anything arkd rejects, so a coin spent by
+  //     something we cannot observe costs one game, not every game.
+  const vtxos = await timer.step('wallet:getVtxos', () => houseVtxoCache.get(deps))
   const maxBetFractionBps = await timer.step('cfg:maxBet', () => getMaxBetFractionBps(deps))
   await timer.step('select+reserve', () => selectionMutex.runExclusive(async () => {
     const choose = (vtxos: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] | null => {

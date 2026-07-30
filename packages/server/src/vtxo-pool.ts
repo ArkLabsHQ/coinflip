@@ -239,7 +239,12 @@ export class HouseVtxoCache {
  * background tick refreshes the snapshot before it expires and /play almost
  * never pays for a live sync.
  */
-export const HOUSE_VTXO_CACHE_TTL_MS = Number(process.env.HOUSE_VTXO_CACHE_TTL_MS || 120_000)
+// 1.5x the 120s pool-maintenance interval, deliberately. At exactly 120s the
+// TTL expires precisely as the next tick is due, so whichever loses the race
+// makes /play pay for a full re-sync — the 2.5s this is meant to remove. A
+// margin means the background tick always refreshes first and the hot path
+// reads a snapshot that is at most one tick old.
+export const HOUSE_VTXO_CACHE_TTL_MS = Number(process.env.HOUSE_VTXO_CACHE_TTL_MS || 180_000)
 export const houseVtxoCache = new HouseVtxoCache(HOUSE_VTXO_CACHE_TTL_MS)
 
 /**

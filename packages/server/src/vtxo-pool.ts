@@ -22,6 +22,9 @@
 
 import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
 import type { AppDeps } from './deps.js'
+import {
+  type Denomination, planSplit, parseLadder, defaultLadder,
+} from './vtxo-denominations.js'
 import { selectableHouseVtxos } from './game-engine.js'
 import { timeoutReject, ARK_SYNC_TIMEOUT_MS, ARK_SUBMIT_TIMEOUT_MS } from './async-timeout.js'
 
@@ -390,103 +393,201 @@ export const POOL_TARGET_COUNT = Number(process.env.HOUSE_VTXO_POOL_TARGET || 8)
  */
 export const POOL_MAX_COUNT = Number(process.env.HOUSE_VTXO_POOL_MAX || 64)
 
-/**
- * Maximum number of `send` recipients per split — Ark/arkd has a tx-size
- * limit (maxTxWeight). One self-send tx with hundreds of outputs would
- * exceed it. Split aggressively but across multiple txs if needed.
+/*
+ * There used to be a MAX_SPLIT_OUTPUTS_PER_TX = 16 here, bounding how many
+ * recipients one self-send could carry against arkd's maxTxWeight. Each split
+ * send now mints exactly ONE piece (that is the shape `sendBitcoin` supports,
+ * and it is what lets us pin the inputs), so tx weight is no longer the
+ * binding constraint — SPLIT_PIECES_PER_RUN bounds a tick instead.
  */
-const MAX_SPLIT_OUTPUTS_PER_TX = 16
 
 /**
- * Pre-emptively shard the house bankroll into as many usable `pieceSize`
- * VTXOs as the balance affords (capped at `POOL_MAX_COUNT`). When the
- * existing free count is below `POOL_MAX_COUNT` and the wallet has at
- * least one extra `pieceSize` of headroom, this fires a self-send that
- * mints up to `MAX_SPLIT_OUTPUTS_PER_TX` new pieces. The background
- * timer reruns until the pool reaches `POOL_MAX_COUNT` or the bankroll
- * is exhausted.
+ * Synthetic reservation holder for the splitter's own inputs.
  *
- * Splitting is no longer gated by `POOL_TARGET_COUNT` — the target is a
- * FLOOR, not a ceiling. Concurrent games each need their own outpoint;
- * fragmenting eagerly is the cheapest way to support more parallelism
- * AND larger bets composed of multiple inputs (see fundHouseEscrowOnce
- * for multi-input funding).
+ * Not a game id, and deliberately not restorable: `rebuildReservations` only
+ * re-pins outpoints listed by PENDING GAMES, so a split killed mid-flight
+ * leaves nothing behind after a restart. Failing toward "this coin is briefly
+ * unusable" is the right direction; failing toward "/play may also spend it"
+ * is not.
+ */
+export const SPLIT_RESERVATION_ID = '__house_pool_split__'
+
+/** How many pieces one run will mint before leaving the rest to the next tick. */
+export const SPLIT_PIECES_PER_RUN = Number(process.env.HOUSE_VTXO_SPLIT_PIECES_PER_RUN || 4)
+
+export interface SplitOutcome {
+  /** Pieces actually minted. */
+  created: number
+  /**
+   * Why — ALWAYS populated, including when `created` is 0. The old signature
+   * returned a bare number, so four different give-up paths were
+   * indistinguishable to the caller and the admin endpoint reported all of
+   * them as `{created: 0}` with HTTP 200. That is the "it says it ran but
+   * nothing happened, with no errors" report.
+   */
+  reason: string
+}
+
+/**
+ * Shape the house bankroll toward the configured denomination ladder.
  *
- * Returns the number of pieces created (0 if it didn't split).
+ * Two things changed from the single-`pieceSize` design:
+ *
+ * 1. WHAT to mint now comes from `planSplit` (vtxo-denominations.ts), which
+ *    targets a per-size count and stops when each rung is satisfied, instead
+ *    of `floor(freeTotal/pieceSize) - 1` — a rule that could not split a
+ *    bankroll under 2x pieceSize at all and kept minting a size the pool was
+ *    already full of.
+ *
+ * 2. HOW it spends no longer blocks games. The old path called
+ *    `wallet.send(...recipients)`, which picks its inputs internally from ALL
+ *    spendable coins with no way to exclude our reservations — so the only
+ *    safe option was to hold `selectionMutex` across the network send and
+ *    REFUSE to split whenever any outpoint was reserved. With autoplay that is
+ *    nearly always true, which is why the fragment button looked like a no-op,
+ *    and the send holding the mutex is what produced a MEASURED 9,389ms
+ *    `select+reserve` stall in /play.
+ *
+ *    Instead each piece is minted with `sendBitcoin({selectedVtxos})`, whose
+ *    inputs we dictate. We pick and PIN them under the mutex (microseconds, no
+ *    network) and then send OUTSIDE it: /play skips reserved coins, we only
+ *    ever spend unreserved ones, so the exclusion is the same and neither side
+ *    waits on the other.
+ *
+ * Note `sendBitcoin` is marked `@deprecated Use send` upstream, but `send` is
+ * precisely the variant with no input control. `assertSelectedVtxosSupported`
+ * below fails loudly if a future SDK drops it, rather than letting us fall
+ * back to unconstrained selection silently. The longer-term upgrade is
+ * `settle({inputs, outputs})` — it pins inputs AND takes many outputs in one
+ * batch swap, producing settled rather than preconfirmed pieces — once its
+ * change/intent-fee accounting for a self-split has been verified live.
  */
 export async function ensureHouseVtxoPool(
   deps: AppDeps,
-  opts: { targetCount?: number; maxCount?: number; pieceSize: number } = { pieceSize: 50_000 },
-): Promise<number> {
+  opts: {
+    targetCount?: number
+    maxCount?: number
+    /** Single-size shaping — kept for callers/tests; becomes a one-rung ladder. */
+    pieceSize?: number
+    ladder?: Denomination[]
+    piecesPerRun?: number
+  } = {},
+): Promise<SplitOutcome> {
   const targetCount = opts.targetCount ?? POOL_TARGET_COUNT
   const maxCount = opts.maxCount ?? POOL_MAX_COUNT
-  const pieceSize = opts.pieceSize
+  const piecesPerRun = opts.piecesPerRun ?? SPLIT_PIECES_PER_RUN
+  const ladder =
+    opts.ladder ??
+    (opts.pieceSize ? [{ size: opts.pieceSize, weightPct: 100 }] : null) ??
+    parseLadder(process.env.HOUSE_VTXO_DENOMINATIONS) ??
+    defaultLadder(await pieceSizeFromTiers(deps))
 
-  // Refresh through the cache so the background tick doubles as the hot path's
-  // snapshot warmer (a fresh, full getVtxos() either way).
-  const all = await houseVtxoCache.refresh(deps)
-  const free = freeHouseVtxos(all)
-
-  // Hard ceiling: never exceed POOL_MAX_COUNT free pieces. Beyond that, the
-  // splitting cost outweighs the marginal concurrency benefit.
-  if (free.length >= maxCount) return 0
-
-  const freeTotal = free.reduce((sum, v) => sum + v.value, 0)
-  // Leave one piece worth of headroom for change + fees.
-  const piecesAffordable = Math.floor(freeTotal / pieceSize) - 1
-  // Always try to push toward the MAX, not just the floor. If the pool is
-  // BELOW the floor, the split is "must" (game throughput depends on it);
-  // ABOVE the floor it's "nice to have" (better future-game throughput) and
-  // still fires as long as we can afford it.
-  const headroom = maxCount - free.length
-  const piecesToCreate = Math.min(headroom, piecesAffordable, MAX_SPLIT_OUTPUTS_PER_TX)
-  if (piecesToCreate < 1) return 0
-
+  const dust = Number(deps.arkInfo.dust)
   const ownAddress = await deps.wallet.getAddress()
-  const recipients = Array.from({ length: piecesToCreate }, () => ({
-    address: ownAddress,
-    amount: pieceSize,
-  }))
 
-  try {
-    // `wallet.send` sizes from `free` above but the SDK picks the ACTUAL
-    // inputs from ALL spendable coins (near-expiry first) — there is no way to
-    // constrain its selection to the free set. So: serialize with /play's
-    // select-and-reserve (reservations are only created under this same
-    // mutex, so none can appear while the send is in flight) and refuse to
-    // split while ANY outpoint reservation is live — otherwise the split could
-    // spend a coin committed to an in-flight game's co-fund (P0 #53,
-    // VTXO_ALREADY_SPENT breaking the player's game). Pinned-outpoint
-    // reservations only span /play → co-fund (seconds to a few minutes), so a
-    // deferred split just catches up on a later tick; liability-only
-    // reservations (no outpoints) don't block. The send is timeout-bounded so
-    // a wedged arkd can't hold the mutex — and /play — hostage.
-    const sent = await selectionMutex.runExclusive(async () => {
-      const reservedNow = reservations.reservedOutpoints()
-      if (reservedNow.size > 0) {
-        console.log(`[house pool] split deferred — ${reservedNow.size} outpoint(s) reserved by in-flight games`)
-        return false
+  let created = 0
+  let lastReason = 'no work planned'
+
+  // One send per piece. Each iteration re-reads the pool so the previous
+  // piece's change becomes the next input, and each is independently safe —
+  // a failure stops the run and reports partial progress rather than
+  // half-applying a batch.
+  for (let i = 0; i < piecesPerRun; i++) {
+    // Refresh through the cache so this tick doubles as the hot path's
+    // snapshot warmer (a fresh, full getVtxos() either way).
+    const all = await houseVtxoCache.refresh(deps)
+
+    // Deliberately synchronous inside the lock: no `await` between reading the
+    // free set and pinning it, so nothing can reserve a coin in between.
+    const picked = await selectionMutex.runExclusive(async () => {
+      const free = freeHouseVtxos(all)
+      const plan = planSplit({
+        existing: free.map((v) => v.value),
+        ladder,
+        maxCount,
+        // One piece per send, so only the first planned amount is used; the
+        // rest of the plan is what the following iterations work through.
+        maxOutputsPerTx: 1,
+        spendable: free.reduce((s, v) => s + v.value, 0),
+        dust,
+      })
+      if (plan.outputs.length === 0) return { input: null, amount: 0, reason: plan.reason }
+
+      const amount = plan.outputs[0]
+      // Peel from the LARGEST free coin: never consume an already
+      // correctly-sized small piece just to mint another one. Change must be
+      // either nothing or comfortably above dust, or the SDK rejects it
+      // (DustChangeError).
+      const candidate = [...free]
+        .sort((a, b) => b.value - a.value)
+        .find((v) => v.value === amount || v.value >= amount + dust)
+      if (!candidate) {
+        return {
+          input: null,
+          amount: 0,
+          reason: `no free coin can fund a ${amount}-sat piece without dust change (largest free ${Math.max(0, ...free.map((v) => v.value))} sat)`,
+        }
       }
+      reservations.reserve(SPLIT_RESERVATION_ID, [outpointKey(candidate.txid, candidate.vout)], 0)
+      return { input: candidate, amount, reason: plan.reason }
+    })
+
+    lastReason = picked.reason
+    if (!picked.input) break
+
+    try {
       await timeoutReject(
-        deps.wallet.send(...(recipients as [{ address: string; amount: number }])),
+        deps.wallet.sendBitcoin({
+          address: ownAddress,
+          amount: picked.amount,
+          selectedVtxos: [picked.input],
+        }),
         ARK_SUBMIT_TIMEOUT_MS,
         'house pool split send',
       )
-      return true
-    })
-    if (!sent) return 0
-    // The split spent + created house VTXOs; drop the stale snapshot so the
-    // next access re-syncs and sees the new pieces.
-    houseVtxoCache.invalidate()
+      created++
+      console.log(
+        `[house pool] minted a ${picked.amount}-sat piece from ${picked.input.txid.slice(0, 8)}…:${picked.input.vout} (${picked.input.value} sat)`,
+      )
+    } catch (err) {
+      lastReason = `split send failed after ${created} piece(s): ${err instanceof Error ? err.message : String(err)}`
+      console.warn(`[house pool] ${lastReason}`)
+      break
+    } finally {
+      // Release the pin either way. A timed-out send may still land, which is
+      // why the snapshot is dropped too — the refreshed view is what decides
+      // whether the coin is really gone, and the spentOutpoints deny-list
+      // catches one that arkd keeps listing after it has been spent.
+      reservations.release(SPLIT_RESERVATION_ID)
+      houseVtxoCache.invalidate()
+    }
+  }
+
+  if (created > 0) {
+    const free = freeHouseVtxos(await houseVtxoCache.get(deps))
     const below = free.length < targetCount ? ' (below floor)' : ''
-    console.log(`[house pool] split into ${piecesToCreate} new ${pieceSize}-sat VTXO(s) — ${free.length}/${maxCount} → ${free.length + piecesToCreate}/${maxCount}${below}`)
-    return piecesToCreate
-  } catch (err) {
-    console.warn('[house pool] split failed:', err instanceof Error ? err.message : err)
-    // A timed-out send may still complete in the background — drop the
-    // snapshot so the next access re-syncs rather than re-serving spent coins.
-    houseVtxoCache.invalidate()
-    return 0
+    lastReason = `minted ${created} piece(s) — ${free.length}/${maxCount} free${below}`
+    console.log(`[house pool] ${lastReason}`)
+  }
+  return { created, reason: lastReason }
+}
+
+/**
+ * Guard the one SDK affordance this design depends on.
+ *
+ * `sendBitcoin` is `@deprecated Use send` upstream, and `send` has no input
+ * control — so if a future SDK bump removes it, the splitter must fail loudly
+ * rather than quietly regress to reservation-blind selection, which is the P0
+ * #53 hazard this replaced.
+ */
+export function assertSelectedVtxosSupported(wallet: unknown): void {
+  const fn = (wallet as { sendBitcoin?: unknown } | null)?.sendBitcoin
+  if (typeof fn !== 'function') {
+    throw new Error(
+      'house pool split requires wallet.sendBitcoin({selectedVtxos}) to pin its inputs; ' +
+        'the SDK no longer exposes it — port the splitter to settle({inputs, outputs}) ' +
+        'before relying on wallet.send, which cannot exclude reserved coins (P0 #53)',
+    )
   }
 }
 
@@ -509,8 +610,11 @@ async function pieceSizeFromTiers(deps: AppDeps): Promise<number> {
 export function startPoolMaintenance(deps: AppDeps, intervalMs = 120_000): NodeJS.Timeout {
   const tick = async () => {
     try {
-      const pieceSize = await pieceSizeFromTiers(deps)
-      await ensureHouseVtxoPool(deps, { pieceSize })
+      // No pieceSize: that would collapse the ladder to a single 50,000-sat
+      // rung, which is the shape this replaced. Let ensureHouseVtxoPool read
+      // HOUSE_VTXO_DENOMINATIONS, or derive the default from `tiers`.
+      const { created, reason } = await ensureHouseVtxoPool(deps)
+      if (created === 0) console.log(`[house pool] no split this tick — ${reason}`)
     } catch (err) {
       console.warn('[house pool] maintenance tick failed:', err instanceof Error ? err.message : err)
     }

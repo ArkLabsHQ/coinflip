@@ -14,9 +14,13 @@
  * Fixed behavior asserted here:
  *   - settle paths pass EXPLICIT SettleParams whose inputs exclude every
  *     reserved outpoint (and never an empty outputs list — arkd rejects that).
- *   - the pool split runs the SDK send UNDER the /play selection mutex and
- *     defers while any outpoint reservation is live (its recipient-sized
- *     self-send can't be constrained); liability-only reservations don't block.
+ *   - the pool split mints each piece with sendBitcoin({selectedVtxos}) over
+ *     inputs drawn from the UNRESERVED set and pinned under the /play selection
+ *     mutex, then sends outside it. It no longer defers while a reservation is
+ *     live (that declined almost every attempt under autoplay, and holding the
+ *     mutex across the send cost a MEASURED 9,389ms /play stall) — the input
+ *     pinning enforces the same invariant directly. Liability-only
+ *     reservations, as before, don't block.
  *   - admin POST /api/wallet/send mirrors the SDK's own `_sendImpl` selection
  *     (same candidate set: getVtxos({withRecoverable:false}) minus
  *     pendingRecoveryOutpoints(); same selector: selectVirtualCoins to
@@ -109,66 +113,145 @@ describe('P0 #53 — renewSettle must not gather reserved house VTXOs', () => {
   })
 })
 
-describe('P0 #53 — ensureHouseVtxoPool split must not fire while outpoints are reserved', () => {
+/**
+ * The split's P0 #53 guard changed MECHANISM, so these assertions changed with
+ * it — and got stricter.
+ *
+ * It used to enforce "never spend a reserved coin" by REFUSING to run whenever
+ * any outpoint was reserved, because `wallet.send(...)` picks its inputs
+ * internally from all spendable coins. That was safe but nearly always
+ * declined under autoplay, and it held `selectionMutex` across the network
+ * send (a MEASURED 9,389ms /play stall).
+ *
+ * It now enforces the same invariant DIRECTLY: every piece is minted with
+ * `sendBitcoin({selectedVtxos})` over inputs we choose from the unreserved set
+ * and pin under the mutex. So instead of asserting "did not run", these assert
+ * the stronger and more useful property — it DOES run, and the inputs it
+ * actually handed the SDK contain no reserved outpoint.
+ */
+describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the SDK', () => {
   afterEach(() => {
     reservations.release('p0-53-split')
+    reservations.release('__house_pool_split__')
     houseVtxoCache.invalidate()
   })
 
-  function splitDeps(vtxos: any[], sendCalls: any[][]) {
+  /** Records every `selectedVtxos` set the splitter submits. */
+  function splitDeps(vtxos: any[], sentInputs: any[][], sendCalls: any[][] = []) {
     return {
+      arkInfo: { dust: 330n },
+      repos: { config: { get: async () => '[330,1000,5000,10000,50000]' } },
       wallet: {
         getVtxos: async () => vtxos,
         getAddress: async () => HOUSE_ADDRESS,
+        sendBitcoin: async (params: any) => {
+          sentInputs.push(params.selectedVtxos)
+          return 'txid-split'
+        },
+        // Must stay unused — it is the reservation-blind path.
         send: async (...recipients: any[]) => {
           sendCalls.push(recipients)
-          return 'txid-split'
+          return 'txid-blind'
         },
       },
     } as any
   }
 
-  it('refuses to split while any outpoint reservation is live (send() picks its own inputs)', async () => {
+  it('splits WHILE a reservation is live, but never over the reserved coin', async () => {
     houseVtxoCache.invalidate()
-    // The reservation pins an outpoint the pool's own free-set may not even
-    // contain — the guard must fire regardless, because the SDK's send()
-    // selects inputs internally from ALL spendable coins.
-    reservations.reserve('p0-53-split', [`${'dd'.repeat(32)}:0`], 50_000)
+    const reserved = coin('dd'.repeat(32), 0, 200_000)
+    const free = coin('ee'.repeat(32), 0, 200_000)
+    reservations.reserve('p0-53-split', [`${reserved.txid}:0`], 50_000)
+    const sentInputs: any[][] = []
     const sendCalls: any[][] = []
-    const deps = splitDeps([coin('ee'.repeat(32), 0, 200_000)], sendCalls)
+    const deps = splitDeps([reserved, free], sentInputs, sendCalls)
 
-    const created = await ensureHouseVtxoPool(deps, { pieceSize: 50_000 })
+    const r = await ensureHouseVtxoPool(deps, { piecesPerRun: 1 })
 
-    expect(created).toBe(0)
-    // Pre-fix: send fired and could spend the reserved coin.
+    // The whole point of the change: a live reservation no longer blocks it.
+    expect(r.created).toBe(1)
+    expect(sentInputs).toHaveLength(1)
+    // The invariant: not one submitted input is the reserved outpoint.
+    const submitted = sentInputs.flat().map((v: any) => `${v.txid}:${v.vout}`)
+    expect(submitted).not.toContain(`${reserved.txid}:0`)
+    expect(submitted).toEqual([`${free.txid}:0`])
+    // And the reservation-blind path was never touched.
     expect(sendCalls).toHaveLength(0)
   })
 
-  it('splits again once the reservation is released', async () => {
+  it('declines rather than spending the reserved coin when it is the ONLY one', async () => {
     houseVtxoCache.invalidate()
+    const onlyCoin = coin('dd'.repeat(32), 0, 200_000)
+    reservations.reserve('p0-53-split', [`${onlyCoin.txid}:0`], 50_000)
+    const sentInputs: any[][] = []
     const sendCalls: any[][] = []
-    const deps = splitDeps([coin('ff'.repeat(32), 0, 200_000)], sendCalls)
+    const deps = splitDeps([onlyCoin], sentInputs, sendCalls)
 
-    const created = await ensureHouseVtxoPool(deps, { pieceSize: 50_000 })
+    const r = await ensureHouseVtxoPool(deps, { piecesPerRun: 1 })
 
-    expect(created).toBe(3) // floor(200k / 50k) − 1 headroom piece
-    expect(sendCalls).toHaveLength(1)
-    expect(sendCalls[0]).toHaveLength(3)
-    expect(sendCalls[0].every((r: any) => r.address === HOUSE_ADDRESS && r.amount === 50_000)).toBe(true)
+    expect(r.created).toBe(0)
+    expect(sentInputs).toHaveLength(0)
+    expect(sendCalls).toHaveLength(0)
+    // ...and it says why, instead of a bare 0.
+    expect(r.reason).toBeTruthy()
+  })
+
+  it('pins its own inputs so a concurrent /play cannot select them', async () => {
+    houseVtxoCache.invalidate()
+    const free = coin('ee'.repeat(32), 0, 200_000)
+    const seenDuringSend: boolean[] = []
+    const deps = splitDeps([free], [], [])
+    deps.wallet.sendBitcoin = async () => {
+      // While the send is in flight the coin must be reserved — that is what
+      // makes it safe to run OUTSIDE the selection mutex.
+      seenDuringSend.push(reservations.isReserved(`${free.txid}:0`))
+      return 'txid-split'
+    }
+
+    const r = await ensureHouseVtxoPool(deps, { piecesPerRun: 1 })
+
+    expect(r.created).toBe(1)
+    expect(seenDuringSend).toEqual([true])
+    // ...and the pin is dropped afterwards, so the coin returns to the pool.
+    expect(reservations.isReserved(`${free.txid}:0`)).toBe(false)
+  })
+
+  it('releases its pin even when the send fails', async () => {
+    houseVtxoCache.invalidate()
+    const free = coin('ee'.repeat(32), 0, 200_000)
+    const deps = splitDeps([free], [], [])
+    deps.wallet.sendBitcoin = async () => { throw new Error('arkd said no') }
+
+    const r = await ensureHouseVtxoPool(deps, { piecesPerRun: 1 })
+
+    expect(r.created).toBe(0)
+    expect(r.reason).toMatch(/arkd said no/)
+    // A leaked pin would permanently shrink the pool.
+    expect(reservations.isReserved(`${free.txid}:0`)).toBe(false)
   })
 
   it('liability-only reservations (no pinned outpoints) do not block the split', async () => {
     houseVtxoCache.invalidate()
-    // Post-cofund v4 / v3 games reserve liability with NO outpoints — those can
-    // run for many minutes and must not starve pool maintenance.
+    // Post-cofund v4 games reserve liability with NO outpoints — those can run
+    // for many minutes and must not starve pool maintenance.
     reservations.reserve('p0-53-split', [], 50_000)
-    const sendCalls: any[][] = []
-    const deps = splitDeps([coin('99'.repeat(32), 0, 200_000)], sendCalls)
+    const sentInputs: any[][] = []
+    const deps = splitDeps([coin('99'.repeat(32), 0, 200_000)], sentInputs)
 
-    const created = await ensureHouseVtxoPool(deps, { pieceSize: 50_000 })
+    const r = await ensureHouseVtxoPool(deps, { piecesPerRun: 1 })
 
-    expect(created).toBe(3)
-    expect(sendCalls).toHaveLength(1)
+    expect(r.created).toBe(1)
+    expect(sentInputs).toHaveLength(1)
+  })
+
+  it('fails loudly if the SDK ever drops selectedVtxos support', () => {
+    const { assertSelectedVtxosSupported } =
+      require('arkade-coinflip-server/dist/vtxo-pool.js')
+    // Present → fine.
+    expect(() => assertSelectedVtxosSupported({ sendBitcoin: () => undefined })).not.toThrow()
+    // Gone → must throw, NOT silently fall back to the blind `send` path.
+    expect(() => assertSelectedVtxosSupported({})).toThrow(/P0 #53|selectedVtxos/)
+    expect(() => assertSelectedVtxosSupported(null)).toThrow(/selectedVtxos/)
   })
 })
 

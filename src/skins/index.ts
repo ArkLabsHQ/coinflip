@@ -120,7 +120,9 @@ export const SKINS: SkinMeta[] = [
     oddsLadder: rouletteBets, defaultStep: nearHalf(rouletteBets),
     stepLabel: (b) => {
       const win = b.target - b.lo
-      return `ANY ${win} OF ${b.n}`
+      // Compact form: "ANY 60 OF 100" overran the readout and ellipsised to
+      // "ANY 60 OF 1…", which is worse than terse.
+      return `ANY ${win}/${b.n}`
     },
   },
   {

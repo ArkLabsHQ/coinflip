@@ -502,3 +502,85 @@ describe('warm snapshot for /play', () => {
     expect(res.body.capacity).toBe(CAPACITY)
   })
 })
+
+/**
+ * /play must select from a snapshot read AFTER it acquires the selection lock.
+ *
+ * The pool split holds this same mutex around its `wallet.send`. Reading the
+ * snapshot before the lock meant a /play that queued behind a split then chose
+ * from a pre-split view. Observed in production: a
+ * "[house pool] split into 1 new 50000-sat VTXO(s)" line, a /play with
+ * select+reserve=9389ms 10ms later, and that game's co-fund rejected with
+ * VTXO_ALREADY_SPENT on the coin the split had just consumed.
+ *
+ * Reading under the lock is free now only because the read is warm — with the
+ * old forced refresh it would have serialised N cold ~45s syncs, which is why it
+ * had been hoisted in the first place.
+ */
+describe('/play selects against post-lock state', () => {
+  const { houseVtxoCache, selectionMutex, reservations, spentOutpoints, freeStakeTotal: freeTotal } =
+    require('arkade-coinflip-server/dist/vtxo-pool.js')
+
+  beforeEach(() => {
+    houseVtxoCache.invalidate()
+    spentOutpoints.clear()
+    for (const r of reservations.snapshot()) reservations.release(r.gameId)
+  })
+
+  it('a queued reader sees an invalidate that landed while it waited', async () => {
+    // Models the real sequence: the split holds the lock, spends coins and
+    // invalidates; the queued /play must not use what it saw beforehand.
+    const AFTER = [HEALTHY] // the split consumed NEAR_EXPIRY
+    let serving = VTXOS
+    const deps = makeDeps()
+    deps.wallet.getVtxos = async () => serving
+
+    await houseVtxoCache.get(deps)              // warm with the pre-split set
+    expect(freeTotal(await houseVtxoCache.get(deps))).toBe(FREE_TOTAL)
+
+    let queuedSaw: any[] = []
+    const holder = selectionMutex.runExclusive(async () => {
+      // "the split": spends a coin, then invalidates, all while holding the lock
+      await new Promise((r) => setTimeout(r, 40))
+      serving = AFTER
+      houseVtxoCache.invalidate()
+    })
+    // The queued reader does what /play now does: read INSIDE the lock.
+    const queued = selectionMutex.runExclusive(async () => {
+      queuedSaw = await houseVtxoCache.get(deps)
+    })
+    await Promise.all([holder, queued])
+
+    expect(queuedSaw.map((v: any) => v.txid)).toEqual([HEALTHY.txid])
+    expect(queuedSaw.map((v: any) => v.txid)).not.toContain(NEAR_EXPIRY.txid)
+  })
+
+  it('and a PRE-lock read would have used the stale set — the bug this fixes', async () => {
+    let serving = VTXOS
+    const deps = makeDeps()
+    deps.wallet.getVtxos = async () => serving
+
+    // Pre-lock read: the old ordering.
+    const preLock = await houseVtxoCache.get(deps)
+    await selectionMutex.runExclusive(async () => {
+      serving = [HEALTHY]
+      houseVtxoCache.invalidate()
+    })
+    // The value captured before the lock still names the consumed coin, which is
+    // exactly how a spent outpoint reached a co-fund.
+    expect(preLock.map((v: any) => v.txid)).toContain(NEAR_EXPIRY.txid)
+  })
+
+  it('the lock still serialises, so two readers cannot interleave', async () => {
+    const order: string[] = []
+    await Promise.all([
+      selectionMutex.runExclusive(async () => {
+        order.push('a:start'); await new Promise((r) => setTimeout(r, 30)); order.push('a:end')
+      }),
+      selectionMutex.runExclusive(async () => {
+        order.push('b:start'); order.push('b:end')
+      }),
+    ])
+    expect(order).toEqual(['a:start', 'a:end', 'b:start', 'b:end'])
+  })
+})

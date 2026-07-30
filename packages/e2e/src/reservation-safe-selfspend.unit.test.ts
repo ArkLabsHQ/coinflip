@@ -378,6 +378,75 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     expect(r.reason).not.toMatch(/already running/)
   })
 
+  /**
+   * `targetCount` is a FLOOR, not a log label.
+   *
+   * This is the regression the v4 e2e caught and every unit test missed. That
+   * suite calls `ensureHouseVtxoPool(deps, { targetCount: 8, pieceSize: BET*5 })`
+   * ONCE and needs the pool filled, because v4 spends a WHOLE house VTXO per
+   * game. Capping every run at SPLIT_PIECES_PER_RUN (4) left 5 free coins, the
+   * later games drained it, and /play failed with
+   * "per-bet cap is 0 sat (25% of 0 sat free)".
+   *
+   * Below the floor a run must catch up; at or above it, it paces.
+   */
+  it('one call reaches the floor when below it, rather than pacing', async () => {
+    houseVtxoCache.invalidate()
+    // Mirrors the e2e: one big settled coin, ask for a floor of 8.
+    const sentInputs: any[][] = []
+    let pool = [coin('ee'.repeat(32), 0, 500_000)]
+    const deps = splitDeps(pool, sentInputs)
+    deps.wallet.getVtxos = async () => pool
+    // Model the chain the real splitter walks: spend the input, mint the piece,
+    // return the change — exactly what the e2e log showed (495000 → 490000 → …).
+    deps.wallet.sendBitcoin = async (params: any) => {
+      sentInputs.push(params.selectedVtxos)
+      const spent = params.selectedVtxos[0]
+      const change = spent.value - params.amount
+      pool = pool.filter((c: any) => !(c.txid === spent.txid && c.vout === spent.vout))
+      pool.push(coin(spent.txid.slice(0, 62) + 'ff', 0, params.amount))
+      if (change > 0) pool.push(coin(spent.txid.slice(0, 62) + 'ee', 1, change))
+      return 'txid-split'
+    }
+
+    const r = await ensureHouseVtxoPool(deps, { targetCount: 8, pieceSize: 5_000 })
+
+    // Pre-fix this was 4 and the pool sat at 5 free.
+    expect(r.created).toBeGreaterThanOrEqual(7)
+    const free = pool.filter((c: any) => c.value > 0).length
+    expect(free).toBeGreaterThanOrEqual(8)
+  })
+
+  it('paces once the floor is already met', async () => {
+    houseVtxoCache.invalidate()
+    const sentInputs: any[][] = []
+    // Already 8 free coins plus a big one to peel from — floor is satisfied, so
+    // it should mint the steady-state budget and stop, not run to the hard cap.
+    let pool = [
+      ...Array.from({ length: 8 }, (_v, i) => coin(String(i).repeat(64).slice(0, 64), 0, 5_000)),
+      coin('ee'.repeat(32), 0, 500_000),
+    ]
+    const deps = splitDeps(pool, sentInputs)
+    deps.wallet.getVtxos = async () => pool
+    deps.wallet.sendBitcoin = async (params: any) => {
+      sentInputs.push(params.selectedVtxos)
+      const spent = params.selectedVtxos[0]
+      const change = spent.value - params.amount
+      pool = pool.filter((c: any) => !(c.txid === spent.txid && c.vout === spent.vout))
+      pool.push(coin(spent.txid.slice(0, 62) + 'ff', 0, params.amount))
+      if (change > 0) pool.push(coin(spent.txid.slice(0, 62) + 'ee', 1, change))
+      return 'txid-split'
+    }
+
+    // No explicit piecesPerRun — an explicit one is a hard cap and the loop
+    // would exit on its bound, so the pace-break (the thing under test) would
+    // never fire. The DEFAULT is what pairs a budget of 4 with a cap of 16.
+    const r = await ensureHouseVtxoPool(deps, { targetCount: 8, pieceSize: 5_000 })
+
+    expect(r.created).toBe(4)          // budget, not the 16 hard cap
+    expect(r.reason).toMatch(/paced/)  // stopped because the floor is met
+  })
+
   it('fails loudly if the SDK ever drops selectedVtxos support', () => {
     const { assertSelectedVtxosSupported } =
       require('arkade-coinflip-server/dist/vtxo-pool.js')

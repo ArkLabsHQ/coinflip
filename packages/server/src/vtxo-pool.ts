@@ -431,8 +431,24 @@ let splitInFlight = false
 /** Per-run reservation id, so two runs can never collide on one ledger key. */
 let splitRunSeq = 0
 
-/** How many pieces one run will mint before leaving the rest to the next tick. */
+/**
+ * Steady-state budget: how many pieces one run mints once the pool is AT or
+ * above the floor (`POOL_TARGET_COUNT`). Above the floor a split is only "nice
+ * to have", so it is paced across ticks.
+ */
 export const SPLIT_PIECES_PER_RUN = Number(process.env.HOUSE_VTXO_SPLIT_PIECES_PER_RUN || 4)
+
+/**
+ * Hard bound on a single run, used while BELOW the floor.
+ *
+ * `targetCount` is a floor, not a label: below it, game throughput depends on
+ * the split, so one call has to be able to catch up rather than pace itself.
+ * Capping every run at SPLIT_PIECES_PER_RUN broke the v4 e2e — it asks for
+ * `targetCount: 8` and got 5 free coins, and since v4 spends a WHOLE house
+ * VTXO per game the later games ran the pool to zero and failed with
+ * "per-bet cap is 0 sat (25% of 0 sat free)".
+ */
+export const SPLIT_MAX_PIECES_PER_RUN = Number(process.env.HOUSE_VTXO_SPLIT_MAX_PIECES_PER_RUN || 16)
 
 export interface SplitOutcome {
   /** Pieces actually minted. */
@@ -510,14 +526,18 @@ export async function ensureHouseVtxoPool(
   try {
     const targetCount = opts.targetCount ?? POOL_TARGET_COUNT
     const maxCount = opts.maxCount ?? POOL_MAX_COUNT
-    const piecesPerRun = opts.piecesPerRun ?? SPLIT_PIECES_PER_RUN
+      // An EXPLICIT piecesPerRun is a hard cap — the caller said how much work it
+    // wants. Only the default gets the floor catch-up, where a run below
+    // targetCount may go up to SPLIT_MAX_PIECES_PER_RUN.
+    const pace = opts.piecesPerRun ?? SPLIT_PIECES_PER_RUN
+    const hardCap = opts.piecesPerRun ?? SPLIT_MAX_PIECES_PER_RUN
     const ladder =
       opts.ladder ??
       (opts.pieceSize ? [{ size: opts.pieceSize, weightPct: 100 }] : null) ??
       parseLadder(process.env.HOUSE_VTXO_DENOMINATIONS) ??
       defaultLadder(await pieceSizeFromTiers(deps))
 
-    return await runSplit(deps, { targetCount, maxCount, piecesPerRun, ladder, runId })
+    return await runSplit(deps, { targetCount, maxCount, pace, hardCap, ladder, runId })
   } finally {
     splitInFlight = false
     // Belt and braces: the per-piece finally already releases, but a throw
@@ -531,26 +551,43 @@ async function runSplit(
   cfg: {
     targetCount: number
     maxCount: number
-    piecesPerRun: number
+    pace: number
+    hardCap: number
     ladder: Denomination[]
     runId: string
   },
 ): Promise<SplitOutcome> {
-  const { targetCount, maxCount, piecesPerRun, ladder, runId } = cfg
+  const { targetCount, maxCount, pace, hardCap, ladder, runId } = cfg
   const dust = Number(deps.arkInfo.dust)
   const ownAddress = await deps.wallet.getAddress()
 
   let created = 0
   let lastReason = 'no work planned'
+  /** Why the loop stopped, when that is more informative than the count. */
+  let stopReason = ''
 
   // One send per piece. Each iteration re-reads the pool so the previous
   // piece's change becomes the next input, and each is independently safe —
   // a failure stops the run and reports partial progress rather than
   // half-applying a batch.
-  for (let i = 0; i < piecesPerRun; i++) {
+  for (let i = 0; i < hardCap; i++) {
     // Refresh through the cache so this tick doubles as the hot path's
     // snapshot warmer (a fresh, full getVtxos() either way).
     const all = await houseVtxoCache.refresh(deps)
+
+    // Pace only once the pool has reached the floor. Below it the split is a
+    // MUST (game throughput depends on a free input per concurrent game), so
+    // keep going up to the hard cap; at or above it, stop after the
+    // steady-state budget and leave the rest to the next tick.
+    //
+    // Advisory count, deliberately read outside the lock: it decides only when
+    // to STOP, never which coin to spend, so a stale read cannot cause a
+    // double-spend — it can only shift work to the next tick.
+    const freeNow = freeHouseVtxos(all).length
+    if (created >= pace && freeNow >= targetCount) {
+      stopReason = `paced (floor ${targetCount} met, rest next tick)`
+      break
+    }
 
     // Deliberately synchronous inside the lock: no `await` between reading the
     // free set and pinning it, so nothing can reserve a coin in between.
@@ -627,7 +664,9 @@ async function runSplit(
   if (created > 0) {
     const free = freeHouseVtxos(await houseVtxoCache.get(deps))
     const below = free.length < targetCount ? ' (below floor)' : ''
-    lastReason = `minted ${created} piece(s) — ${free.length}/${maxCount} free${below}`
+    lastReason =
+      `minted ${created} piece(s) — ${free.length}/${maxCount} free${below}` +
+      (stopReason ? ` — ${stopReason}` : '')
     console.log(`[house pool] ${lastReason}`)
   }
   return { created, reason: lastReason }

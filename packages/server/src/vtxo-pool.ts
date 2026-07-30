@@ -569,12 +569,18 @@ async function runSplit(
 
       const amount = plan.outputs[0]
       // Peel from the LARGEST free coin: never consume an already
-      // correctly-sized small piece just to mint another one. Change must be
-      // either nothing or comfortably above dust, or the SDK rejects it
-      // (DustChangeError).
+      // correctly-sized small piece just to mint another one.
+      //
+      // Strictly `>= amount + dust`, so there is always real change above the
+      // dust floor. Allowing `value === amount` would spend a coin to recreate
+      // a coin of the same size — pure churn costing a tx — and would drive
+      // `sendBitcoin` down a zero-change path whose behaviour has not been
+      // verified. A pool of exactly-sized coins therefore reports why it can't
+      // mint rather than spinning; the plan is what says a rung is short, and
+      // no single coin of that exact size can usefully serve it.
       const candidate = [...free]
         .sort((a, b) => b.value - a.value)
-        .find((v) => v.value === amount || v.value >= amount + dust)
+        .find((v) => v.value >= amount + dust)
       if (!candidate) {
         return {
           input: null,

@@ -325,6 +325,43 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     expect(sentInputs).toHaveLength(1)
   })
 
+  /**
+   * Never spend a coin to recreate a coin of the same size. That is pure churn
+   * costing a tx, and it would drive `sendBitcoin` down a zero-change path
+   * whose behaviour is unverified — so the candidate must clear
+   * `amount + dust`, not merely equal `amount`.
+   */
+  it('refuses to churn: will not spend an exactly-piece-sized coin', async () => {
+    houseVtxoCache.invalidate()
+    // Two 5,000-sat coins: the ladder's smallest rung is 5,000 (maxTier/10),
+    // and a 5,000 bankroll wants more 5,000s than it has — but neither coin can
+    // fund one while leaving dust-safe change.
+    const sentInputs: any[][] = []
+    const deps = splitDeps(
+      [coin('11'.repeat(32), 0, 5_000), coin('22'.repeat(32), 0, 5_000)],
+      sentInputs,
+    )
+
+    const r = await ensureHouseVtxoPool(deps, { piecesPerRun: 2 })
+
+    expect(r.created).toBe(0)
+    expect(sentInputs).toHaveLength(0) // no churn tx
+    expect(r.reason).toBeTruthy()
+  })
+
+  it('does spend a coin that clears amount + dust', async () => {
+    houseVtxoCache.invalidate()
+    const sentInputs: any[][] = []
+    // 5,000 + 330 dust + headroom — comfortably fundable.
+    const big = coin('33'.repeat(32), 0, 80_000)
+    const deps = splitDeps([big], sentInputs)
+
+    const r = await ensureHouseVtxoPool(deps, { piecesPerRun: 1 })
+
+    expect(r.created).toBe(1)
+    expect(sentInputs[0].map((v: any) => v.txid)).toEqual([big.txid])
+  })
+
   it('releases the in-flight guard even when a run throws', async () => {
     houseVtxoCache.invalidate()
     const free = coin('ee'.repeat(32), 0, 200_000)

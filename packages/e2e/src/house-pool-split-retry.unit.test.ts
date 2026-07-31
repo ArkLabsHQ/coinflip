@@ -72,14 +72,13 @@ function chainingSplitDeps(start: any[], failOn: Map<number, Error>) {
 const notFound = () => new Error('VTXO_NOT_FOUND (30): some vtxos not found')
 
 describe('house pool split — arkd indexing race', () => {
-  beforeEach(() => {
-    houseVtxoCache.invalidate()
-    reservations.release('__house_pool_split__')
-  })
-  afterEach(() => {
-    houseVtxoCache.invalidate()
-    reservations.release('__house_pool_split__')
-  })
+  // Only the cache needs resetting between runs. Split pins are NOT released
+  // here on purpose: a live key is `__house_pool_split__#N` (the run counter),
+  // so releasing the bare id would delete nothing and merely look like cleanup.
+  // The `finally` blocks in runSplit/ensureHouseVtxoPool already drop the
+  // per-run key — which is exactly what the last case in this file asserts.
+  beforeEach(() => houseVtxoCache.invalidate())
+  afterEach(() => houseVtxoCache.invalidate())
 
   it('retries a transient VTXO_NOT_FOUND and keeps minting instead of stopping the run', async () => {
     // Fails the 2nd send — the one that first spends a just-minted change coin,

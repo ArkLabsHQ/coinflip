@@ -467,6 +467,43 @@ let splitRunSeq = 0
  */
 export const SPLIT_PIECES_PER_RUN = Number(process.env.HOUSE_VTXO_SPLIT_PIECES_PER_RUN || 16)
 
+/**
+ * Transient-failure budget for ONE split run (not per piece).
+ *
+ * Every iteration spends the PREVIOUS iteration's change, and that change is a
+ * freshly preconfirmed VTXO. arkd occasionally has not registered it yet when
+ * the next `submitTx` names it as an input, and answers `VTXO_NOT_FOUND (30):
+ * some vtxos not found` — the same known arkd race the v4 e2e handles with a
+ * bounded retry for co-fund inputs, and the scale harness with retry-fresh-inputs.
+ *
+ * It used to abort the whole run. Observed in CI: the run minted ONE piece,
+ * lost the second to this race, and stopped with 2 free coins — then the first
+ * two /play calls pinned both and every later game died with "per-bet cap is 0
+ * sat (25% of 0 sat free)". One racy send must not leave the house unable to
+ * take bets, so a transient failure now costs a re-read and a retry instead of
+ * the run. The budget is shared across the run so a genuinely wedged arkd still
+ * stops quickly rather than burning `piecesPerRun` × retries.
+ */
+export const SPLIT_TRANSIENT_RETRIES = Number(process.env.HOUSE_VTXO_SPLIT_RETRIES || 3)
+
+/** Pause before re-reading the pool and retrying a transient split failure. */
+export const SPLIT_RETRY_DELAY_MS = Number(process.env.HOUSE_VTXO_SPLIT_RETRY_DELAY_MS || 750)
+
+/**
+ * True when a split send failed for a reason a re-read is likely to clear.
+ *
+ * Narrow on purpose. `VTXO_NOT_FOUND` means arkd does not (yet) know the input
+ * — for a just-minted change output that is indexing lag, and the next snapshot
+ * carries either the same coin (now known) or a different one. A timeout is
+ * deliberately NOT transient: a timed-out send may still land, so retrying it
+ * risks minting twice. Anything else (rejected signature, dust, insufficient
+ * funds) is a real refusal and still stops the run.
+ */
+export function isTransientSplitFailure(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /VTXO_NOT_FOUND|vtxos not found/i.test(msg)
+}
+
 export interface SplitOutcome {
   /** Pieces actually minted. */
   created: number
@@ -575,11 +612,13 @@ async function runSplit(
 
   let created = 0
   let lastReason = 'no work planned'
+  let retriesLeft = SPLIT_TRANSIENT_RETRIES
 
   // One send per piece. Each iteration re-reads the pool so the previous
   // piece's change becomes the next input, and each is independently safe —
-  // a failure stops the run and reports partial progress rather than
-  // half-applying a batch.
+  // a HARD failure stops the run and reports partial progress rather than
+  // half-applying a batch; a transient one (see isTransientSplitFailure) costs
+  // this piece a re-read and a retry, not the rest of the run.
   for (let i = 0; i < piecesPerRun; i++) {
     // Refresh through the cache so this tick doubles as the hot path's
     // snapshot warmer (a fresh, full getVtxos() either way).
@@ -629,6 +668,10 @@ async function runSplit(
     lastReason = picked.reason
     if (!picked.input) break
 
+    // Set in the catch, acted on AFTER the finally has released the pin and
+    // dropped the snapshot — so the retry re-reads a fresh view and re-pins,
+    // rather than sleeping with a coin still pinned against /play.
+    let retryThisPiece = false
     try {
       await timeoutReject(
         deps.wallet.sendBitcoin({
@@ -646,7 +689,8 @@ async function runSplit(
     } catch (err) {
       lastReason = `split send failed after ${created} piece(s): ${err instanceof Error ? err.message : String(err)}`
       console.warn(`[house pool] ${lastReason}`)
-      break
+      retryThisPiece = isTransientSplitFailure(err) && retriesLeft > 0
+      if (!retryThisPiece) break
     } finally {
       // Release the pin either way. A timed-out send may still land, which is
       // why the snapshot is dropped too — the refreshed view is what decides
@@ -654,6 +698,17 @@ async function runSplit(
       // catches one that arkd keeps listing after it has been spent.
       reservations.release(runId)
       houseVtxoCache.invalidate()
+    }
+
+    if (retryThisPiece) {
+      retriesLeft--
+      // This piece was NOT minted, so don't spend the run's budget on it.
+      // `retriesLeft` is what bounds the loop here, not `piecesPerRun`.
+      i--
+      console.warn(
+        `[house pool] transient split failure — retrying in ${SPLIT_RETRY_DELAY_MS}ms (${retriesLeft} retr${retriesLeft === 1 ? 'y' : 'ies'} left)`,
+      )
+      await new Promise((resolve) => setTimeout(resolve, SPLIT_RETRY_DELAY_MS))
     }
   }
 

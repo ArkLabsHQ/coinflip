@@ -8,12 +8,6 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Vendored @arkade-os/sdk tarball — both packages/lib/package.json and
-# packages/server/package.json depend on `file:../../vendor/...` while we
-# track the arkade-script-final branch (PR arkade-os/ts-sdk#319). Must be
-# in place BEFORE npm install in either package.
-COPY vendor/ ./vendor/
-
 # Contract-workflows-prototype (file: dep of the lib). Build it BEFORE
 # lib so lib's npm install can resolve @arklabshq/contract-workflows-prototype.
 COPY packages/contract-workflows-prototype/package.json packages/contract-workflows-prototype/package-lock.json* ./packages/contract-workflows-prototype/

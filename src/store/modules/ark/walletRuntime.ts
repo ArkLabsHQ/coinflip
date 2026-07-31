@@ -38,7 +38,6 @@ import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
 // the v2 transactions module, which imports Node's `crypto`.
 import { buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx, encodeSettleForEmulator, tapLeafHasKey } from 'arkade-coinflip/dist/joint-pot-tx'
 import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
-import { createTxTimeCache } from './txTimeCache'
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import { singleFlight } from '@/utils/singleFlight'
 import {
@@ -147,19 +146,6 @@ export const NETWORK_PRESETS: Record<string, NetworkPreset> = {
 
 // SDK wallet instance (kept outside Vuex state to avoid reactivity issues with complex objects)
 let sdkWallet: Wallet | null = null
-/**
- * Batches the Activity page's per-transaction indexer reads.
- *
- * `ReadonlyWallet.getTransactionHistory()` asks the indexer for ONE outpoint at
- * a time, sequentially, once per VTXO rather than per unique txid. MEASURED on
- * mutinynet: 348 single-outpoint calls covering 123 distinct txids, 23.9s in a
- * single burst — 92% of the page's traffic — against a 60s `TIMEOUTS.api`
- * budget that grows with every game played. See txTimeCache.ts for the full
- * trace and why coalescing can't help (nothing runs concurrently).
- */
-const txTimeCache = createTxTimeCache()
-/** The wrapped provider handed to the SDK, reused for priming. */
-let txTimeIndexer: RestIndexerProvider | null = null
 // Run at most ONE boarding-settle round at a time. settlementConfig is false (see
 // Wallet.create), so the client settles boarding itself — from BOTH the auto-settle
 // in refreshBalance AND the manual `settle` action. Two concurrent sdkWallet.settle()
@@ -360,21 +346,9 @@ export async function checkConnection({ commit, state, rootState, dispatch }: Ar
     // Create SDK wallet. esploraUrl is omitted when empty so the SDK
     // auto-defaults it from the network it detects at the Ark server.
     const identity = SingleKey.fromHex(privateKey)
-    // Wrap the indexer so primed single-outpoint reads skip the network.
-    //
-    // This mirrors the SDK's OWN construction exactly: with no `arkProvider`
-    // passed it does `new RestIndexerProvider(getArkadeServerUrl(config))`, and
-    // that helper is just `arkServerUrl || DEFAULT`. Injecting a provider is the
-    // documented path — `indexerUrl` is deprecated in favour of it — and the
-    // rest of this file already builds indexers the same way from `state.server`.
-    // Only wrapped when we actually have a URL, so it can never be pointed at
-    // the wrong host; without one the SDK builds its own and we simply lose the
-    // optimisation.
-    txTimeIndexer = arkServerUrl ? new RestIndexerProvider(arkServerUrl) : null
     const wallet = await Wallet.create({
       identity,
       arkServerUrl,
-      ...(txTimeIndexer ? { indexerProvider: txTimeCache.wrap(txTimeIndexer) } : {}),
       ...(esploraUrl ? { esploraUrl } : {}),
       // Disable the SDK's settlement poll loop. It finalizes the game's
       // preconfirmed VTXOs (escrow change, sweep payout) into batch rounds
@@ -554,27 +528,9 @@ export async function refreshHistory({ commit, state }: ArkCtx) {
   // show the spinner on the first load (nothing cached yet).
   commit('SET_ACTIVITY_STATUS', state.activityHistory.length ? 'ready' : 'loading')
   try {
-    // Prime the tx-time batch first: one request per 100 txids in place of the
-    // SDK's one-per-VTXO sequential reads. `arkTxId` is the exact key
-    // getTxCreatedAt looks up. Best-effort — an uncached txid just falls through
-    // to the SDK's own read, so a failure here costs speed, never correctness.
-    if (txTimeIndexer) {
-      try {
-        const vtxos = await sdkWallet.getVtxos()
-        await txTimeCache.prime(vtxos.map((v) => v.arkTxId), txTimeIndexer)
-      } catch (e) {
-        console.warn('activity tx-time prime skipped:', e)
-      }
-    }
-    try {
-      const activities = await withTimeout(sdkWallet.getActivityHistory(), TIMEOUTS.api, 'load activity')
-      commit('SET_ACTIVITY_HISTORY', activities)
-      commit('SET_ACTIVITY_STATUS', 'ready')
-    } finally {
-      // Scoped to this one load on purpose: a cached vtxo could be spent later,
-      // and history is a read-only view, so there is no reason to hold it.
-      txTimeCache.clear()
-    }
+    const activities = await withTimeout(sdkWallet.getActivityHistory(), TIMEOUTS.api, 'load activity')
+    commit('SET_ACTIVITY_HISTORY', activities)
+    commit('SET_ACTIVITY_STATUS', 'ready')
   } catch (error) {
     console.error('Failed to refresh history:', error)
     commit('SET_ACTIVITY_STATUS', 'error')

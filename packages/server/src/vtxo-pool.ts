@@ -25,7 +25,7 @@ import type { AppDeps } from './deps.js'
 import {
   type Denomination, planSplit, parseLadder, defaultLadder,
 } from './vtxo-denominations.js'
-import { selectableHouseVtxos } from './game-engine.js'
+import { selectableHouseVtxos, RENEWAL_EXPIRY_BUFFER_MS } from './game-engine.js'
 import { timeoutReject, ARK_SYNC_TIMEOUT_MS, ARK_SUBMIT_TIMEOUT_MS } from './async-timeout.js'
 import { makeLogDedup } from './log-dedup.js'
 
@@ -561,6 +561,38 @@ export function pickSplitInputs(
   return { inputs: [], kind: 'none' }
 }
 
+/**
+ * Coins the SPLITTER may spend: free, and comfortably clear of renewal.
+ *
+ * `freeHouseVtxos` filters on VTXO_LIFETIME_BUFFER_MS (30 minutes) — the right
+ * horizon for /play, whose games last minutes. It is the wrong one here, and
+ * the gap is 71.5 hours wide: renewal treats anything within
+ * RENEWAL_EXPIRY_BUFFER_MS (72h) as needing settlement, so the splitter was
+ * free to spend coins renewal was about to settle anyway.
+ *
+ * Pieces inherit their parent's batch expiry, so splitting a near-expiry coin
+ * mints near-expiry pieces, which renewal then immediately settles — undoing
+ * the shaping the split just paid transactions for. OBSERVED in production:
+ *
+ *   19:14:12 [house pool] minted 13 piece(s) — 32/64 free
+ *   19:14:49 [renewal]    32 needing renewal (buffer 72h) -> settling all 32
+ *   19:18:00 [house pool] minted 16 piece(s) — 17/64 free      (all over again)
+ *
+ * The same tick reported "nearest batch expiry ~1h", so those 32 coins were an
+ * hour from being swept. Renewal caught them, but the splitter had spent a
+ * transaction each to mint pieces from parents already inside the sweep window
+ * — the precondition of the 1M-sat sweep loss, not merely wasted fees.
+ *
+ * Deferring costs nothing in the healthy state: the same log shows the pool at
+ * ~152h expiry with 0 needing renewal once renewal has run, which is more than
+ * double this buffer. The splitter simply waits its turn.
+ */
+export function splittableHouseVtxos(all: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] {
+  const { selectable } = selectableHouseVtxos(all, RENEWAL_EXPIRY_BUFFER_MS)
+  const reserved = reservations.reservedOutpoints()
+  return selectable.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
+}
+
 export interface SplitOutcome {
   /** Pieces actually minted. */
   created: number
@@ -690,9 +722,26 @@ async function runSplit(
   const readPrivate = () =>
     timeoutReject(deps.wallet.getVtxos(), ARK_SYNC_TIMEOUT_MS, 'house getVtxos (split)')
 
-  let working = freeHouseVtxos(await readPrivate())
+  const firstRead = await readPrivate()
+  let working = splittableHouseVtxos(firstRead)
   /** Every outpoint this run has committed to spending. */
   const consumed = new Set<string>()
+
+  // Distinguish "nothing to split" from "everything is waiting on renewal".
+  // Without this the run would report "0 free coin(s)" while the pool is in
+  // fact full — just inside renewal's horizon — which reads as a broken pool
+  // to whoever is on call.
+  if (working.length === 0) {
+    const freeNow = freeHouseVtxos(firstRead)
+    if (freeNow.length > 0) {
+      const reason =
+        `deferring to renewal — all ${freeNow.length} free coin(s) are within ` +
+        `${Math.round(RENEWAL_EXPIRY_BUFFER_MS / 3600_000)}h of batch expiry; ` +
+        `splitting them would mint pieces renewal must immediately settle`
+      console.log(`[house pool] ${reason}`)
+      return { created: 0, reason }
+    }
+  }
 
   // One send per piece. A HARD failure stops the run and reports partial
   // progress rather than half-applying a batch; a transient one (see
@@ -775,7 +824,7 @@ async function runSplit(
       console.log(`[house pool] minted a ${picked.amount}-sat piece (${picked.kind}) from ${from}`)
       // Private re-read so the next piece can spend this one's change. Costs
       // the SPLITTER a sync; costs /play nothing.
-      working = freeHouseVtxos(await readPrivate())
+      working = splittableHouseVtxos(await readPrivate())
     } catch (err) {
       lastReason = `split send failed after ${created} piece(s): ${err instanceof Error ? err.message : String(err)}`
       console.warn(`[house pool] ${lastReason}`)
@@ -795,7 +844,7 @@ async function runSplit(
       // Drop the failed attempt's pin (it spent nothing) so the retry can pick
       // those coins again, then re-read privately and try.
       reservations.reserve(runId, [...consumed], 0)
-      working = freeHouseVtxos(await readPrivate())
+      working = splittableHouseVtxos(await readPrivate())
     }
   }
 

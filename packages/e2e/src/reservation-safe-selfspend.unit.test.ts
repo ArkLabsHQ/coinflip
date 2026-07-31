@@ -41,11 +41,13 @@ const { renewSettle } = require('arkade-coinflip-server/dist/game-engine.js')
 const { ensureHouseVtxoPool, reservations, houseVtxoCache } = require('arkade-coinflip-server/dist/vtxo-pool.js')
 const { createAdminRoutes } = require('arkade-coinflip-server/dist/admin/routes.js')
 
-const FUTURE_EXPIRY = Date.now() + 24 * 3600_000
+// 7 days: a HEALTHY house coin must now sit outside renewal's 72h horizon,
+// because the splitter defers to renewal inside it (splittableHouseVtxos).
+const FUTURE_EXPIRY = Date.now() + 7 * 24 * 3600_000
 /** A structurally valid Ark address (the settle builder decodes it for the output script). */
 const HOUSE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
 
-/** A healthy settled house VTXO, far from expiry. */
+/** A healthy settled house VTXO, clear of renewal's horizon (splittable). */
 const coin = (txid: string, vout: number, value: number) => ({
   txid,
   vout,
@@ -53,6 +55,16 @@ const coin = (txid: string, vout: number, value: number) => ({
   virtualStatus: { state: 'settled', batchExpiry: FUTURE_EXPIRY },
   status: { confirmed: false },
   createdAt: new Date(Date.now() - 60_000),
+})
+
+/** Inside the 72h renewal buffer — what the renewSettle tests need, since a
+ *  coin renewal does NOT consider due is a coin it correctly declines to
+ *  settle. Distinct from `coin` because the splitter and renewal now filter on
+ *  opposite sides of that same horizon. */
+const RENEWAL_DUE_EXPIRY = Date.now() + 24 * 3600_000
+const dueCoin = (txid: string, vout: number, value: number) => ({
+  ...coin(txid, vout, value),
+  virtualStatus: { state: 'settled', batchExpiry: RENEWAL_DUE_EXPIRY },
 })
 const outpoints = (coins: Array<{ txid: string; vout: number }>) => coins.map((c) => `${c.txid}:${c.vout}`)
 
@@ -78,8 +90,8 @@ describe('P0 #53 — renewSettle must not gather reserved house VTXOs', () => {
   })
 
   it('settles with EXPLICIT params that exclude reserved outpoints (not blind settle(undefined))', async () => {
-    const reservedCoin = coin('aa'.repeat(32), 0, 50_000)
-    const freeCoin = coin('bb'.repeat(32), 1, 40_000)
+    const reservedCoin = dueCoin('aa'.repeat(32), 0, 50_000)
+    const freeCoin = dueCoin('bb'.repeat(32), 1, 40_000)
     reservations.reserve('p0-53-renew', [`${reservedCoin.txid}:0`], 100_000)
     const settleCalls: any[][] = []
     const deps = { wallet: mockSettleWallet([reservedCoin, freeCoin], settleCalls) } as any
@@ -103,7 +115,7 @@ describe('P0 #53 — renewSettle must not gather reserved house VTXOs', () => {
   })
 
   it('is a graceful no-op (no settle round) when every eligible VTXO is reserved', async () => {
-    const reservedCoin = coin('cc'.repeat(32), 2, 60_000)
+    const reservedCoin = dueCoin('cc'.repeat(32), 2, 60_000)
     reservations.reserve('p0-53-renew', [`${reservedCoin.txid}:2`], 120_000)
     const settleCalls: any[][] = []
     const deps = { wallet: mockSettleWallet([reservedCoin], settleCalls) } as any
@@ -124,7 +136,7 @@ describe('P0 #53 — renewSettle must not gather reserved house VTXOs', () => {
  * send (a MEASURED 9,389ms /play stall).
  *
  * It now enforces the same invariant DIRECTLY: every piece is minted with
- * `sendBitcoin({selectedVtxos})` over inputs we choose from the unreserved set
+ * `sendBitdueCoin({selectedVtxos})` over inputs we choose from the unreserved set
  * and pin under the mutex. So instead of asserting "did not run", these assert
  * the stronger and more useful property — it DOES run, and the inputs it
  * actually handed the SDK contain no reserved outpoint.

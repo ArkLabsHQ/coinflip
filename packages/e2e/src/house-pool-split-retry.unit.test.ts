@@ -23,7 +23,9 @@ const {
   ensureHouseVtxoPool, reservations, houseVtxoCache, isTransientSplitFailure,
 } = require('arkade-coinflip-server/dist/vtxo-pool.js')
 
-const FUTURE_EXPIRY = Date.now() + 24 * 3600_000
+// 7 days: a HEALTHY house coin must now sit outside renewal's 72h horizon,
+// because the splitter defers to renewal inside it (splittableHouseVtxos).
+const FUTURE_EXPIRY = Date.now() + 7 * 24 * 3600_000
 const HOUSE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
 
 const coin = (txid: string, vout: number, value: number) => ({

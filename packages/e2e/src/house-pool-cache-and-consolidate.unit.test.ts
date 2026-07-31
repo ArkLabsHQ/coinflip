@@ -25,7 +25,9 @@ const {
   SPLIT_MAX_INPUTS_PER_PIECE, outpointKey,
 } = require('arkade-coinflip-server/dist/vtxo-pool.js')
 
-const FUTURE_EXPIRY = Date.now() + 24 * 3600_000
+// 7 days: a HEALTHY house coin must now sit outside renewal's 72h horizon,
+// because the splitter defers to renewal inside it (splittableHouseVtxos).
+const FUTURE_EXPIRY = Date.now() + 7 * 24 * 3600_000
 const HOUSE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
 const DUST = 330
 
@@ -162,5 +164,101 @@ describe('the splitter does not churn the shared snapshot', () => {
     const r = await ensureHouseVtxoPool(deps, { piecesPerRun: 4, pieceSize: 5_000 })
     expect(r.created).toBe(0)
     expect(reservations.snapshot()).toEqual([])
+  })
+})
+
+/**
+ * The splitter must not spend coins renewal is about to settle.
+ *
+ * `freeHouseVtxos` filters on a 30-minute horizon (right for /play, whose games
+ * last minutes); renewal treats anything within 72h as due. That 71.5-hour gap
+ * let the splitter mint pieces from near-expiry parents — and pieces inherit
+ * their parent's batch expiry, so renewal immediately settled them, undoing
+ * shaping the split had just paid a transaction each for. OBSERVED:
+ *
+ *   19:14:12 [house pool] minted 13 piece(s) — 32/64 free
+ *   19:14:49 [renewal]    32 needing renewal (buffer 72h) -> settling all 32
+ *   19:18:00 [house pool] minted 16 piece(s) — 17/64 free      (all over again)
+ *
+ * The same tick read "nearest batch expiry ~1h", so this is not only wasted
+ * fees: the splitter was minting from coins an hour off being swept.
+ */
+describe('the splitter defers to renewal inside its horizon', () => {
+  const { splittableHouseVtxos } = require('arkade-coinflip-server/dist/vtxo-pool.js')
+  const HOURS = 3600_000
+  const withExpiry = (txid: string, value: number, msFromNow: number) => ({
+    ...coin(txid, 0, value),
+    virtualStatus: { state: 'settled', batchExpiry: Date.now() + msFromNow },
+  })
+
+  afterEach(() => {
+    for (const r of reservations.snapshot()) reservations.release(r.gameId)
+    houseVtxoCache.invalidate()
+  })
+
+  it('excludes coins inside the 72h renewal window, keeps those outside', () => {
+    const due = withExpiry(hex64(1), 100_000, 1 * HOURS)      // renewal's problem
+    const healthy = withExpiry(hex64(2), 100_000, 152 * HOURS) // the post-renewal steady state
+    const out = splittableHouseVtxos([due, healthy])
+    expect(out.map((v: any) => v.txid)).toEqual([healthy.txid])
+  })
+
+  it('still excludes reserved coins, like the /play free set does', () => {
+    const healthy = withExpiry(hex64(3), 100_000, 152 * HOURS)
+    reservations.reserve('g1', [`${healthy.txid}:0`], 0)
+    expect(splittableHouseVtxos([healthy])).toEqual([])
+  })
+
+  /**
+   * The pool is FULL here — it is simply all inside the horizon. Reporting
+   * "0 free coins" would read as a broken house to whoever is on call.
+   */
+  it('says it is waiting for renewal rather than claiming an empty pool', async () => {
+    let sends = 0
+    const localDeps = {
+      arkInfo: { dust: BigInt(DUST) },
+      repos: { config: { get: async () => '[330,1000,5000,10000,50000]' } },
+      wallet: {
+        getVtxos: async () => [withExpiry(hex64(4), 500_000, 1 * HOURS)],
+        getAddress: async () => HOUSE_ADDRESS,
+        sendBitcoin: async () => { sends++; return 'nope' },
+      },
+    } as any
+
+    const r = await ensureHouseVtxoPool(localDeps, { piecesPerRun: 4, pieceSize: 5_000 })
+
+    expect(r.created).toBe(0)
+    expect(sends).toBe(0)                              // no tx wasted
+    expect(r.reason).toMatch(/deferring to renewal/)
+    expect(r.reason).toMatch(/1 free coin/)            // names the real pool size
+    expect(r.reason).not.toMatch(/0 free coin/)
+  })
+
+  it('splits normally once the pool is clear of the horizon', async () => {
+    let pool: any[] = [withExpiry(hex64(5), 500_000, 152 * HOURS)]
+    let n = 0
+    const localDeps = {
+      arkInfo: { dust: BigInt(DUST) },
+      repos: { config: { get: async () => '[330,1000,5000,10000,50000]' } },
+      wallet: {
+        getVtxos: async () => pool,
+        getAddress: async () => HOUSE_ADDRESS,
+        sendBitcoin: async (params: any) => {
+          n++
+          const txid = String(n).padStart(2, '0').repeat(32).slice(0, 64)
+          const spent = new Set(params.selectedVtxos.map((v: any) => `${v.txid}:${v.vout}`))
+          const inSum = params.selectedVtxos.reduce((t: number, v: any) => t + v.value, 0)
+          pool = pool.filter((c: any) => !spent.has(`${c.txid}:${c.vout}`))
+          pool.push(withExpiry(txid, params.amount, 152 * HOURS))
+          if (inSum - params.amount > 0) {
+            pool.push({ ...withExpiry(txid, inSum - params.amount, 152 * HOURS), vout: 1 })
+          }
+          return txid
+        },
+      },
+    } as any
+
+    const r = await ensureHouseVtxoPool(localDeps, { piecesPerRun: 3, pieceSize: 5_000 })
+    expect(r.created).toBe(3)
   })
 })

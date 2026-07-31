@@ -399,14 +399,21 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     deps.wallet.getVtxos = async () => pool
     // Model the chain the real splitter walks: spend the input, mint the piece,
     // return the change — exactly what the e2e log showed (495000 → 490000 → …).
+    // Unique txid per send. Deriving it from the spent coin's prefix made the
+    // change coin collide with the previous change coin, which real txids never
+    // do — and once the splitter tracks the outpoints it has spent, a collision
+    // reads as "already spent" and the chain stalls.
+    let seq = 0
     deps.wallet.sendBitcoin = async (params: any) => {
       sentInputs.push(params.selectedVtxos)
-      const spent = params.selectedVtxos[0]
-      const change = spent.value - params.amount
-      pool = pool.filter((c: any) => !(c.txid === spent.txid && c.vout === spent.vout))
-      pool.push(coin(spent.txid.slice(0, 62) + 'ff', 0, params.amount))
-      if (change > 0) pool.push(coin(spent.txid.slice(0, 62) + 'ee', 1, change))
-      return 'txid-split'
+      seq++
+      const txid = String(seq).padStart(2, '0').repeat(32).slice(0, 64)
+      const spentKeys = new Set(params.selectedVtxos.map((v: any) => `${v.txid}:${v.vout}`))
+      const inSum = params.selectedVtxos.reduce((t: number, v: any) => t + v.value, 0)
+      pool = pool.filter((c: any) => !spentKeys.has(`${c.txid}:${c.vout}`))
+      pool.push(coin(txid, 0, params.amount))
+      if (inSum - params.amount > 0) pool.push(coin(txid, 1, inSum - params.amount))
+      return txid
     }
 
     const r = await ensureHouseVtxoPool(deps, { targetCount: 8, pieceSize: 5_000 })

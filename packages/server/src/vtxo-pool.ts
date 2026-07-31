@@ -504,6 +504,63 @@ export function isTransientSplitFailure(err: unknown): boolean {
   return /VTXO_NOT_FOUND|vtxos not found/i.test(msg)
 }
 
+/**
+ * Most coins one piece may consolidate. Each input costs tx weight and a
+ * checkpoint, so this bounds a consolidation rather than letting it sweep the
+ * whole pool into one send.
+ */
+export const SPLIT_MAX_INPUTS_PER_PIECE = Number(process.env.HOUSE_VTXO_SPLIT_MAX_INPUTS || 8)
+
+/** What `pickSplitInputs` decided, for the log line and the tests. */
+export type SplitInputKind = 'peel' | 'consolidate' | 'none'
+
+/**
+ * Choose the coins that fund ONE `amount` piece.
+ *
+ * Two strategies, in order:
+ *
+ *  1. PEEL — a single coin worth at least `amount + dust`. Least disruptive:
+ *     one input, and the change stays a usable coin. Largest first, so an
+ *     already correctly-sized small piece is never consumed to mint another.
+ *
+ *  2. CONSOLIDATE — when no single coin is big enough, combine several
+ *     (largest first, capped at `maxInputs`) until they cover it.
+ *
+ * Consolidation is what stops the pool stranding itself. Filling smallest-rung
+ * first is deliberate, but it is a one-way door without this: OBSERVED in
+ * production, a run left 32 free coins of 5,000 (160,000 sat) and then reported
+ * "no free coin can fund a 5000-sat piece" forever — the ladder wanted a 25,000
+ * piece, no single coin could fund one, and the anti-churn rule correctly
+ * refused to spend a 5,000 to remake a 5,000. The bankroll was fine; it was
+ * simply the wrong SHAPE, and nothing could ever reshape it.
+ *
+ * The anti-churn rule still holds where it matters: a lone coin is only peeled
+ * when it leaves real change, so a 5,000 is never spent to recreate a 5,000.
+ * Merging six of them into a 25,000 is not churn — it is the only way to build
+ * a rung the pool cannot otherwise reach.
+ */
+export function pickSplitInputs(
+  free: ExtendedVirtualCoin[],
+  amount: number,
+  dust: number,
+  maxInputs: number = SPLIT_MAX_INPUTS_PER_PIECE,
+): { inputs: ExtendedVirtualCoin[]; kind: SplitInputKind } {
+  const desc = [...free].sort((a, b) => b.value - a.value)
+
+  const single = desc.find((v) => v.value >= amount + dust)
+  if (single) return { inputs: [single], kind: 'peel' }
+
+  const chosen: ExtendedVirtualCoin[] = []
+  let sum = 0
+  for (const v of desc) {
+    if (chosen.length >= maxInputs) break
+    chosen.push(v)
+    sum += v.value
+    if (sum >= amount + dust) return { inputs: chosen, kind: 'consolidate' }
+  }
+  return { inputs: [], kind: 'none' }
+}
+
 export interface SplitOutcome {
   /** Pieces actually minted. */
   created: number
@@ -614,20 +671,44 @@ async function runSplit(
   let lastReason = 'no work planned'
   let retriesLeft = SPLIT_TRANSIENT_RETRIES
 
-  // One send per piece. Each iteration re-reads the pool so the previous
-  // piece's change becomes the next input, and each is independently safe —
-  // a HARD failure stops the run and reports partial progress rather than
-  // half-applying a batch; a transient one (see isTransientSplitFailure) costs
-  // this piece a re-read and a retry, not the rest of the run.
-  for (let i = 0; i < piecesPerRun; i++) {
-    // Refresh through the cache so this tick doubles as the hot path's
-    // snapshot warmer (a fresh, full getVtxos() either way).
-    const all = await houseVtxoCache.refresh(deps)
+  // The splitter reads its OWN view; it does not drive the shared snapshot.
+  //
+  // It still needs fresh data per piece — each piece spends the previous one's
+  // change, and a cold-start house has a single big coin, so a run that cannot
+  // see its own change mints exactly one piece. That part was never the
+  // problem. The problem was doing it THROUGH `houseVtxoCache`: /play and
+  // /api/tiers read that same cache, so they joined the splitter's in-flight
+  // full sync and then found it invalidated. MEASURED in production mid-run:
+  // `v4/play total=4984ms wallet:getVtxos=4974` — the entire request — against
+  // `wallet:getVtxos=0ms` warm, and /api/tiers at a 4,355ms median against 89ms.
+  //
+  // So: private reads here, and the coins this run consumes stay reserved for
+  // the WHOLE run rather than being unpinned per piece. /play therefore keeps
+  // its warm snapshot AND is kept off every coin we have spent, even though
+  // that snapshot still lists them. The shared cache is dropped once, at the
+  // end, so the next reader sees the new shape.
+  const readPrivate = () =>
+    timeoutReject(deps.wallet.getVtxos(), ARK_SYNC_TIMEOUT_MS, 'house getVtxos (split)')
 
+  let working = freeHouseVtxos(await readPrivate())
+  /** Every outpoint this run has committed to spending. */
+  const consumed = new Set<string>()
+
+  // One send per piece. A HARD failure stops the run and reports partial
+  // progress rather than half-applying a batch; a transient one (see
+  // isTransientSplitFailure) costs this piece a re-read and a retry, not the
+  // rest of the run.
+  for (let i = 0; i < piecesPerRun; i++) {
     // Deliberately synchronous inside the lock: no `await` between reading the
     // free set and pinning it, so nothing can reserve a coin in between.
     const picked = await selectionMutex.runExclusive(async () => {
-      const free = freeHouseVtxos(all)
+      // Reservations can change under us between pieces, so re-filter each
+      // time rather than trusting the view we read a moment ago.
+      const reserved = reservations.reservedOutpoints()
+      const free = working.filter((v) => {
+        const k = outpointKey(v.txid, v.vout)
+        return !consumed.has(k) && !reserved.has(k)
+      })
       const plan = planSplit({
         existing: free.map((v) => v.value),
         ladder,
@@ -638,35 +719,38 @@ async function runSplit(
         spendable: free.reduce((s, v) => s + v.value, 0),
         dust,
       })
-      if (plan.outputs.length === 0) return { input: null, amount: 0, reason: plan.reason }
+      if (plan.outputs.length === 0) {
+        return { inputs: [] as ExtendedVirtualCoin[], amount: 0, kind: 'none' as SplitInputKind, reason: plan.reason }
+      }
 
       const amount = plan.outputs[0]
-      // Peel from the LARGEST free coin: never consume an already
-      // correctly-sized small piece just to mint another one.
-      //
-      // Strictly `>= amount + dust`, so there is always real change above the
-      // dust floor. Allowing `value === amount` would spend a coin to recreate
-      // a coin of the same size — pure churn costing a tx — and would drive
-      // `sendBitcoin` down a zero-change path whose behaviour has not been
-      // verified. A pool of exactly-sized coins therefore reports why it can't
-      // mint rather than spinning; the plan is what says a rung is short, and
-      // no single coin of that exact size can usefully serve it.
-      const candidate = [...free]
-        .sort((a, b) => b.value - a.value)
-        .find((v) => v.value >= amount + dust)
-      if (!candidate) {
+      // Peel from one big coin, or consolidate several small ones when no
+      // single coin can fund the rung (see pickSplitInputs).
+      const { inputs, kind } = pickSplitInputs(free, amount, dust)
+      if (inputs.length === 0) {
+        const total = free.reduce((t, v) => t + v.value, 0)
         return {
-          input: null,
+          inputs: [] as ExtendedVirtualCoin[],
           amount: 0,
-          reason: `no free coin can fund a ${amount}-sat piece without dust change (largest free ${Math.max(0, ...free.map((v) => v.value))} sat)`,
+          kind,
+          reason: `cannot fund a ${amount}-sat piece — ${free.length} free coin(s) totalling ${total} sat, largest ${Math.max(0, ...free.map((v) => v.value))} sat`,
         }
       }
-      reservations.reserve(runId, [outpointKey(candidate.txid, candidate.vout)], 0)
-      return { input: candidate, amount, reason: plan.reason }
+      // Pin this attempt's inputs ON TOP of everything already spent —
+      // reserve() REPLACES a holder's pins, so the whole set is re-pinned each
+      // time. Keeping the run's spent coins pinned is what stops /play
+      // selecting one its warm snapshot still lists.
+      //
+      // `consumed` is NOT updated here: an attempt that fails has spent
+      // nothing, and marking it consumed at selection time permanently excluded
+      // the very coin a transient retry needs to try again.
+      const attempt = inputs.map((v) => outpointKey(v.txid, v.vout))
+      reservations.reserve(runId, [...consumed, ...attempt], 0)
+      return { inputs, amount, kind, reason: plan.reason }
     })
 
     lastReason = picked.reason
-    if (!picked.input) break
+    if (picked.inputs.length === 0) break
 
     // Set in the catch, acted on AFTER the finally has released the pin and
     // dropped the snapshot — so the retry re-reads a fresh view and re-pins,
@@ -677,27 +761,26 @@ async function runSplit(
         deps.wallet.sendBitcoin({
           address: ownAddress,
           amount: picked.amount,
-          selectedVtxos: [picked.input],
+          selectedVtxos: picked.inputs,
         }),
         ARK_SUBMIT_TIMEOUT_MS,
         'house pool split send',
       )
       created++
-      console.log(
-        `[house pool] minted a ${picked.amount}-sat piece from ${picked.input.txid.slice(0, 8)}…:${picked.input.vout} (${picked.input.value} sat)`,
-      )
+      // Spent for real now, so it stays excluded for the rest of the run.
+      for (const v of picked.inputs) consumed.add(outpointKey(v.txid, v.vout))
+      const from = picked.kind === 'consolidate'
+        ? `${picked.inputs.length} coins totalling ${picked.inputs.reduce((t, v) => t + v.value, 0)} sat`
+        : `${picked.inputs[0].txid.slice(0, 8)}…:${picked.inputs[0].vout} (${picked.inputs[0].value} sat)`
+      console.log(`[house pool] minted a ${picked.amount}-sat piece (${picked.kind}) from ${from}`)
+      // Private re-read so the next piece can spend this one's change. Costs
+      // the SPLITTER a sync; costs /play nothing.
+      working = freeHouseVtxos(await readPrivate())
     } catch (err) {
       lastReason = `split send failed after ${created} piece(s): ${err instanceof Error ? err.message : String(err)}`
       console.warn(`[house pool] ${lastReason}`)
       retryThisPiece = isTransientSplitFailure(err) && retriesLeft > 0
       if (!retryThisPiece) break
-    } finally {
-      // Release the pin either way. A timed-out send may still land, which is
-      // why the snapshot is dropped too — the refreshed view is what decides
-      // whether the coin is really gone, and the spentOutpoints deny-list
-      // catches one that arkd keeps listing after it has been spent.
-      reservations.release(runId)
-      houseVtxoCache.invalidate()
     }
 
     if (retryThisPiece) {
@@ -709,8 +792,18 @@ async function runSplit(
         `[house pool] transient split failure — retrying in ${SPLIT_RETRY_DELAY_MS}ms (${retriesLeft} retr${retriesLeft === 1 ? 'y' : 'ies'} left)`,
       )
       await new Promise((resolve) => setTimeout(resolve, SPLIT_RETRY_DELAY_MS))
+      // Drop the failed attempt's pin (it spent nothing) so the retry can pick
+      // those coins again, then re-read privately and try.
+      reservations.reserve(runId, [...consumed], 0)
+      working = freeHouseVtxos(await readPrivate())
     }
   }
+
+  // Release the run's pins and publish, once. The pins held for the whole run
+  // so /play never selected a coin we had spent; dropping the shared snapshot
+  // now means the next reader re-syncs and sees the new shape.
+  reservations.release(runId)
+  if (created > 0) houseVtxoCache.invalidate()
 
   if (created > 0) {
     const free = freeHouseVtxos(await houseVtxoCache.get(deps))

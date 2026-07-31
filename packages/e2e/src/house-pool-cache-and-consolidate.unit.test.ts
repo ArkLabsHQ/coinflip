@@ -210,28 +210,49 @@ describe('the splitter defers to renewal inside its horizon', () => {
   })
 
   /**
-   * The pool is FULL here — it is simply all inside the horizon. Reporting
-   * "0 free coins" would read as a broken house to whoever is on call.
+   * PREFER, don't REQUIRE — the invariant CI taught me.
+   *
+   * Requiring coins clear of renewal starved the splitter on any network whose
+   * batch lifetime is shorter than the 72h buffer, because then EVERY coin is
+   * always inside it. Regtest is exactly that, and the e2e failed 8 v4 tests
+   * with "deferring to renewal — all 1 free coin(s)" followed by "per-bet cap
+   * is 0 sat (25% of 0 sat free)": the pool was never built at all.
    */
-  it('says it is waiting for renewal rather than claiming an empty pool', async () => {
-    let sends = 0
+  it('still splits when EVERY coin is inside the horizon, rather than starving', async () => {
+    let pool: any[] = [withExpiry(hex64(6), 500_000, 1 * HOURS)] // nothing is clear
+    let n = 0
     const localDeps = {
       arkInfo: { dust: BigInt(DUST) },
       repos: { config: { get: async () => '[330,1000,5000,10000,50000]' } },
       wallet: {
-        getVtxos: async () => [withExpiry(hex64(4), 500_000, 1 * HOURS)],
+        getVtxos: async () => pool,
         getAddress: async () => HOUSE_ADDRESS,
-        sendBitcoin: async () => { sends++; return 'nope' },
+        sendBitcoin: async (params: any) => {
+          n++
+          const txid = String(n).padStart(2, '0').repeat(32).slice(0, 64)
+          const spent = new Set(params.selectedVtxos.map((v: any) => `${v.txid}:${v.vout}`))
+          const inSum = params.selectedVtxos.reduce((t: number, v: any) => t + v.value, 0)
+          pool = pool.filter((c: any) => !spent.has(`${c.txid}:${c.vout}`))
+          pool.push(withExpiry(txid, params.amount, 1 * HOURS))
+          if (inSum - params.amount > 0) {
+            pool.push({ ...withExpiry(txid, inSum - params.amount, 1 * HOURS), vout: 1 })
+          }
+          return txid
+        },
       },
     } as any
 
-    const r = await ensureHouseVtxoPool(localDeps, { piecesPerRun: 4, pieceSize: 5_000 })
+    const r = await ensureHouseVtxoPool(localDeps, { piecesPerRun: 3, pieceSize: 5_000 })
+    expect(r.created).toBe(3)
+  })
 
-    expect(r.created).toBe(0)
-    expect(sends).toBe(0)                              // no tx wasted
-    expect(r.reason).toMatch(/deferring to renewal/)
-    expect(r.reason).toMatch(/1 free coin/)            // names the real pool size
-    expect(r.reason).not.toMatch(/0 free coin/)
+  it('uses the clear coins and leaves the near-expiry ones to renewal', () => {
+    const due = withExpiry(hex64(7), 100_000, 1 * HOURS)
+    const clear = withExpiry(hex64(8), 100_000, 152 * HOURS)
+    // Both present -> only the clear one is offered.
+    expect(splittableHouseVtxos([due, clear]).map((v: any) => v.txid)).toEqual([clear.txid])
+    // Only the due one -> it is offered anyway, rather than nothing.
+    expect(splittableHouseVtxos([due]).map((v: any) => v.txid)).toEqual([due.txid])
   })
 
   it('splits normally once the pool is clear of the horizon', async () => {

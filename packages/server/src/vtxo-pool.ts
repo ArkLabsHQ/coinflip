@@ -588,9 +588,25 @@ export function pickSplitInputs(
  * double this buffer. The splitter simply waits its turn.
  */
 export function splittableHouseVtxos(all: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] {
-  const { selectable } = selectableHouseVtxos(all, RENEWAL_EXPIRY_BUFFER_MS)
   const reserved = reservations.reservedOutpoints()
-  return selectable.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
+  const unreserved = (vs: ExtendedVirtualCoin[]) =>
+    vs.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
+
+  const { selectable } = selectableHouseVtxos(all, RENEWAL_EXPIRY_BUFFER_MS)
+  const clear = unreserved(selectable)
+  if (clear.length > 0) return clear
+
+  // PREFER, don't REQUIRE. Requiring it starves the splitter on any network
+  // whose batch lifetime is shorter than the renewal buffer, because then EVERY
+  // coin is always inside the horizon. Regtest is exactly that: CI failed 8 v4
+  // tests with "deferring to renewal — all 1 free coin(s)" followed by "per-bet
+  // cap is 0 sat (25% of 0 sat free)" — the pool never got built at all.
+  //
+  // So when nothing is clear of renewal, fall back to /play's horizon. That is
+  // no worse than the behaviour this replaced, and it keeps the win where it
+  // matters: whenever healthy coins DO exist, they are used and the near-expiry
+  // ones are left for renewal.
+  return freeHouseVtxos(all)
 }
 
 export interface SplitOutcome {
@@ -722,26 +738,9 @@ async function runSplit(
   const readPrivate = () =>
     timeoutReject(deps.wallet.getVtxos(), ARK_SYNC_TIMEOUT_MS, 'house getVtxos (split)')
 
-  const firstRead = await readPrivate()
-  let working = splittableHouseVtxos(firstRead)
+  let working = splittableHouseVtxos(await readPrivate())
   /** Every outpoint this run has committed to spending. */
   const consumed = new Set<string>()
-
-  // Distinguish "nothing to split" from "everything is waiting on renewal".
-  // Without this the run would report "0 free coin(s)" while the pool is in
-  // fact full — just inside renewal's horizon — which reads as a broken pool
-  // to whoever is on call.
-  if (working.length === 0) {
-    const freeNow = freeHouseVtxos(firstRead)
-    if (freeNow.length > 0) {
-      const reason =
-        `deferring to renewal — all ${freeNow.length} free coin(s) are within ` +
-        `${Math.round(RENEWAL_EXPIRY_BUFFER_MS / 3600_000)}h of batch expiry; ` +
-        `splitting them would mint pieces renewal must immediately settle`
-      console.log(`[house pool] ${reason}`)
-      return { created: 0, reason }
-    }
-  }
 
   // One send per piece. A HARD failure stops the run and reports partial
   // progress rather than half-applying a batch; a transient one (see

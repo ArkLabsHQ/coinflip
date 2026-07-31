@@ -14,9 +14,6 @@
 # ── Stage 1: build the Vue client ─────────────────────────────────────────
 FROM node:20-alpine AS client
 WORKDIR /app
-# Vendored @arkade-os/sdk tarball (file: dep) must be present before install.
-COPY vendor/ ./vendor/
-
 # The client depends on `arkade-coinflip` (file:packages/lib), which in turn
 # depends on @arklabshq/contract-workflows-prototype. Both must be BUILT before
 # the root `npm install` can resolve `file:packages/lib` to a usable dist and
@@ -40,7 +37,7 @@ RUN npm run build
 
 # client (root install now resolves file:packages/lib to a built dist)
 WORKDIR /app
-COPY package.json package-lock.json* yarn.lock* ./
+COPY package.json package-lock.json* ./
 RUN npm install
 COPY src/ ./src/
 COPY public/ ./public/
@@ -60,8 +57,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY vendor/ ./vendor/
-
 # contract-workflows-prototype first (file: dep of lib; its dist must exist
 # before lib's install/build can resolve it).
 COPY packages/contract-workflows-prototype/package.json packages/contract-workflows-prototype/package-lock.json* ./packages/contract-workflows-prototype/

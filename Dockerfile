@@ -2,11 +2,6 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Vendored @arkade-os/sdk tarball — package.json depends on
-# `file:./vendor/...` while we track the arkade-script-final branch
-# (PR arkade-os/ts-sdk#319). Must be in place BEFORE npm install.
-COPY vendor/ ./vendor/
-
 # The client depends on `arkade-coinflip` (file:packages/lib), which depends on
 # @arklabshq/contract-workflows-prototype. Both must be BUILT before the root
 # `npm install` can resolve `file:packages/lib` and the client bundle can import
@@ -29,7 +24,7 @@ RUN npm run build
 
 # Copy package files
 WORKDIR /app
-COPY package.json package-lock.json* yarn.lock* ./
+COPY package.json package-lock.json* ./
 
 # Install dependencies (resolves file:packages/lib to the built dist)
 RUN npm install

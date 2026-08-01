@@ -4,6 +4,7 @@ import SetupView from '../views/SetupView.vue'
 import HistoryView from '../views/HistoryView.vue'
 import HowItWorksView from '../views/HowItWorksView.vue'
 import store from '../store'
+import { redirectFor } from './guard'
 
 const routes: Array<RouteRecordRaw> = [
   {
@@ -43,11 +44,9 @@ const router = createRouter({
 })
 
 router.beforeEach((to, _from, next) => {
-  if (to.meta.requiresWallet && !store.getters.isWalletInitialized) {
-    next('/setup')
-  } else {
-    next()
-  }
+  const redirect = redirectFor(to, store.getters.isWalletInitialized)
+  if (redirect) next(redirect)
+  else next()
 })
 
 export default router

@@ -13,6 +13,7 @@
 
 <script lang="ts">
 import { defineComponent, computed, ref, watch, onMounted, onBeforeUnmount, type PropType } from 'vue'
+import { diceNotation } from './diceNotation'
 import type { SkinState } from './types'
 
 let uid = 0
@@ -27,7 +28,6 @@ export default defineComponent({
     // The bet's `n` IS the die's side count (20 → d20, 100 → d100). The roll is
     // a single value in [0, n); win iff roll ≥ lo, i.e. "roll (lo+1)+".
     const sides = computed(() => props.state.odds?.n ?? 20)
-    const dieType = computed(() => `d${sides.value}`)
     const targetValue = computed(() => (props.state.odds?.lo ?? 0) + 1)
     const tint = ref<'' | 'win' | 'loss'>('')
     const ready = ref(false)
@@ -39,10 +39,17 @@ export default defineComponent({
     // Force the die onto `value` (1..sides) via the @ notation (provably fair).
     // Also the only thing that draws to the canvas — dice-box renders solely
     // while dice are in motion.
+    //
+    // `1d100@<value>` was wrong for 90% of rolls: dice-box has no hundred-sided
+    // die, so its `d100` is a TENS-DIGIT ten-sider (faces 10..100) and any other
+    // value is unrepresentable. It does not throw — it lands on a face it can
+    // show and downgrades the roll from "forced" to "natural". Reported as "dice
+    // does not show the right face", with a screenshot reading "rolled 75" beside
+    // a die on 30/90/10. diceNotation() emits a percentile PAIR instead.
     function showDie(value: number) {
       try {
         box?.clearDice?.()
-        box?.roll(`1${dieType.value}@${value}`)
+        box?.roll(diceNotation(sides.value, value))
       } catch (e) {
         console.warn('[dice] roll failed:', e)
       }

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { ArkTransaction } from '@arkade-os/sdk'
 import {
   gameActivityResolver,
+  isPayoutPending,
   loadGameRecords,
   txidOf,
   gameLabel,
@@ -167,5 +168,55 @@ describe('loadGameRecords', () => {
     expect(loadGameRecords()).toEqual([])
     localStorage.setItem('gameHistory', '{not json')
     expect(loadGameRecords()).toEqual([])
+  })
+})
+
+/**
+ * A player reported a settled game reading "won" beside "-7,027 sats" — the
+ * exact negative of the wager. The screenshot showed that row carrying ONE
+ * txid while every correct "+358 sats" row beside it carried two: the payout
+ * leg simply had not been indexed yet, so the group's net was the stake
+ * leaving and nothing coming back.
+ */
+describe('isPayoutPending', () => {
+  const won = (types: string[]) => ({
+    intent: { metadata: { winner: 'player' } },
+    txs: types.map((type) => ({ type })),
+  })
+  const lost = (types: string[]) => ({
+    intent: { metadata: { winner: 'house' } },
+    txs: types.map((type) => ({ type })),
+  })
+
+  it('flags a won game that has only the outgoing stake', () => {
+    // The reported row: co-fund indexed, payout not yet.
+    expect(isPayoutPending(won(['SENT']))).toBe(true)
+  })
+
+  it('clears once the incoming payout lands', () => {
+    expect(isPayoutPending(won(['SENT', 'RECEIVED']))).toBe(false)
+    // Order must not matter — `txs` is oldest-first, but which leg indexes
+    // first is not ours to guarantee.
+    expect(isPayoutPending(won(['RECEIVED', 'SENT']))).toBe(false)
+  })
+
+  it('never flags a LOST game, which correctly has no incoming leg', () => {
+    // The trap in the obvious "count the txids" approach: a lost game would
+    // read as forever-incomplete and sit on a spinner that never resolves.
+    expect(isPayoutPending(lost(['SENT']))).toBe(false)
+    expect(isPayoutPending(lost([]))).toBe(false)
+  })
+
+  it('stays clear when a win nets negative after fees', () => {
+    // A tiny stake at very high win odds can net below zero once fees are
+    // taken. The incoming leg still exists, so the row is complete and must be
+    // free to show its true negative net rather than pending forever.
+    expect(isPayoutPending(won(['SENT', 'RECEIVED']))).toBe(false)
+  })
+
+  it('ignores rows that are not games', () => {
+    expect(isPayoutPending({ txs: [{ type: 'SENT' }] })).toBe(false)
+    expect(isPayoutPending({ intent: {}, txs: [{ type: 'SENT' }] })).toBe(false)
+    expect(isPayoutPending({ intent: { metadata: {} }, txs: [{ type: 'SENT' }] })).toBe(false)
   })
 })

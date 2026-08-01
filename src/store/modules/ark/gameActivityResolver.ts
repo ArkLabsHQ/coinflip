@@ -93,6 +93,42 @@ export function txidOf(tx: ArkTransaction): string {
   return tx.key.arkTxid || tx.key.commitmentTxid || tx.key.boardingTxid
 }
 
+/** The shape of an SDK Activity this module needs; kept structural for testing. */
+export interface GameActivityView {
+  intent?: { metadata?: Record<string, unknown> }
+  txs: { type: string }[]
+}
+
+/**
+ * Is this a won game whose payout leg hasn't landed in the wallet's tx history
+ * yet — i.e. is the row's signed net currently a LIE?
+ *
+ * A row's label and its amount come from two sources with different latencies.
+ * The label ("won") is read from localStorage the instant the game resolves;
+ * the amount is the SDK's signed net over the member transactions it has
+ * actually indexed. In the gap between them a freshly-won game groups only its
+ * co-fund — the stake leaving — so the row reads "won" beside `-<stake>`,
+ * exactly as if the player had lost everything they bet.
+ *
+ * The SDK can't detect this itself: `Activity.settled` means "every member tx
+ * present is settled", not "every leg has arrived", so an incomplete group
+ * still reports Settled. Only we know a game has two sides.
+ *
+ * Counting txids against the game record does NOT work. A LOST game legitimately
+ * has just the outflow, so it would read as forever-incomplete; and the record
+ * stores up to three ids of which fewer appear as wallet transactions.
+ *
+ * So key off direction: a game the player won must eventually show an incoming
+ * transaction. Until one appears, the payout is still in flight. This also
+ * stays correct when a win nets negative after fees (a tiny stake at very high
+ * win odds) — the incoming leg exists, so the row is complete and free to show
+ * its true negative net.
+ */
+export function isPayoutPending(act: GameActivityView): boolean {
+  if (act.intent?.metadata?.winner !== 'player') return false
+  return !act.txs.some((t) => t.type === 'RECEIVED')
+}
+
 /**
  * Activity resolver that tags a game's transactions as one row, labelled with
  * the skin played. `prepare()` indexes the game records by txid so `resolve()` is a pure

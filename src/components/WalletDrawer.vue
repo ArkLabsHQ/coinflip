@@ -225,8 +225,9 @@
           </div>
           <div v-else class="tx-list">
             <div v-for="act in activityHistory" :key="act.id" class="tx-row">
-              <div class="tx-dir" :class="act.amount >= 0 ? 'received' : 'sent'">
-                <span v-if="act.amount >= 0">&#9660;</span>
+              <div class="tx-dir" :class="payoutPending(act) ? 'awaiting' : (act.amount >= 0 ? 'received' : 'sent')">
+                <span v-if="payoutPending(act)">&hellip;</span>
+                <span v-else-if="act.amount >= 0">&#9660;</span>
                 <span v-else>&#9650;</span>
               </div>
               <div class="tx-body">
@@ -235,7 +236,13 @@
                     {{ act.intent?.label || (act.amount >= 0 ? 'Received' : 'Sent') }}
                     <span v-if="act.intent?.kind === 'boarding'" class="tx-badge boarding">Boarding</span>
                   </span>
-                  <span class="tx-amount" :class="act.amount >= 0 ? 'received' : 'sent'">
+                  <!-- A won game whose payout leg hasn't been indexed yet groups
+                       ONLY the outgoing stake, so this net would read as the exact
+                       negative of the wager on a row that also says "won". Withhold
+                       the number until the incoming leg lands rather than publish a
+                       figure we know contradicts the outcome. -->
+                  <span v-if="payoutPending(act)" class="tx-amount awaiting">paying out&hellip;</span>
+                  <span v-else class="tx-amount" :class="act.amount >= 0 ? 'received' : 'sent'">
                     {{ act.amount >= 0 ? '+' : '−' }}{{ Math.abs(act.amount).toLocaleString() }}
                     <span class="tx-unit">sats</span>
                   </span>
@@ -244,8 +251,11 @@
                 <div v-if="detailOf(act)" class="tx-detail text-muted">{{ detailOf(act) }}</div>
                 <div class="tx-bottom">
                   <span class="tx-time text-muted">{{ formatRelative(act.createdAt) }}</span>
-                  <span class="tx-status" :class="act.settled ? 'settled' : 'pending'">
-                    {{ act.settled ? 'Settled' : 'Pending' }}
+                  <!-- `Activity.settled` means "every member tx PRESENT is
+                       settled", not "every leg has arrived", so an incomplete
+                       group still reports Settled. Say what's actually true. -->
+                  <span class="tx-status" :class="payoutPending(act) || !act.settled ? 'pending' : 'settled'">
+                    {{ payoutPending(act) ? 'Paying out' : (act.settled ? 'Settled' : 'Pending') }}
                   </span>
                 </div>
                 <!-- Every member tx, not just the first: a game groups its co-fund
@@ -389,6 +399,7 @@ import { encodeBip21 } from '@/utils/bip21'
 import { explorerTxUrl } from '@/utils/explorerUrl'
 import { getErrorMessage, friendlyError } from '@/utils/errors'
 import { logDiag, formatDiagnostics } from '@/utils/diagnosticsLog'
+import { isPayoutPending } from '@/store/modules/ark/gameActivityResolver'
 import { openLnurlSession, lnurlServerForNetwork, type LnurlSession } from '@/services/lnurlSession'
 import QrCode from '@/components/QrCode.vue'
 
@@ -558,6 +569,12 @@ export default defineComponent({
     // The one-line game summary the coinflip resolver attaches (stake · win
     // chance · outcome). Typed loosely because `metadata` is the SDK's free-form
     // Record<string, unknown> — anything but a string means "no summary".
+    // A won game groups its co-fund and its payout. Until the payout leg is
+    // indexed the group's net is just the stake leaving, which on a row also
+    // labelled "won" reads as losing the whole wager. See isPayoutPending.
+    const payoutPending = (act: { intent?: { metadata?: Record<string, unknown> }; txs: { type: string }[] }): boolean =>
+      isPayoutPending(act)
+
     const detailOf = (act: { intent?: { metadata?: Record<string, unknown> } }): string => {
       const d = act.intent?.metadata?.detail
       return typeof d === 'string' ? d : ''
@@ -1044,7 +1061,7 @@ export default defineComponent({
       hasUnsettledFunds, settleReasonLabel,
       hasUnconfirmedBoarding, unconfirmedBoardingAmount,
       hasRecoverable, recoverableAmount,
-      isMutinyTestnet, activityHistory, activityStatus, retryActivity, txidOf, formatRelative,
+      isMutinyTestnet, activityHistory, activityStatus, retryActivity, txidOf, formatRelative, payoutPending,
       detailOf, explorerUrlFor,
       tab,
       depositAmount, depositInvoice, depositLoading, depositStatus, depositStatusText,
@@ -1354,6 +1371,8 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 50%; font-size: 0.85rem; font-weight: 700;
   &.received { background: rgba(34, 197, 94, 0.12); color: var(--green, #22c55e); }
   &.sent { background: rgba(247, 201, 72, 0.12); color: var(--gold); }
+  // A won game still waiting on its payout leg: neither in nor out yet.
+  &.awaiting { background: rgba(56, 189, 248, 0.1); color: var(--blue); }
 }
 .tx-body { flex: 1; min-width: 0; }
 .tx-top {
@@ -1365,6 +1384,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   font-family: ui-monospace, monospace;
   &.received { color: var(--green, #22c55e); }
   &.sent { color: var(--gold); }
+  &.awaiting { color: var(--blue); font-size: 0.78rem; }
   .tx-unit { font-size: 0.7rem; color: var(--text-muted); margin-left: 3px; }
 }
 .tx-bottom {

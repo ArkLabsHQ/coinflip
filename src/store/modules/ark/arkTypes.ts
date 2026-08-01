@@ -128,6 +128,14 @@ export interface ArkState {
   vtxos: ArkVTXO[]
   boardingUtxos: BoardingUtxo[]
   walletBalance: WalletBalance | null
+  /**
+   * Whether `walletBalance` reflects a sync that DEMONSTRABLY completed, per
+   * the SDK's contract-sync state. A balance object exists (with `settled: 0`)
+   * before the vtxos land, so `walletBalance != null` cannot tell a real empty
+   * wallet from one that simply has not loaded — and we force a
+   * non-dismissible "fund me" drawer on that distinction. See `balanceReady`.
+   */
+  balanceSynced: boolean
   arkAddress: string | null
   boardingAddress: string | null
   /** Grouped activity view from the SDK's `wallet.getActivityHistory()` — a

@@ -46,6 +46,7 @@ const ark: Module<ArkState, RootState> = {
     vtxos: [],
     boardingUtxos: [],
     walletBalance: null,
+    balanceSynced: false,
     arkAddress: null,
     boardingAddress: null,
     activityHistory: [],
@@ -90,6 +91,9 @@ const ark: Module<ArkState, RootState> = {
     },
     SET_WALLET_BALANCE(state, balance: WalletBalance | null) {
       state.walletBalance = balance
+    },
+    SET_BALANCE_SYNCED(state, synced: boolean) {
+      state.balanceSynced = synced
     },
     SET_ARK_ADDRESS(state, address: string | null) {
       state.arkAddress = address

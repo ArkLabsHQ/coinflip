@@ -27,7 +27,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, computed, ref, watch, onUnmounted } from 'vue'
+import { defineComponent, computed, ref, watch } from 'vue'
 import { useStore } from 'vuex'
 import { useRoute, useRouter } from 'vue-router'
 import WalletDrawer from '@/components/WalletDrawer.vue'
@@ -59,39 +59,33 @@ export default defineComponent({
 
     // A connected wallet with a zero balance can't play — force the drawer open
     // (and non-dismissible, via :dismissible below) so the user funds it first.
-    // Gate on the SDK balance having ACTUALLY loaded (state.ark.walletBalance != null),
-    // not just 'connected' + a transient 0.
+    //
+    // The hard part is knowing the zero is REAL. `walletBalance != null` doesn't
+    // prove it: the SDK publishes a fully-formed balance object whose `settled`
+    // reads 0 while the vtxos are still syncing, so the null check passed and
+    // popped the drawer open on a funded wallet. Waiting a fixed 2s for the zero
+    // to persist didn't fix it either — that's a guess at how long a sync takes,
+    // and it lost the race often enough that users still saw it on load.
+    //
+    // `balanceSynced` replaces the guess with the SDK's own evidence that a sync
+    // completed (see store/modules/ark/balanceReady). It cannot be true before
+    // the balance is meaningful, so no grace period is needed.
     const looksUnfunded = computed(() =>
       isInitialized.value
       && arkStatus.value === 'connected'
-      && store.state.ark?.walletBalance != null
+      && store.state.ark?.balanceSynced === true
       && walletBalance.value === 0,
     )
-    // ...but the null check alone isn't enough: the SDK publishes a balance OBJECT
-    // as soon as it has one, and `settled` legitimately reads 0 for a beat while the
-    // vtxos are still syncing. That passed the null check and popped the drawer open,
-    // then the real balance landed and the prompt was never needed.
-    //
-    // So require the zero to PERSIST before acting on it. `forceWalletOpen` is the
-    // CONFIRMED-empty signal, and both consumers read it — the auto-open below and
-    // the drawer's `dismissible` binding. Deriving dismissible from the raw signal
-    // instead would swap one bug for another: a user who opened the wallet themselves
-    // would find it un-closable for the whole grace window on any transient zero.
-    const ZERO_BALANCE_GRACE_MS = 2000
+    // `forceWalletOpen` is the confirmed-empty signal, read both by the auto-open
+    // below and by the drawer's `dismissible` binding. It tracks `looksUnfunded`
+    // rather than latching, so funding the wallet immediately makes the drawer
+    // closable again — and a sync that later degrades stops us insisting the
+    // wallet is empty while we can't see it.
     const forceWalletOpen = ref(false)
-    let zeroTimer: ReturnType<typeof setTimeout> | null = null
     watch(looksUnfunded, (unfunded) => {
-      if (zeroTimer !== null) { clearTimeout(zeroTimer); zeroTimer = null }
-      if (!unfunded) { forceWalletOpen.value = false; return }
-      zeroTimer = setTimeout(() => {
-        zeroTimer = null
-        // Re-check at fire time: the balance may have arrived while we waited.
-        if (!looksUnfunded.value) return
-        forceWalletOpen.value = true
-        walletOpen.value = true
-      }, ZERO_BALANCE_GRACE_MS)
+      forceWalletOpen.value = unfunded
+      if (unfunded) walletOpen.value = true
     }, { immediate: true })
-    onUnmounted(() => { if (zeroTimer !== null) clearTimeout(zeroTimer) })
 
     // Deep-link support: /wallet (legacy) or /?wallet=open both open the drawer.
     function maybeOpenFromRoute() {

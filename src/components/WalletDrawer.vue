@@ -13,7 +13,13 @@
           </div>
         </div>
         <button v-if="dismissible" class="close-btn" @click="close" aria-label="Close">&times;</button>
-        <span v-else class="must-fund-hint">Add funds to play</span>
+        <!-- Reported as "'Add funds to play' button is not clickable. i have to
+             go to 'receive' -> 'request testnet faucet'". It was a <span>
+             wearing the pill styling below, so it read as a button and did
+             nothing. It's a real control now: it lands on the tab that funds
+             the wallet, and scrolls it back into view so a click always
+             visibly does something. -->
+        <button v-else class="must-fund-hint" @click="goFund">Add funds to play</button>
       </header>
 
       <!-- Connection state banner — gates all action buttons so we can't
@@ -40,7 +46,7 @@
         <button :class="['tab', { active: tab === 'settings' }]" @click="tab = 'settings'">Settings</button>
       </div>
 
-      <div class="drawer-body">
+      <div class="drawer-body" ref="bodyEl">
         <!-- ── Receive (unified BIP-21 + copy sheet) ─────────────── -->
         <section v-if="tab === 'receive'" class="section-body">
           <!-- Unified QR: encodes bitcoin:<onchain>?ark=<arkAddr>&lightning=<lnurl|bolt11>
@@ -361,7 +367,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, computed, ref, watch, onUnmounted } from 'vue'
+import { defineComponent, computed, ref, watch, nextTick, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
 import { isValidArkAddress, type ArkTransaction } from '@arkade-os/sdk'
@@ -1012,6 +1018,18 @@ export default defineComponent({
 
     function close() { if (props.dismissible) emit('update:open', false) }
 
+    /**
+     * Target of the header's "Add funds to play" button, shown when the drawer
+     * is force-open on an empty wallet. Receive is already the default tab, so
+     * a bare tab switch would often be an invisible no-op — scrolling the body
+     * back to the QR makes the click land whichever tab the user is on.
+     */
+    const bodyEl = ref<HTMLElement | null>(null)
+    function goFund() {
+      tab.value = 'receive'
+      nextTick(() => bodyEl.value?.scrollTo({ top: 0, behavior: 'smooth' }))
+    }
+
     // Balance updates are push-based via the SDK contract watcher (one SSE
     // stream + a 60s failsafe poll, wired in ark.ts `notifyIncomingFunds`), so
     // the drawer no longer needs its own balance poll.
@@ -1045,6 +1063,7 @@ export default defineComponent({
       restoring, showRestore, restoredGames, restoreError, restoreGames,
       outcomeLabel, outcomeClass, formatRestoreDate,
       copyText, toastMsg, toastType, copyDiagnostics,
+      bodyEl, goFund,
     }
   },
 })
@@ -1114,9 +1133,14 @@ export default defineComponent({
 }
 .close-btn:hover { color: var(--text); }
 .must-fund-hint {
+  font-family: inherit;
   font-size: 0.7rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
   color: var(--gold); background: rgba(247, 201, 72, 0.1);
   border: 1px solid var(--gold); border-radius: 999px; padding: 5px 12px; align-self: center;
+  cursor: pointer;
+  transition: background 0.15s ease;
+
+  &:hover { background: rgba(247, 201, 72, 0.2); }
 }
 
 .conn-banner {

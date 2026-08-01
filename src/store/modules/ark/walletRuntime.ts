@@ -49,6 +49,7 @@ import { putV4Forfeit, deleteV4Forfeit, loadV4Forfeits } from './v4ForfeitStashS
 import { buildV4SelfRefund, pickV4ClaimPath, rebuildJointPot, isAlreadySpentError, isTransientSelfRefundError } from './v4SelfRefund'
 import { stepCooperativeExit } from './v4CooperativeExit'
 import { makeCooperativeExitIo, V4_EXIT_FEE_SATS, V4_EXIT_BUMPER_MIN_SATS } from './v4CooperativeExitIo'
+import { isSyncConfirmed, type SyncSnapshot } from './balanceReady'
 import { createHash } from '@/utils/crypto'
 import { upgradeEsploraUrl } from '@/utils/esploraUrl'
 import { getErrorMessage } from '@/utils/errors'
@@ -466,12 +467,30 @@ export async function checkConnection({ commit, state, rootState, dispatch }: Ar
   }
 }
 
+/**
+ * The SDK's contract-sync freshness, or null if it can't be read. Never throws:
+ * this only decides whether we TRUST the balance, so a failure here must not
+ * take down the refresh that produced it.
+ */
+async function readSyncState(): Promise<SyncSnapshot | null> {
+  try {
+    const manager = await sdkWallet!.getContractManager()
+    return manager.getSyncState()
+  } catch {
+    return null
+  }
+}
+
 export async function refreshBalance({ commit, state, dispatch }: ArkCtx, payload?: { light?: boolean }) {
   if (!sdkWallet || state.status !== 'connected') return
 
   try {
     const balance = await sdkWallet.getBalance()
     commit('SET_WALLET_BALANCE', balance)
+    // getBalance() drives a real sync on its way through (getVtxos ->
+    // getContractsWithVtxos -> syncContracts), so the sync state read here
+    // describes THAT sync — which is what makes a zero balance believable.
+    commit('SET_BALANCE_SYNCED', isSyncConfirmed(await readSyncState()))
 
     // settlementConfig is false, so the SDK won't auto-settle boarding.
     // Settle it ourselves once funds land (guarded against concurrency).

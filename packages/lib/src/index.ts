@@ -88,6 +88,7 @@ export {
   serializeTapLeaf,
   deserializeTapLeaf,
   tapLeafHasKey,
+  tapLeafXOnlyKeys,
   buildCofundFromPlay,
   type BuiltJointPotTx,
   type BuiltExitTx,

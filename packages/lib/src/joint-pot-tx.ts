@@ -488,6 +488,31 @@ function indexOfBytes(hay: Uint8Array, needle: Uint8Array): number {
  * whole co-fund at finalize with INVALID_SIGNATURE. `tl[1]` is `script || leafVersion`
  * (btc-signer's TapLeafScript shape), so drop the trailing version byte first.
  */
+/**
+ * Every 32-byte x-only key pushed by a tap leaf's script, as hex.
+ *
+ * `tapLeafHasKey` answers "can we sign this?" and throws away the far more
+ * useful "then WHO can?". When a house VTXO fails that check its funds are
+ * stuck, and the only question worth asking is which key owns it — a previous
+ * house identity (so a key rotation or a DATA_DIR reset stranded it) or an
+ * unrelated one (so it arrived by some other route entirely).
+ *
+ * Tapscript pushes an x-only key as OP_PUSHBYTES_32 (0x20) followed by 32
+ * bytes, so scanning for that prefix recovers the candidates without needing a
+ * full script parser. Diagnostic only — never a signing decision.
+ */
+export function tapLeafXOnlyKeys(tl: TapLeafScript): string[] {
+  const script = tl?.[1] && tl[1].length > 1 ? tl[1].subarray(0, -1) : undefined
+  if (!script) return []
+  const out: string[] = []
+  for (let i = 0; i + 33 <= script.length; i++) {
+    if (script[i] !== 0x20) continue
+    out.push(Buffer.from(script.subarray(i + 1, i + 33)).toString('hex'))
+    i += 32
+  }
+  return [...new Set(out)]
+}
+
 export function tapLeafHasKey(tl: TapLeafScript, xOnlyKey: Uint8Array): boolean {
   const script = tl?.[1] && tl[1].length > 1 ? tl[1].subarray(0, -1) : undefined
   return !!script && indexOfBytes(script, xOnlyKey) >= 0

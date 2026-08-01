@@ -11,7 +11,7 @@ import { hex } from '@scure/base'
 import { ArkAddress, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import {
   CoinflipJointPotScript, commitDigit, randomUniformInt, computeRollV3,
-  serializeTapLeaf, tapLeafHasKey, foldSubDustStake, betRails,
+  serializeTapLeaf, tapLeafHasKey, tapLeafXOnlyKeys, foldSubDustStake, betRails,
   type SerializedHouseInput,
 } from 'arkade-coinflip'
 import { packets } from '@arklabshq/contract-workflows-prototype'
@@ -229,9 +229,19 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       const signable = free.filter((v) => tapLeafHasKey(v.forfeitTapLeafScript, housePubkey))
       if (signable.length < free.length) {
         const stuck = free.filter((v) => !tapLeafHasKey(v.forfeitTapLeafScript, housePubkey))
+        // Name the OWNER, not just the outpoint. Whether these are stranded by a
+        // previous house identity (a key rotation, or a DATA_DIR reset
+        // regenerating house_wallet) or arrived some other way is the whole
+        // open question, and the boolean guard alone can never answer it.
+        const detail = stuck
+          .map((v) => {
+            const keys = tapLeafXOnlyKeys(v.forfeitTapLeafScript)
+            return `${outpointKey(v.txid, v.vout)}=${v.value}sat[leafKeys:${keys.join('|') || 'none'}]`
+          })
+          .join(', ')
         console.warn(
           `[v4/play] skipping ${stuck.length} house VTXO(s) the current key can't co-sign ` +
-          `(stuck funds, needs recovery): ${stuck.map((v) => outpointKey(v.txid, v.vout)).join(', ')}`,
+          `(stuck funds, needs recovery). currentHouseKey=${hex.encode(housePubkey)} :: ${detail}`,
         )
       }
       const picked: ExtendedVirtualCoin[] = []

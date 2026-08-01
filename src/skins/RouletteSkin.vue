@@ -335,4 +335,18 @@ export default defineComponent({
 .band-label { font-weight: 700; }
 .band-range { color: var(--gold, #f7c948); font-weight: 800; }
 .band-pct { color: var(--text, #eeeef4); font-weight: 700; }
+
+/* Short viewports. 42vh alone still overflowed the page by 22px at 390x664 --
+   the most common iPhone viewport once browser chrome is showing -- and by 62px
+   at 375x553, which meant the FLIP button sat below the fold and the page
+   scrolled. Two steps, matching the tiers DiceSkin and PlayView use.
+ *
+ * Must come after the base `.wheel` rule: media queries carry no extra
+ * specificity, so these only win on document order. */
+@media (max-height: 720px) {
+  .wheel { width: min(280px, 38vh); height: min(280px, 38vh); }
+}
+@media (max-height: 640px) {
+  .wheel { width: min(280px, 30vh); height: min(280px, 30vh); }
+}
 </style>

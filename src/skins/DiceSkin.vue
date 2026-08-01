@@ -177,4 +177,15 @@ export default defineComponent({
 }
 .dice-rule.win { color: var(--green, #22c55e); }
 .dice-rule.loss { color: var(--red); }
+
+/* Very short viewports (a small phone with browser chrome showing). 36vh above
+   still left the FLIP button ~35px below the fold at 360x600, so step the stage
+   down further -- the die stays legible because the canvas fills the stage and
+   scales with it. Measured at 360x600: 35px of overflow -> 0.
+ *
+ * Must come after the base `.dice-stage` rule: media queries carry no extra
+ * specificity, so this only wins on document order. */
+@media (max-height: 640px) {
+  .dice-stage { height: min(240px, 28vh); }
+}
 </style>

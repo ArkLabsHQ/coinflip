@@ -1016,18 +1016,6 @@ export default defineComponent({
   position: relative;
 }
 
-/* Short viewports (mobile with browser chrome): tighten gaps so the tiers, odds
- *  slider, auto-play row and FLIP button all stay above the fold. The coin itself
- *  shrinks via a viewport-relative height in the skin. */
-@media (max-height: 720px) {
-  .play-page {
-    gap: 10px;
-    padding-top: 12px;
-    padding-bottom: 16px;
-  }
-  .skin-area { padding: 6px 0 8px; }
-}
-
 /* ── Top HUD ──────────────────────────────────────────────────────── */
 .top-hud {
   width: 100%;
@@ -1732,7 +1720,12 @@ export default defineComponent({
      together exceeded the viewport, pushing the right side off-screen.
      Shrink chip padding, drop the pnl 'SESSION' label, hide help button
      (still reachable via /how-it-works directly). */
-  .play-page { padding: 48px 12px 80px; }
+  /* HORIZONTAL ONLY. This was `padding: 48px 12px 80px`, and the shorthand was
+     the bug: it reset all four sides, so it silently clobbered the vertical
+     padding the short-viewport block at the end of this file sets to keep the
+     FLIP button above the fold. The 48/80 were themselves left over from the
+     floating balance pill that this route no longer shows. */
+  .play-page { padding-left: 12px; padding-right: 12px; }
   .skin-chip { padding: 5px 8px; font-size: 1rem; }
   .pnl-pill { padding: 5px 10px; font-size: 0.8rem; gap: 6px; }
   .pnl-scope { display: none; }
@@ -1761,5 +1754,32 @@ export default defineComponent({
 @media (max-width: 420px) {
   .odds-ends { font-size: 0.54rem; }
   .odds-ends span:last-child { text-align: right; }
+}
+
+/* Short viewports (a phone with browser chrome showing): tighten the vertical
+   rhythm so the bet slider, odds slider, auto-play row and FLIP button all stay
+   above the fold. The die shrinks via a viewport-relative height in the skin.
+ *
+ * MUST BE LAST. Media queries add no specificity, so these rules only beat the
+ * base `.play-page` / `.skin-area` declarations by document order. This block
+ * previously sat near the top of the file and lost to both of them, which put
+ * the FLIP button ~30px below the fold on a 390x664 viewport -- the whole
+ * reason the page scrolled on mobile at all. Measured: 774px -> 664px. */
+@media (max-height: 720px) {
+  .play-page {
+    gap: 10px;
+    padding-top: 12px;
+    padding-bottom: 16px;
+  }
+  .skin-area { padding: 6px 0 8px; }
+}
+
+/* Very short viewports (iPhone SE-class, ~375x553 once browser chrome is
+   showing). The die has its own tighter tier at this height (DiceSkin.vue) and
+   is already down to ~155px, so take the remaining slack from the gaps between
+   control groups instead -- 3 gaps x 18px is the largest remaining block of
+   whitespace. Measured at 375x553: 21px of overflow -> 0. */
+@media (max-height: 640px) {
+  .controls { gap: 10px; }
 }
 </style>

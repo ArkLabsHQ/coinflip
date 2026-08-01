@@ -61,7 +61,12 @@ html, body {
   font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.5;
+  // On mobile, `100vh` is the LARGE viewport -- the height with the browser
+  // chrome hidden -- so it exceeds what you can actually see and forces the
+  // page to scroll even when the content fits. `dvh` is the visible viewport.
+  // Declared as a pair: browsers without `dvh` keep the `vh` value.
   min-height: 100vh;
+  min-height: 100dvh;
   // Mobile responsiveness guard: a single overflowing child (a long txid,
   // a wide code block, a flex row at min-content) used to spawn a horizontal
   // scrollbar across the entire page. Clamping at the root prevents that
@@ -82,7 +87,9 @@ body {
 }
 
 #app {
+  // See the body rule above: `dvh` is the visible viewport on mobile.
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
 }

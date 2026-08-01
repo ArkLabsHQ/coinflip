@@ -228,4 +228,13 @@ export default defineComponent({
   .reel-cell { height: 54px; }
   .pip { font-size: 1.4rem; }
 }
+
+/* Short viewports (max-HEIGHT, unlike the width query above): the machine
+   overflowed the page by 17px at 375x553, putting FLIP below the fold. Take it
+   from the container's own slack -- the reels are deliberately untouched
+   because the spin keyframe translates by a hardcoded -128px tied to the cell
+   height, so resizing cells here would desync the animation. */
+@media (max-height: 640px) {
+  .slot-machine { min-height: 0; margin: 2px auto; }
+}
 </style>

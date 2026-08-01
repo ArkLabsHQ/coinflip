@@ -114,7 +114,11 @@ export default defineComponent({
 @import '@/assets/styles/casino.scss';
 
 .app {
+  // See casino.scss: `dvh` is the visible viewport on mobile, `vh` is the taller
+  // chrome-hidden one. All three shells (body, #app, .app) must agree, or the
+  // tallest still forces the page to scroll.
   min-height: 100vh;
+  min-height: 100dvh;
   position: relative;
 }
 

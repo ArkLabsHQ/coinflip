@@ -326,7 +326,11 @@ export default defineComponent({
 
 /* ─── Splash hero ─────────────────────────────────────────────── */
 .splash-page {
+  /* See casino.scss: `dvh` is the visible viewport on mobile. The last of the
+     four shells that used `vh`; leaving it would keep forcing a taller-than-
+     visible splash on phones. */
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;

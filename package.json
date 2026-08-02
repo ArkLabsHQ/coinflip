@@ -17,6 +17,7 @@
     "@3d-dice/dice-box-threejs": "^0.0.12",
     "@arkade-os/boltz-swap": "0.3.59",
     "@arkade-os/sdk": "0.4.54",
+    "@noble/hashes": "2.2.0",
     "@noble/secp256k1": "^2.1.0",
     "@scure/base": "^1.2.1",
     "@scure/bip39": "^2.0.1",

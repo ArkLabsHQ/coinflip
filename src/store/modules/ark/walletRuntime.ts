@@ -32,6 +32,7 @@ import {
   RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
   type ExtendedVirtualCoin, type ArkTxInput,
   type NetworkName,
+  Ramps,
 } from '@arkade-os/sdk'
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
 // Subpath import (not the package root) so the browser bundle doesn't pull in
@@ -73,6 +74,7 @@ import {
   patchStash as updateRefundStash,
 } from '@/utils/stashStore'
 import { isPermanentReclaimError, hasExhaustedReclaim } from '@/utils/reclaimBackoff'
+import { loadLimits } from '@/services/txLimits'
 
 /** The ark module's live ActionContext — the `ark.ts` wrappers pass it straight through. */
 type ArkCtx = ActionContext<ArkState, RootState>
@@ -437,6 +439,7 @@ export async function checkConnection({ commit, state, rootState, dispatch }: Ar
     try {
       const boltzApi = localStorage.getItem('boltz_api') || (info.network === 'regtest' ? 'http://localhost:9069' : undefined)
       await initSwaps(wallet, boltzApi)
+      loadLimits()
     } catch (swapErr) {
       console.warn('Swap service unavailable:', swapErr)
     }
@@ -562,6 +565,23 @@ export async function sendBitcoin(_ctx: ArkCtx, { address, amount }: { address: 
   const txid = await withTimeout(sdkWallet.sendBitcoin({ address, amount }), TIMEOUTS.submit, 'send')
 
   // Refresh balance after send
+  await _ctx.dispatch('refreshBalance')
+
+  return txid
+}
+
+export async function offboard(_ctx: ArkCtx, { address, amount }: { address: string; amount: number }) {
+  if (!sdkWallet) throw new Error('Wallet not connected')
+
+  // Ramps.offboard deducts its fee from the amount, so it owns the coin selection.
+  const { fees: feeInfo } = await sdkWallet.arkProvider.getInfo()
+
+  const txid = await withTimeout(
+    new Ramps(sdkWallet).offboard(address, feeInfo, BigInt(amount)),
+    TIMEOUTS.settle,
+    'offboard',
+  )
+
   await _ctx.dispatch('refreshBalance')
 
   return txid

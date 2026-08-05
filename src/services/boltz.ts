@@ -12,9 +12,11 @@ import {
   type CreateLightningInvoiceResponse,
   type SendLightningPaymentResponse,
   type BoltzSwapStatus,
+  type ArkToBtcResponse,
+  type BoltzChainSwap,
 } from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
-import type { Network } from '@arkade-os/boltz-swap'
+import type { Chain, Network } from '@arkade-os/boltz-swap'
 
 let swaps: ArkadeSwaps | null = null
 
@@ -84,6 +86,23 @@ export async function waitForDeposit(
   return requireSwaps().waitAndClaim(pendingSwap)
 }
 
+// ─── Withdraw (Ark → onchain): chain swap ─────────────────────────
+
+/** Creates the swap only — fund `arkAddress`, then `waitForOnchainSwap`. */
+export async function createOnchainSwap(
+  address: string,
+  amount: number,
+): Promise<ArkToBtcResponse> {
+  return requireSwaps().arkToBtc({ btcAddress: address, receiverLockAmount: amount })
+}
+
+/** Wait for an Ark→BTC chain swap to confirm, then claim it. */
+export async function waitForOnchainSwap(
+  pendingSwap: BoltzChainSwap,
+): Promise<{ txid: string }> {
+  return requireSwaps().waitAndClaimChain(pendingSwap)
+}
+
 // ─── Withdraw (Ark → LN): submarine swap ─────────────────────────
 
 export async function createLnWithdraw(
@@ -107,8 +126,14 @@ export async function getFees(): Promise<FeesResponse> {
   return requireSwaps().getFees()
 }
 
-export async function getLimits(): Promise<LimitsResponse> {
-  return requireSwaps().getLimits()
+/** Lightning limits by default; pass a pair for chain-swap limits. */
+export async function getLimits(
+  from?: Chain,
+  to?: Chain,
+): Promise<LimitsResponse> {
+  return from && to
+    ? requireSwaps().getLimits(from, to)
+    : requireSwaps().getLimits()
 }
 
 // ─── Swap Status & History ────────────────────────────────────────

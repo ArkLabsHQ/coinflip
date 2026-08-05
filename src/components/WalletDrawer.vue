@@ -390,6 +390,8 @@ import {
   getLimits,
   type FeesResponse,
   type LimitsResponse,
+  createOnchainSwap,
+  waitForOnchainSwap,
 } from '@/services/boltz'
 import { copyToClipboard } from '@/utils/clipboard'
 import { isCredentialBackupSupported, saveWalletToBrowser } from '@/utils/credentialBackup'
@@ -402,6 +404,7 @@ import { logDiag, formatDiagnostics } from '@/utils/diagnosticsLog'
 import { isPayoutPending } from '@/store/modules/ark/gameActivityResolver'
 import { openLnurlSession, lnurlServerForNetwork, type LnurlSession } from '@/services/lnurlSession'
 import QrCode from '@/components/QrCode.vue'
+import { validArkToBtc } from '@/services/txLimits'
 
 type SendKind = 'empty' | 'lightning' | 'lnurl' | 'ark' | 'onchain' | 'unknown'
 interface SendTarget { kind: SendKind; amountSats: number; address: string }
@@ -843,6 +846,32 @@ export default defineComponent({
         } else if (d.kind === 'lightning') {
           const result = await doLnWithdraw(d.address)
           sendStatusText.value = `Paid! Preimage ${result.preimage.slice(0, 16)}…`
+        } else if (d.kind === 'onchain') {
+          const sats = sendAmount.value as number
+          // Swap when Boltz can take the amount, else fall back to a collaborative exit.
+          if (validArkToBtc(sats)) {
+            sendStatusText.value = `Swapping ${sats} sats on-chain…`
+            const swap = await createOnchainSwap(d.address, sats)
+            // createOnchainSwap only creates it — fund the lockup to start the swap.
+            await store.dispatch('ark/sendBitcoin', {
+              address: swap.arkAddress, amount: swap.amountToPay,
+            })
+            sendStatusText.value = `Swap started · ${swap.pendingSwap.id.slice(0, 12)}…`
+            try {
+              const { txid } = await waitForOnchainSwap(swap.pendingSwap)
+              sendStatusText.value = `Sent! TX ${txid.slice(0, 12)}…`
+            } catch (e) {
+              // The swap manager owns recovery — log so a stranded swap isn't silent.
+              logDiag('error', 'onchain-swap', getErrorMessage(e))
+              throw e
+            }
+          } else {
+            sendStatusText.value = `Sending ${sats} sats…`
+            const txid = await store.dispatch('ark/offboard', {
+              address: d.address, amount: sats,
+            })
+            sendStatusText.value = `Sent! TX ${txid.slice(0, 12)}…`
+          }
         } else {
           const txid = await store.dispatch('ark/sendBitcoin', {
             address: d.address, amount: sendAmount.value,

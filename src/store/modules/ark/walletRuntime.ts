@@ -31,8 +31,10 @@ import {
   Transaction, ArkAddress,
   RestIndexerProvider, decodeTapscript, CSVMultisigTapscript,
   type ExtendedVirtualCoin, type ArkTxInput,
-  type NetworkName,
+  type NetworkName, type FeeInfo, type Network,
+  Ramps, Estimator,
 } from '@arkade-os/sdk'
+import { Address, OutScript } from '@scure/btc-signer'
 import { commitDigit as v3CommitDigit } from 'arkade-coinflip/dist/arkade-win'
 // Subpath import (not the package root) so the browser bundle doesn't pull in
 // the v2 transactions module, which imports Node's `crypto`.
@@ -40,6 +42,7 @@ import { buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx, encod
 import { packets as cwpPackets } from '@arklabshq/contract-workflows-prototype'
 import { initSwaps, destroySwaps } from '@/services/boltz'
 import { singleFlight } from '@/utils/singleFlight'
+import { serialQueue } from '@/utils/serialQueue'
 import {
   getNetwork, getGame as apiGetGame,
   v4Play, v4Cofund, v4CofundFinalize, v4Reveal, v4CooperativeExit,
@@ -73,6 +76,7 @@ import {
   patchStash as updateRefundStash,
 } from '@/utils/stashStore'
 import { isPermanentReclaimError, hasExhaustedReclaim } from '@/utils/reclaimBackoff'
+import { loadLimits } from '@/services/txLimits'
 
 /** The ark module's live ActionContext — the `ark.ts` wrappers pass it straight through. */
 type ArkCtx = ActionContext<ArkState, RootState>
@@ -147,6 +151,10 @@ export const NETWORK_PRESETS: Record<string, NetworkPreset> = {
 
 // SDK wallet instance (kept outside Vuex state to avoid reactivity issues with complex objects)
 let sdkWallet: Wallet | null = null
+
+// Runs settles one at a time — two at once can grab the same coin, and the loser hangs forever.
+const queueSettle = serialQueue()
+
 // Run at most ONE boarding-settle round at a time. settlementConfig is false (see
 // Wallet.create), so the client settles boarding itself — from BOTH the auto-settle
 // in refreshBalance AND the manual `settle` action. Two concurrent sdkWallet.settle()
@@ -181,7 +189,10 @@ const settleOnce = singleFlight(async (eventCallback?: (event: unknown) => void)
   // frees, wedging BOTH the manual "Settle" button and every future auto-settle
   // for the session. The timeout rejects → the slot frees → the next attempt
   // (or the SDK's own coalesce, once upstream) can proceed.
-  return withTimeout(w.settle(undefined, eventCallback as never), TIMEOUTS.settle, 'settle')
+  // Queued so an offboard can't register a competing intent mid-round.
+  return queueSettle(() =>
+    withTimeout(w.settle(undefined, eventCallback as never), TIMEOUTS.settle, 'settle'),
+  )
 })
 // Auto-reconnect backoff: a failed connect (slow load, arkd blip, reconnect
 // after a redeploy) schedules a retry with capped exponential backoff so the
@@ -437,6 +448,7 @@ export async function checkConnection({ commit, state, rootState, dispatch }: Ar
     try {
       const boltzApi = localStorage.getItem('boltz_api') || (info.network === 'regtest' ? 'http://localhost:9069' : undefined)
       await initSwaps(wallet, boltzApi)
+      loadLimits()
     } catch (swapErr) {
       console.warn('Swap service unavailable:', swapErr)
     }
@@ -562,6 +574,81 @@ export async function sendBitcoin(_ctx: ArkCtx, { address, amount }: { address: 
   const txid = await withTimeout(sdkWallet.sendBitcoin({ address, amount }), TIMEOUTS.submit, 'send')
 
   // Refresh balance after send
+  await _ctx.dispatch('refreshBalance')
+
+  return txid
+}
+
+// The scriptPubKey behind a Bitcoin address. Decodes against OUR network only:
+// a bech32 address from another chain yields the same script, so accepting one
+// would send real coins to a key that exists nowhere on this chain.
+export function offboardScript(address: string, network: Network): Uint8Array {
+  try {
+    return OutScript.encode(Address(network).decode(address))
+  } catch {
+    throw new Error(`That doesn't look like a valid Bitcoin address for this network: ${address}`)
+  }
+}
+
+// What the server charges to pay an address on-chain — the only fee taken out of the amount.
+export function offboardOutputFee(
+  feeInfo: FeeInfo,
+  address: string,
+  amount: number,
+  network: Network,
+): number {
+  return new Estimator(feeInfo.intentFee ?? {})
+    .evalOnchainOutput({ amount: BigInt(amount), script: hex.encode(offboardScript(address, network)) })
+    .satoshis
+}
+
+// What an exit costs: the recipient gets `amount`, `total` leaves the wallet.
+export async function quoteOffboard(_ctx: ArkCtx, { address, amount }: { address: string; amount: number }) {
+  const w = sdkWallet
+  if (!w) throw new Error('Wallet not connected')
+
+  const { fees: feeInfo } = await w.arkProvider.getInfo()
+  const est = new Estimator(feeInfo.intentFee ?? {})
+
+  // An exit spends every coin you hold, so every coin is charged whatever you send.
+  const vtxos = await w.getVtxos({ withRecoverable: true, withUnrolled: false })
+  let inputFees = 0
+  for (const v of vtxos) {
+    const f = est.evalOffchainInput({
+      amount: BigInt(v.value),
+      type: v.isSwept ? 'recoverable' : 'vtxo',
+      weight: 0,
+      birth: v.createdAt,
+    }).satoshis
+    // Ramps skips coins whose fee exceeds their value, so they cost nothing.
+    if (f >= v.value) continue
+    inputFees += f
+  }
+
+  const fee = offboardOutputFee(feeInfo, address, amount, w.network) + inputFees
+  return { amount, fee, total: amount + fee }
+}
+
+export async function offboard(_ctx: ArkCtx, { address, amount }: { address: string; amount: number }) {
+  const w = sdkWallet
+  if (!w) throw new Error('Wallet not connected')
+
+  const { fees: feeInfo } = await w.arkProvider.getInfo()
+
+  // Ramps subtracts this same fee again, so the recipient ends up with exactly `amount`.
+  // Not the quote's `total`: the per-coin fees come out of the change, not the payout.
+  const grossedUp = BigInt(amount + offboardOutputFee(feeInfo, address, amount, w.network))
+
+  // Queued: an offboard is a settle, so it must not run alongside the auto-settle.
+  const txid = await queueSettle(() =>
+    withTimeout(
+      new Ramps(w).offboard(address, feeInfo, grossedUp),
+      TIMEOUTS.settle,
+      'offboard',
+    ),
+  )
+
+  // Outside the queue — refreshBalance can itself fire the boarding auto-settle.
   await _ctx.dispatch('refreshBalance')
 
   return txid

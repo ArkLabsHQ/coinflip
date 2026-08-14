@@ -12,9 +12,12 @@ import {
   type CreateLightningInvoiceResponse,
   type SendLightningPaymentResponse,
   type BoltzSwapStatus,
+  type ArkToBtcResponse,
+  type BoltzChainSwap,
+  type ChainFeesResponse,
 } from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
-import type { Network } from '@arkade-os/boltz-swap'
+import type { Chain, Network } from '@arkade-os/boltz-swap'
 
 let swaps: ArkadeSwaps | null = null
 
@@ -84,6 +87,23 @@ export async function waitForDeposit(
   return requireSwaps().waitAndClaim(pendingSwap)
 }
 
+// ─── Withdraw (Ark → onchain): chain swap ─────────────────────────
+
+/** Creates the swap only — fund `arkAddress`, then `waitForOnchainSwap`. */
+export async function createOnchainSwap(
+  address: string,
+  amount: number,
+): Promise<ArkToBtcResponse> {
+  return requireSwaps().arkToBtc({ btcAddress: address, receiverLockAmount: amount })
+}
+
+/** Wait for an Ark→BTC chain swap to confirm, then claim it. */
+export async function waitForOnchainSwap(
+  pendingSwap: BoltzChainSwap,
+): Promise<{ txid: string }> {
+  return requireSwaps().waitAndClaimChain(pendingSwap)
+}
+
 // ─── Withdraw (Ark → LN): submarine swap ─────────────────────────
 
 export async function createLnWithdraw(
@@ -107,8 +127,45 @@ export async function getFees(): Promise<FeesResponse> {
   return requireSwaps().getFees()
 }
 
-export async function getLimits(): Promise<LimitsResponse> {
-  return requireSwaps().getLimits()
+// Ark→BTC chain-swap fees: a percentage plus fixed miner fees. 
+export async function getArkToBtcFees(): Promise<ChainFeesResponse> {
+  return requireSwaps().getFees('ARK', 'BTC')
+}
+
+// Boltz's miner fees, charged whatever the amount.
+export function arkToBtcFixedFee(fees: ChainFeesResponse): number {
+  return fees.minerFees.server + fees.minerFees.user.claim + fees.minerFees.user.lockup
+}
+
+// What a swap of `sats` costs the sender. The percentage is charged on the whole
+// locked amount, miner fees included — verified against Boltz's own amountToPay.
+export function arkToBtcTotal(sats: number, fees: ChainFeesResponse): number {
+  const fixed = arkToBtcFixedFee(fees)
+  return sats + fixed + Math.ceil(((sats + fixed) * fees.percentage) / 100)
+}
+
+// The most you can swap when the fee also comes out of your balance.
+export function arkToBtcMax(balance: number, fees: ChainFeesResponse): number {
+  const fixed = arkToBtcFixedFee(fees)
+  return Math.max(0, Math.floor(balance / (1 + fees.percentage / 100)) - fixed - 1)
+}
+
+export async function maxArkToBtcSats(balance: number): Promise<number> {
+  return arkToBtcMax(balance, await getArkToBtcFees())
+}
+
+export async function estimateArkToBtcTotal(sats: number): Promise<number> {
+  return arkToBtcTotal(sats, await getArkToBtcFees())
+}
+
+/** Lightning limits by default; pass a pair for chain-swap limits. */
+export async function getLimits(
+  from?: Chain,
+  to?: Chain,
+): Promise<LimitsResponse> {
+  return from && to
+    ? requireSwaps().getLimits(from, to)
+    : requireSwaps().getLimits()
 }
 
 // ─── Swap Status & History ────────────────────────────────────────

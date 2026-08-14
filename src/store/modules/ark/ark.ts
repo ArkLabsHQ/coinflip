@@ -232,6 +232,16 @@ const ark: Module<ArkState, RootState> = {
       return walletRuntime.sendBitcoin(ctx, payload)
     },
 
+    /** Collaborative exit to an on-chain address — impl in walletRuntime.ts. */
+    offboard(ctx, payload: { address: string; amount: number }) {
+      return walletRuntime.offboard(ctx, payload)
+    },
+
+    /** What an offboard would cost, without sending — impl in walletRuntime.ts. */
+    quoteOffboard(ctx, payload: { address: string; amount: number }) {
+      return walletRuntime.quoteOffboard(ctx, payload)
+    },
+
     /** Manual settle (shares the boarding-settle singleFlight) — impl in walletRuntime.ts. */
     settle(ctx, params?: { eventCallback?: (event: unknown) => void }) {
       return walletRuntime.settle(ctx, params)

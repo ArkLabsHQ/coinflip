@@ -185,15 +185,27 @@
               <button class="btn-outline btn-sm" @click="sendSetMax">MAX</button>
             </div>
 
+            <div v-if="sendFeeHint" class="hint">{{ sendFeeHint }}</div>
+
             <div v-if="sendStatus === 'pending'" class="status-badge pending">{{ sendStatusText }}</div>
             <div v-else-if="sendStatus === 'error'" class="status-badge error">{{ sendStatusText }}</div>
 
-            <button class="btn-primary" :disabled="!canSend"
+            <!-- The dust retry replaces Send: the original amount can't go through. -->
+            <button v-if="dustOffer" class="btn-primary" :disabled="sendLoading" @click="sendWithDust">
+              {{ sendLoading
+                ? 'Sending…'
+                : `Send ${(dustOffer.amount + dustOffer.change).toLocaleString()} instead` }}
+            </button>
+            <button v-else class="btn-primary" :disabled="!canSend"
                     :title="!ready ? 'Connecting to Ark…' : ''" @click="doSend">
               {{ sendLoading ? 'Sending…' : sendButtonLabel }}
             </button>
 
-            <div v-if="sendInput.trim() && sendDetected.kind === 'unknown'" class="hint error-hint">
+            <div v-if="wrongNetworkAddress" class="hint error-hint">
+              That Bitcoin address belongs to a different network —
+              this wallet is on {{ serverNetwork || 'an unknown network' }}.
+            </div>
+            <div v-else-if="sendInput.trim() && sendDetected.kind === 'unknown'" class="hint error-hint">
               Unrecognized destination — paste a Lightning invoice/address, LNURL, Ark, or Bitcoin address.
             </div>
             <div v-else-if="sendDetected.kind === 'lightning' && sendDetected.amountSats === 0" class="hint error-hint">
@@ -380,7 +392,11 @@
 import { defineComponent, computed, ref, watch, nextTick, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
-import { isValidArkAddress, type ArkTransaction } from '@arkade-os/sdk'
+import {
+  isValidArkAddress, DustChangeError, networks,
+  type NetworkName, type ArkTransaction,
+} from '@arkade-os/sdk'
+import { Address } from '@scure/btc-signer'
 import {
   getSwaps,
   createLnDeposit as doLnDeposit,
@@ -390,6 +406,10 @@ import {
   getLimits,
   type FeesResponse,
   type LimitsResponse,
+  createOnchainSwap,
+  waitForOnchainSwap,
+  estimateArkToBtcTotal,
+  maxArkToBtcSats,
 } from '@/services/boltz'
 import { copyToClipboard } from '@/utils/clipboard'
 import { isCredentialBackupSupported, saveWalletToBrowser } from '@/utils/credentialBackup'
@@ -402,6 +422,7 @@ import { logDiag, formatDiagnostics } from '@/utils/diagnosticsLog'
 import { isPayoutPending } from '@/store/modules/ark/gameActivityResolver'
 import { openLnurlSession, lnurlServerForNetwork, type LnurlSession } from '@/services/lnurlSession'
 import QrCode from '@/components/QrCode.vue'
+import { validArkToBtc } from '@/services/txLimits'
 
 type SendKind = 'empty' | 'lightning' | 'lnurl' | 'ark' | 'onchain' | 'unknown'
 interface SendTarget { kind: SendKind; amountSats: number; address: string }
@@ -414,10 +435,24 @@ interface SendTarget { kind: SendKind; amountSats: number; address: string }
  *   3. Lightning Address (`user@host`) / LNURL (bech32) / HTTPS LNURL
  *   4. Ark address
  *   5. On-chain Bitcoin address
+ *
+ * `network` is the chain the wallet is on. A Bitcoin address from a DIFFERENT
+ * chain decodes to the very same script, so accepting one would send real coins
+ * to a key that exists nowhere here — hence it is rejected as unknown.
  */
-function detectSend(raw: string): SendTarget {
+function detectSend(raw: string, network: NetworkName | null): SendTarget {
   const s = (raw || '').trim()
   if (!s) return { kind: 'empty', amountSats: 0, address: '' }
+
+  const onOurChain = (addr: string): boolean => {
+    if (!network) return false // network unknown — refuse rather than guess
+    try {
+      Address(networks[network]).decode(addr)
+      return true
+    } catch {
+      return false
+    }
+  }
 
   if (/^bitcoin:/i.test(s)) {
     const body = s.replace(/^bitcoin:/i, '')
@@ -430,7 +465,7 @@ function detectSend(raw: string): SendTarget {
     const amountSats = amtBtc ? Math.round(parseFloat(amtBtc) * 1e8) : 0
     if (ark && isValidArkAddress(ark)) return { kind: 'ark', amountSats, address: ark }
     if (ln) return { kind: 'lightning', amountSats: invoiceSats(ln), address: ln }
-    if (addr) return { kind: 'onchain', amountSats, address: addr }
+    if (addr && onOurChain(addr)) return { kind: 'onchain', amountSats, address: addr }
     return { kind: 'unknown', amountSats: 0, address: '' }
   }
   // BOLT11 — preserve as-is; if the input has a `lightning:` prefix, strip it
@@ -446,7 +481,7 @@ function detectSend(raw: string): SendTarget {
   if (isValidArkAddress(s)) {
     return { kind: 'ark', amountSats: 0, address: s }
   }
-  if (/^(bc1|tb1|bcrt1|[123mn])/.test(s)) {
+  if (onOurChain(s)) {
     return { kind: 'onchain', amountSats: 0, address: s }
   }
   return { kind: 'unknown', amountSats: 0, address: s }
@@ -482,7 +517,6 @@ export default defineComponent({
     async function reconnect() {
       try { await store.dispatch('ark/checkConnection') } catch { /* shown via banner */ }
     }
-
 
     // Auto-trigger connection when the drawer opens and we're not yet connected.
     // Also fetch fees+limits once we are.
@@ -784,7 +818,47 @@ export default defineComponent({
     const sendStatus = ref<'idle' | 'pending' | 'success' | 'error'>('idle')
     const sendStatusText = ref('')
 
-    const sendDetected = computed<SendTarget>(() => detectSend(sendInput.value))
+    const sendDetected = computed<SendTarget>(() =>
+      detectSend(sendInput.value, store.getters['ark/serverNetwork']),
+    )
+    const serverNetwork = computed<string | null>(() => store.getters['ark/serverNetwork'])
+    // A real Bitcoin address, just for the wrong chain — say so rather than
+    // calling it unrecognised.
+    const wrongNetworkAddress = computed(() =>
+      sendDetected.value.kind === 'unknown'
+      && /^(bc1|tb1|bcrt1|[123mn])/.test(sendInput.value.trim()),
+    )
+
+    // Long because an exit quote reads every coin — short waits flood the wallet.
+    const FEE_HINT_DEBOUNCE_MS = 1000
+    // Set when a send fails because the leftover would be too small to keep.
+    const dustOffer = ref<{ change: number; amount: number; address: string } | null>(null)
+    const sendFeeHint = ref('')
+    let feeTimer: ReturnType<typeof setTimeout> | null = null
+    let feeSeq = 0
+    watch([sendInput, sendAmount], () => {
+      sendFeeHint.value = ''
+      // A new amount needs the normal Send button back, not the old dust retry.
+      dustOffer.value = null
+      if (feeTimer) clearTimeout(feeTimer)
+      const d = sendDetected.value
+      const sats = sendAmount.value
+      if (d.kind !== 'onchain' || !sats || sats <= 0) return
+      const seq = ++feeSeq
+      feeTimer = setTimeout(async () => {
+        try {
+          const total = validArkToBtc(sats)
+            ? await estimateArkToBtcTotal(sats)
+            : (await store.dispatch('ark/quoteOffboard', { address: d.address, amount: sats })).total
+          if (seq !== feeSeq) return
+          sendFeeHint.value =
+            `Recipient gets ${sats.toLocaleString()} · you pay ~${total.toLocaleString()} sats ` +
+            `(fee ~${(total - sats).toLocaleString()})`
+        } catch { /* leave blank rather than guess */ }
+      }, FEE_HINT_DEBOUNCE_MS)
+    })
+    onUnmounted(() => { if (feeTimer) clearTimeout(feeTimer) })
+
     const sendNeedsAmount = computed(() =>
       sendDetected.value.kind === 'ark' ||
       sendDetected.value.kind === 'onchain' ||
@@ -814,9 +888,33 @@ export default defineComponent({
       return false
     })
 
-    function sendSetMax() {
-      const balance = store.getters['ark/balance'] || BigInt(0)
-      sendAmount.value = Math.max(0, Number(balance) - 300)
+    // The most you can send once the fee is taken out of the same balance.
+    async function sendSetMax() {
+      const balance = Number(store.getters['ark/balance'] || 0)
+      // Only on-chain sends pay a fee big enough to matter here.
+      if (sendDetected.value.kind !== 'onchain') {
+        sendAmount.value = Math.max(0, balance - 300)
+        return
+      }
+      try {
+        // Leave at least dust behind — a smaller remainder can't be a change output.
+        const dust = Number(store.getters['ark/dust'] ?? 330)
+        // Boltz charges a percentage of the amount, so the answer is one calculation.
+        const swapMax = await maxArkToBtcSats(balance - dust)
+        if (validArkToBtc(swapMax)) {
+          sendAmount.value = swapMax
+          return
+        }
+        // An exit charges for the coins it spends, so its fee barely moves with the
+        // amount — one quote at the full balance gives the room to leave for it.
+        const { fee } = await store.dispatch('ark/quoteOffboard', {
+          address: sendDetected.value.address, amount: balance,
+        })
+        sendAmount.value = Math.max(0, balance - fee)
+      } catch {
+        // No quote — fall back to the old flat reserve; the send still pre-checks.
+        sendAmount.value = Math.max(0, balance - 300)
+      }
     }
 
     async function doSend() {
@@ -828,6 +926,8 @@ export default defineComponent({
         d.kind === 'lightning' ? 'Paying via Lightning…' :
         d.kind === 'lnurl' ? 'Resolving Lightning address…' :
         'Sending…'
+      // Captured for the catch: the refs can move while the send is in flight.
+      let sats = 0
       try {
         if (d.kind === 'lnurl') {
           // LNURL-pay: hit the recipient's endpoint, get a BOLT11 for the
@@ -843,6 +943,49 @@ export default defineComponent({
         } else if (d.kind === 'lightning') {
           const result = await doLnWithdraw(d.address)
           sendStatusText.value = `Paid! Preimage ${result.preimage.slice(0, 16)}…`
+        } else if (d.kind === 'onchain') {
+          sats = sendAmount.value as number
+
+          // Swap when Boltz can take the amount, else fall back to a collaborative exit.
+          // Send is Receiver-exact: the sender pays for the fees.
+          if (validArkToBtc(sats)) {
+            const total = await estimateArkToBtcTotal(sats)
+            const balance = Number(store.getters['ark/balance'] || 0)
+            if (total > balance) {
+              throw new Error(`This send costs about ${total} sats with fees, but your balance is ${balance}.`)
+            }
+
+            sendStatusText.value = `Swapping ${sats} sats on-chain…`
+            const swap = await createOnchainSwap(d.address, sats)
+            logDiag('info', 'onchain-swap',
+              `estimate ${total} vs amountToPay ${swap.amountToPay} (diff ${swap.amountToPay - total})`)
+            try {
+              await store.dispatch('ark/sendBitcoin', {
+                address: swap.arkAddress, amount: swap.amountToPay,
+              })
+            } catch (e) {
+              // A thrown send doesn't prove the funds stayed put — log the id so the lockup is traceable.
+              logDiag('error', 'onchain-swap', `funding ${swap.pendingSwap.id} failed: ${getErrorMessage(e)}`)
+              throw e
+            }
+
+            sendStatusText.value = `Swap started · ${swap.pendingSwap.id.slice(0, 12)}…`
+
+            try {
+              const { txid } = await waitForOnchainSwap(swap.pendingSwap)
+              sendStatusText.value = `Sent! TX ${txid.slice(0, 12)}…`
+            } catch (e) {
+              // The swap manager owns recovery — log so a stranded swap isn't silent.
+              logDiag('error', 'onchain-swap', `swap ${swap.pendingSwap.id} failed: ${getErrorMessage(e)}`)
+              throw e
+            }
+          } else {
+            sendStatusText.value = `Sending ${sats} sats…`
+            const txid = await store.dispatch('ark/offboard', {
+              address: d.address, amount: sats,
+            })
+            sendStatusText.value = `Sent! TX ${txid.slice(0, 12)}…`
+          }
         } else {
           const txid = await store.dispatch('ark/sendBitcoin', {
             address: d.address, amount: sendAmount.value,
@@ -854,10 +997,44 @@ export default defineComponent({
         store.dispatch('ark/refreshBalance')
       } catch (err) {
         sendStatus.value = 'error'
+        // The leftover would be too small to keep, so offer to send it too.
+        if (err instanceof DustChangeError) {
+          // From the send that just failed — the refs may have moved since.
+          dustOffer.value = { change: Number(err.change), amount: sats, address: d.address }
+          sendStatusText.value = `This would leave ${err.change} sats behind, too small to keep.`
+        } else {
+          dustOffer.value = null
+          sendStatusText.value = err instanceof Error ? err.message : 'Send failed'
+        }
+        showToast(sendStatusText.value, 'error')
+      } finally {
+        sendLoading.value = false
+      }
+    }
+
+    // Send the unkeepable leftover along with the amount, so nothing is stranded.
+    async function sendWithDust() {
+      const offer = dustOffer.value
+      if (!offer || sendLoading.value) return
+      const total = offer.amount + offer.change
+      sendLoading.value = true
+      sendStatus.value = 'pending'
+      sendStatusText.value = `Sending ${total} sats…`
+      try {
+        const txid = await store.dispatch('ark/offboard', {
+          address: offer.address, amount: total,
+        })
+        sendStatusText.value = `Sent! TX ${txid.slice(0, 12)}…`
+        sendStatus.value = 'success'
+        showToast('Sent!')
+        store.dispatch('ark/refreshBalance')
+      } catch (err) {
+        sendStatus.value = 'error'
         sendStatusText.value = err instanceof Error ? err.message : 'Send failed'
         showToast(sendStatusText.value, 'error')
       } finally {
         sendLoading.value = false
+        dustOffer.value = null
       }
     }
 
@@ -866,6 +1043,7 @@ export default defineComponent({
       sendAmount.value = null
       sendStatus.value = 'idle'
       sendStatusText.value = ''
+      dustOffer.value = null
     }
 
     const settleLoading = ref(false)
@@ -1070,7 +1248,7 @@ export default defineComponent({
       lnurlStatus, lnurlError,
       sendInput, sendAmount, sendLoading, sendStatus, sendStatusText,
       sendDetected, sendNeedsAmount, sendKindLabel, sendButtonLabel, canSend,
-      sendSetMax, doSend, resetSend,
+      sendFeeHint, sendSetMax, doSend, resetSend, dustOffer, sendWithDust, wrongNetworkAddress, serverNetwork,
       settleLoading,
       fees, limits, calcReceive,
       createLnDeposit, resetDeposit, settleFunds,

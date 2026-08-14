@@ -495,7 +495,7 @@ export async function refreshBalance({ commit, state, dispatch }: ArkCtx, payloa
     // settlementConfig is false, so the SDK won't auto-settle boarding.
     // Settle it ourselves once funds land (guarded against concurrency).
     // Fire-and-forget: the round is slow; the next refresh shows the result.
-    if (balance.boarding.total > 0 && !settleOnce.active) {
+    if (balance.boarding.confirmed > 0 && !settleOnce.active) {
       settleOnce()
         .then(() => dispatch('refreshBalance', { light: true }))
         .catch((e) => console.warn('boarding settle failed:', e))

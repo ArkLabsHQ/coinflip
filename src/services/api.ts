@@ -86,6 +86,8 @@ export function getTiers(): Promise<TiersResponse> {
  *  null means the client can't play (playV4Game aborts before funding). */
 export interface NetworkResponse {
   network: string
+  operatorUrl: string
+  esploraUrl: string | null
   emulator: null | {
     url: string
     signerPubkey: string
@@ -96,24 +98,17 @@ export interface NetworkResponse {
    *  and the client falls back gracefully if it's ever absent. */
   protocolVersion?: 'v4'
 }
-export async function getNetwork(): Promise<NetworkResponse> {
-  const resp = await request<NetworkResponse>('/api/network')
-  // The server publishes `localhost:7073` for the emulator — fine when
-  // the browser runs on the same host, broken when the page is loaded
-  // from a LAN IP (phone on the same wifi). Rewrite `localhost` /
-  // `127.0.0.1` to the page's own hostname so the emulator stays
-  // reachable from any LAN client.
-  if (resp.emulator && typeof window !== 'undefined' && window.location.hostname) {
-    try {
-      const u = new URL(resp.emulator.url)
-      if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
-        u.hostname = window.location.hostname
-        resp.emulator = { ...resp.emulator, url: u.toString().replace(/\/$/, '') }
-      }
-    } catch {
-      // leave the URL untouched on parse failure
-    }
+export async function getNetwork(signal?: AbortSignal): Promise<NetworkResponse> {
+  const resp = await request<NetworkResponse>('/api/network', signal ? { signal } : undefined)
+  const reachable = (url: string): string => {
+    if (typeof window === 'undefined' || !window.location.hostname) return url
+    const parsed = new URL(url)
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') parsed.hostname = window.location.hostname
+    return parsed.toString().replace(/\/$/, '')
   }
+  resp.operatorUrl = reachable(resp.operatorUrl)
+  if (resp.esploraUrl) resp.esploraUrl = reachable(resp.esploraUrl)
+  if (resp.emulator) resp.emulator = { ...resp.emulator, url: reachable(resp.emulator.url) }
   return resp
 }
 
@@ -138,15 +133,8 @@ export interface V4HouseInput {
   leaf: V4SerializedTapLeaf
   tapTree: string
 }
-export interface V4CovenantParams {
-  creatorPubkey: string; playerPubkey: string; serverPubkey: string
-  creatorHash: string; playerHash: string
-  finalExpiration: number; cancelDelay: number; exitDelay: number
-  oddsN: number; oddsTarget: number; oddsLo: number
-  emulatorPubkey: string
-  playerPayoutPkScript: string; housePayoutPkScript: string
-  playerStake: number; houseStake: number
-}
+export type { V4CovenantParams } from 'arkade-coinflip'
+import type { V4CovenantParams } from 'arkade-coinflip'
 export interface V4PlayResponse {
   gameId: string
   potAddress: string
@@ -248,11 +236,12 @@ export interface GameDetailsResponse {
   createdAt: string
   resolvedAt: string | null
   /** Fair roll `(digitHouse + digitPlayer) mod n`, terminal-only; null for the
-   *  cheat-penalty path, for pre-terminal games, and for legacy v2. */
+   *  forfeit paths and pre-terminal games. */
   roll: number | null
-  contractVersion: 'v2' | 'v3' | 'v4'
+  contractVersion: 'v4'
+  covenant: V4CovenantParams | null
+  houseHash: string
   playerHash: string
-  playerChoice?: string
   finalExpiration: number | null
   setupExpiration: number | null
   oddsN: number | null
@@ -262,13 +251,9 @@ export interface GameDetailsResponse {
   playerStake: number | null
   emulatorPubkey: string | null
   exitDelay: number | null
-  houseEscrow: Outpoint | null
-  playerEscrow: Outpoint | null
-  resolveTxid: string | null
-  houseRefundTxid: string | null
-  /** Hex preimages — only present when status ∈ {resolved, expired}.
-   *  For v3 these are `[digit] ‖ salt`; for v2 they're raw bytes whose
-   *  LENGTH encodes the digit. Decode accordingly per contractVersion. */
+  potOutpoint: Outpoint | null
+  settleTxid: string | null
+  refundTxid: string | null
   houseSecret: string | null
   playerSecret: string | null
 }
@@ -296,8 +281,8 @@ export interface GameSummary {
   rakeAmount: number
   createdAt: string
   resolvedAt: string | null
-  /** 'v4' (joint pot), 'v3'/'v2' (per-party escrow) — what the game was minted with. */
-  protocolVersion: string
+  /** The normal joint-pot game protocol. */
+  protocolVersion: 'v4'
 }
 
 /**

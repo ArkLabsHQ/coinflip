@@ -1,3 +1,4 @@
+import { createTestWallet } from './helpers'
 /**
  * Admin HTTP API e2e: boots the server deps against arkade-regtest, mounts the
  * admin router, funds the house, and exercises the operator endpoints added for
@@ -5,7 +6,7 @@
  *   - GET  /api/vtxos        — house VTXOs + which game reserves each
  *   - GET  /api/reservations — in-flight reservation ledger + totals
  *   - POST /api/wallet/send  — move funds out (liability guard + reservation-
- *                              safe coin selection; force:true spends blind)
+ *                              safe coin selection, including force:true)
  *   - POST /api/wallet/settle    — renew VTXOs / confirm boarding
  *   - POST /api/wallet/fragment  — split the pool into uniform pieces
  *
@@ -21,7 +22,7 @@ import path from 'path'
 import { createHash } from 'crypto'
 import { hex } from '@scure/base'
 import { SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository } from '@arkade-os/sdk'
-import { packets } from '@arklabshq/contract-workflows-prototype'
+import { packets } from 'arkade-coinflip'
 import { faucet, settleWithRetry } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
@@ -55,6 +56,7 @@ beforeAll(async () => {
   try {
     arkAvailable = (await fetch(`${ARK_SERVER_URL}/v1/info`, { signal: AbortSignal.timeout(5000) })).ok
   } catch { arkAvailable = false }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 }, 10_000)
 
 describe('admin HTTP API: operator endpoints', () => {
@@ -66,9 +68,10 @@ describe('admin HTTP API: operator endpoints', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let pool: any
   let dataDir: string
+  let reservedGameId: string
 
   beforeAll(async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'coinflip-admin-test-'))
     process.env.DATA_DIR = dataDir
     process.env.ARK_SERVER_URL = ARK_SERVER_URL
@@ -99,14 +102,14 @@ describe('admin HTTP API: operator endpoints', () => {
   })
 
   it('GET /api/status returns balance + pubkey', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const res = await request(app).get('/api/status').expect(200)
     expect(res.body.balance).toBeDefined()
     expect(typeof res.body.pubkey).toBe('string')
   })
 
   it('GET /api/vtxos lists funded house VTXOs (unreserved by default)', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const res = await request(app).get('/api/vtxos').expect(200)
     expect(Array.isArray(res.body)).toBe(true)
     expect(res.body.length).toBeGreaterThanOrEqual(1)
@@ -118,7 +121,7 @@ describe('admin HTTP API: operator endpoints', () => {
   })
 
   it('GET /api/reservations is empty before any game', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const res = await request(app).get('/api/reservations').expect(200)
     expect(res.body.activeGames).toBe(0)
     expect(res.body.totalLiability).toBe(0)
@@ -126,7 +129,7 @@ describe('admin HTTP API: operator endpoints', () => {
   })
 
   it('maps a reserved VTXO to its game in /api/vtxos and /api/reservations', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const vtxos = await deps.wallet.getVtxos()
     const v = vtxos[0]
     const op = pool.outpointKey(v.txid, v.vout)
@@ -149,10 +152,9 @@ describe('admin HTTP API: operator endpoints', () => {
   })
 
   it('a real v4 play shows up in the reservation ledger', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const id = SingleKey.fromRandomBytes()
-    const w = await Wallet.create({
-      identity: id, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const w = await createTestWallet(id, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -169,6 +171,7 @@ describe('admin HTTP API: operator endpoints', () => {
       playerPayoutAddress: addr,
       playerChangeAddress: addr,
     }, deps)
+    reservedGameId = play.gameId
 
     const res = await request(app).get('/api/reservations').expect(200)
     expect(res.body.activeGames).toBeGreaterThanOrEqual(1)
@@ -177,7 +180,7 @@ describe('admin HTTP API: operator endpoints', () => {
   }, 120_000)
 
   it('POST /api/wallet/send validates input and guards reserved liability', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     await request(app).post('/api/wallet/send').send({ amount: 1000 }).expect(400) // no address
     await request(app).post('/api/wallet/send').send({ address: 'x', amount: 0 }).expect(400) // bad amount
 
@@ -187,30 +190,35 @@ describe('admin HTTP API: operator endpoints', () => {
     expect(over.body).toHaveProperty('withdrawable')
   })
 
-  it('POST /api/wallet/send refuses coins pinned to a live game; force spends blind', async () => {
-    if (!arkAvailable) return
-    // The v4 play above pinned the house's entire bankroll (its single settled
-    // VTXO, picked largest-first) for a small houseStake. The liability guard
-    // alone passes (withdrawable ≈ bankroll − stake), so pre-fix the blind SDK
-    // selection would spend the pinned coin and break the game's co-fund — the
-    // P0 #53 residual. The reservation-safe path must 400 cleanly instead.
+  it('POST /api/wallet/send preserves game holds, including force:true; expiration releases them', async () => {
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
+    // The unfunded game holds the house's only coin. SDK available balance
+    // excludes it; bypassing the liability ceiling must still preserve the hold.
+    const held = pool.reservations.snapshot().find((r: { gameId: string }) => r.gameId === reservedGameId)
+    expect(held.outpoints).toHaveLength(1)
     const addr = await deps.wallet.getAddress()
     const blocked = await request(app).post('/api/wallet/send')
       .send({ address: addr, amount: BET }).expect(400)
-    expect(blocked.body).toHaveProperty('freeSpendable')
-    expect(blocked.body.reservedOutpoints).toBeGreaterThanOrEqual(1)
-
-    // force:true is the operator hatch: blind SDK selection, reserved coins
-    // included. (This spends the abandoned test game's pin — its self-send
-    // outputs also give the next test un-reserved coins to work with.)
+    expect(blocked.body.withdrawable).toBe(0)
     const forced = await request(app).post('/api/wallet/send')
-      .send({ address: addr, amount: BET, force: true }).expect(200)
-    expect(typeof forced.body.txid).toBe('string')
-    expect(forced.body.txid.length).toBeGreaterThan(0)
+      .send({ address: addr, amount: BET, force: true }).expect(400)
+    expect(forced.body.freeSpendable).toBe(0)
+    expect(forced.body.reservedOutpoints).toBe(1)
+    const coins = await deps.wallet.getVtxos()
+    expect(coins.some((v: { txid: string; vout: number; isSpent: boolean }) =>
+      held.outpoints.includes(`${v.txid}:${v.vout}`) && !v.isSpent)).toBe(true)
+    expect(pool.reservations.has(reservedGameId)).toBe(true)
+
+    // SQLite timestamps have second precision; expiration uses a strict age cutoff.
+    await sleep(1100)
+    const expired = await request(app).post('/api/games/expire-pending')
+      .send({ olderThanMinutes: 0 }).expect(200)
+    expect(expired.body.ids).toContain(reservedGameId)
+    expect(pool.reservations.has(reservedGameId)).toBe(false)
   }, 60_000)
 
   it('POST /api/wallet/send moves a small amount out (returns txid)', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const res = await request(app).post('/api/wallet/send')
       .send({ address: await deps.wallet.getAddress(), amount: BET }).expect(200)
     expect(typeof res.body.txid).toBe('string')
@@ -218,7 +226,7 @@ describe('admin HTTP API: operator endpoints', () => {
   }, 60_000)
 
   it('POST /api/wallet/fragment splits the pool into pieces', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const res = await request(app).post('/api/wallet/fragment')
       .send({ targetCount: 6, pieceSize: BET * 2 }).expect(200)
     expect(res.body).toHaveProperty('created')
@@ -231,7 +239,7 @@ describe('admin HTTP API: operator endpoints', () => {
   }, 60_000)
 
   it('POST /api/wallet/settle is wired and never hangs the request', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const res = await request(app).post('/api/wallet/settle')
     // settle() can block until a batch round forms (or error on regtest). The
     // endpoint bounds it: 200 (done), 202 (still running in background), or 500

@@ -1,26 +1,19 @@
-/**
- * v4 joint-pot transaction builders — the PURE (unsigned) tx construction the
- * co-fund and settle flows need, extracted from the proven probes/scale harness
- * so the server and client share one implementation.
- *
- * Signing (each party signs its own input + checkpoint) and submission
- * (arkd submitTx/finalizeTx, or the emulator POST for the settle) stay with the
- * caller — these functions only assemble the transactions.
- *
- * Proven on the live regtest stack by v4-game-probe.test.ts and v4-scale.test.ts.
- */
+/** Unsigned cofund, settlement and recovery transactions shared by the house and player. */
 
 import { base64, hex } from '@scure/base'
 import {
   buildOffchainTx,
+  attachPrevArkTxs,
   CSVMultisigTapscript,
   Transaction,
   ArkAddress,
   timelockToSequence,
   type ArkTxInput,
   type TapLeafScript,
+  type PrevTxSource,
+  type RawTxSource,
 } from '@arkade-os/sdk'
-import { emulator, packets } from '@arklabshq/contract-workflows-prototype'
+import { emulator, packets } from './packets'
 import { CoinflipJointPotScript } from './joint-pot'
 import { StageTwoScript } from './joint-pot-stage2'
 import { addConditionWitness } from './condition-witness'
@@ -132,20 +125,7 @@ export function buildJointPotCofundTx(
   return buildOffchainTx([...playerInputs, ...houseInputs], outputs, serverUnroll)
 }
 
-/**
- * Build the settle: spend the joint pot (one input) via the winner's
- * win-covenant leaf into a single output paying the WHOLE pot to the winner.
- *
- * Attaches the emulator packet (the `payTo` covenant inspects output 0, so the
- * witness is `[encodeIndex(0)]`) and BOTH reveal packets (read on-chain by the
- * win predicate). The checkpoint's witnessUtxo.script is patched to the pot's
- * btcd-correct pkScript (buildOffchainTx derives it via scure's Huffman tree,
- * which disagrees for the 8-leaf taptree).
- *
- * The returned arkTx is UNSIGNED by the operator: the win leaf is
- * `[arkd_server, emu_tweaked]` — arkd signs automatically and the emulator
- * cosigns after running the covenant. POST it to the emulator's `/v1/tx`.
- */
+/** Settle one pot through the compiled winner path. Output indices are constants in its covenant. */
 export function buildJointPotSettleTx(args: {
   pot: CoinflipJointPotScript
   cofund: Outpoint
@@ -157,7 +137,6 @@ export function buildJointPotSettleTx(args: {
   serverUnroll: CSVMultisigTapscript.Type
 }): BuiltJointPotTx {
   const { pot, cofund, winner, winnerPayoutPkScript, potAmount } = args
-  // Same balance guard as the forfeit builder — payout must equal the pot.
   if (potAmount <= 0n || potAmount !== BigInt(cofund.value)) {
     throw new Error(`buildJointPotSettleTx: potAmount ${potAmount} must equal the pot value ${cofund.value}`)
   }
@@ -169,30 +148,13 @@ export function buildJointPotSettleTx(args: {
   }
   const built = buildOffchainTx([input], [{ script: winnerPayoutPkScript, amount: potAmount }], args.serverUnroll)
 
-  // Patch the checkpoint's prevout script to the pot's btcd-correct pkScript.
-  const cp = built.checkpoints[0]
-  const cpIn = cp.getInput(0)
-  if (cpIn?.witnessUtxo) {
-    cp.updateInput(0, { witnessUtxo: { script: pot.pkScript, amount: cpIn.witnessUtxo.amount } })
-  }
-
-  // Emulator packet: the payTo covenant inspects output 0.
   emulator.addPacket(built.arkTx, [
-    { vin: 0, script: arkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
+    { vin: 0, script: arkadeScript, witness: emulator.encodeWitness([]) },
   ])
   // Reveal packets (read on-chain by OP_INSPECTPACKET in the win predicate).
   packets.addRevealPacket(built.arkTx, packets.REVEAL_PLAYER_PACKET_TYPE, args.playerRevealBytes)
   packets.addRevealPacket(built.arkTx, packets.REVEAL_CREATOR_PACKET_TYPE, args.creatorRevealBytes)
   return built
-}
-
-/** Patch the checkpoint's prevout script to a covenant's btcd-correct pkScript. */
-function patchCheckpointPrevout(built: BuiltJointPotTx, pkScript: Uint8Array): void {
-  const cp = built.checkpoints[0]
-  const cpIn = cp.getInput(0)
-  if (cpIn?.witnessUtxo) {
-    cp.updateInput(0, { witnessUtxo: { script: pkScript, amount: cpIn.witnessUtxo.amount } })
-  }
 }
 
 /**
@@ -218,10 +180,8 @@ export function buildPlayerRevealTx(args: {
   }
   // Output 0: the WHOLE pot to the StageTwo contest covenant (pinned by revealArkadeScript).
   const built = buildOffchainTx([input], [{ script: pot.stageTwo.pkScript, amount: BigInt(cofund.value) }], args.serverUnroll)
-  patchCheckpointPrevout(built, pot.pkScript)
-  // Emulator packet: revealArkadeScript = payTo(StageTwo, pot), inspects output 0.
   emulator.addPacket(built.arkTx, [
-    { vin: 0, script: pot.revealArkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
+    { vin: 0, script: pot.revealArkadeScript, witness: emulator.encodeWitness([]) },
   ])
   // Condition witness: the SHA256(playerSecret) preimage. Ark's checkpoint
   // indirection carries the playerReveal leaf on BOTH the checkpoint (the actual
@@ -260,9 +220,8 @@ export function buildStageTwoSettleTx(args: {
     tapLeafScript: leaf, tapTree: stageTwo.encode(),
   }
   const built = buildOffchainTx([input], [{ script: winnerPayoutPkScript, amount: potAmount }], args.serverUnroll)
-  patchCheckpointPrevout(built, stageTwo.pkScript)
   emulator.addPacket(built.arkTx, [
-    { vin: 0, script: arkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
+    { vin: 0, script: arkadeScript, witness: emulator.encodeWitness([]) },
   ])
   packets.addRevealPacket(built.arkTx, packets.REVEAL_PLAYER_PACKET_TYPE, args.playerRevealBytes)
   packets.addRevealPacket(built.arkTx, packets.REVEAL_CREATOR_PACKET_TYPE, args.creatorRevealBytes)
@@ -297,9 +256,8 @@ export function buildStageTwoTakeAllTx(args: {
   // surgery. arkd accepts absolute timelocks for offchain spends; it rejects relative
   // (CSV) ones, which is why this leaf is CLTV and not a settleWindow CSV.
   const built = buildOffchainTx([input], [{ script: args.playerPayoutPkScript, amount: args.potAmount }], args.serverUnroll)
-  patchCheckpointPrevout(built, stageTwo.pkScript)
   emulator.addPacket(built.arkTx, [
-    { vin: 0, script: stageTwo.takeAllArkadeScript, witness: emulator.encodeWitness([emulator.encodeIndex(0)]) },
+    { vin: 0, script: stageTwo.takeAllArkadeScript, witness: emulator.encodeWitness([]) },
   ])
   return built
 }
@@ -349,19 +307,11 @@ export function buildJointPotRefundTx(args: {
   ]
   const built = buildOffchainTx([input], outputs, args.serverUnroll)
 
-  const cp = built.checkpoints[0]
-  const cpIn = cp.getInput(0)
-  if (cpIn?.witnessUtxo) {
-    cp.updateInput(0, { witnessUtxo: { script: pot.pkScript, amount: cpIn.witnessUtxo.amount } })
-  }
-  // Emulator packet: the splitTo covenant inspects output 0 (player stake) and
-  // output 1 (house stake). Witness = [playerOutIdx=0, houseOutIdx=1] (the house
-  // index is on top, checked first — see buildSplitArkadeScript).
   emulator.addPacket(built.arkTx, [
     {
       vin: 0,
       script: pot.splitArkadeScript,
-      witness: emulator.encodeWitness([emulator.encodeIndex(0), emulator.encodeIndex(1)]),
+      witness: emulator.encodeWitness([]),
     },
   ])
   return built
@@ -371,23 +321,22 @@ export function buildJointPotRefundTx(args: {
  * A built (unsigned) ON-CHAIN exit tx. Unlike the offchain builders, the CSV
  * `*Exit` leaves can only be spent on-chain (arkd rejects relative CSV offchain),
  * so this is a raw taproot spend of the UNROLLED pot UTXO — the caller signs it
- * (player + creator for leaf 7) and broadcasts it to the mempool.
+ * (player + creator for the cooperative exit) and broadcasts it to the mempool.
  */
 export interface BuiltExitTx {
   tx: Transaction
 }
 
 /**
- * Build the leaf-7 `cooperativeSpendExit` on-chain spend: after the pot VTXO is
+ * Build the `cooperativeSpendExit` onchain spend: after the pot VTXO is
  * unrolled on-chain (SDK `Unroll`) and its exit CSV (`{value: exitDelay, type:
  * 'seconds'}`) has matured, split the WHOLE pot back to both funders' payout
- * scripts, minus the on-chain fee. Leaf 7 is `CSVMultisig[player, creator]` —
+ * scripts, minus the onchain fee. This path is `CSVMultisig[player, creator]` —
  * NO covenant, NO emulator — so the returned tx MUST be signed by BOTH the
  * player and the creator (house) before broadcast.
  *
  * The fee is split across both funders (each pays half) so the split-back stays
- * fair. Spike-validated end-to-end on regtest (v4-cooperative-exit probe): the
- * unrolled pot spent via this construction confirmed on-chain.
+ * fair.
  */
 export function buildCooperativeSpendExitTx(args: {
   pot: CoinflipJointPotScript
@@ -400,6 +349,7 @@ export function buildCooperativeSpendExitTx(args: {
   feeSats: bigint
 }): BuiltExitTx {
   const { pot, potOnchain, playerStake, houseStake, feeSats } = args
+  if (args.exitDelay !== pot.options.exitDelay) throw new Error('Exit delay differs from the funded contract')
   if (playerStake <= 0n || houseStake <= 0n) {
     throw new Error('buildCooperativeSpendExitTx: both stakes must be positive')
   }
@@ -427,8 +377,32 @@ export function buildCooperativeSpendExitTx(args: {
   return { tx }
 }
 
-/** Serialize a built tx for an emulator `/v1/tx` POST body. */
-export function encodeSettleForEmulator(built: BuiltJointPotTx): { arkTx: string; checkpointTxs: string[] } {
+/** Enrich every input with its original funding transaction before handing it to the emulator. */
+export async function prepareSettleForEmulator(
+  built: BuiltJointPotTx,
+  source: PrevTxSource,
+  onchain?: RawTxSource,
+): Promise<{ arkTx: string; checkpointTxs: string[] }> {
+  if (built.arkTx.inputsLength === 0 || built.checkpoints.length !== built.arkTx.inputsLength) {
+    throw new Error('An emulator spend needs exactly one checkpoint per transaction input')
+  }
+  const checkpoints = new Map(built.checkpoints.map(checkpoint => [checkpoint.id, checkpoint]))
+  if (checkpoints.size !== built.checkpoints.length) throw new Error('Emulator checkpoints contain duplicate transactions')
+  const originals = Array.from({ length: built.arkTx.inputsLength }, (_, index) => {
+    const input = built.arkTx.getInput(index)
+    const checkpointId = input.txid && hex.encode(input.txid)
+    const checkpoint = checkpointId && checkpoints.get(checkpointId)
+    if (!checkpoint || input.index !== 0 || checkpoint.inputsLength !== 1) {
+      throw new Error(`Emulator input ${index} does not spend its checkpoint output zero`)
+    }
+    checkpoints.delete(checkpointId)
+    const original = checkpoint.getInput(0)
+    if (!original.txid || original.txid.length !== 32 || original.index === undefined) {
+      throw new Error(`Emulator checkpoint ${checkpointId} has no original funding outpoint`)
+    }
+    return hex.encode(original.txid)
+  })
+  await attachPrevArkTxs(built.arkTx, originals, source, onchain)
   return {
     arkTx: base64.encode(built.arkTx.toPSBT()),
     checkpointTxs: built.checkpoints.map((c) => base64.encode(c.toPSBT())),

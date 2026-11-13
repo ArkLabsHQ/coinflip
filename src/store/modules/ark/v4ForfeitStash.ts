@@ -1,36 +1,8 @@
 import type { V4CovenantParams } from '@/services/api'
 
-// ---------------------------------------------------------------------------
-// v0.4 forfeit-stash decision — the pure core of the joint-pot recovery path.
-//
-// WHAT THE v4 FORFEIT IS:
-//   A v0.4 game funds ONE joint-pot VTXO via an atomic two-party co-fund. The
-//   pot's taptree carries a `playerForfeit` leaf: CLTVMultisig[player, arkd,
-//   emu_tweaked(payTo(player, pot))]. Once chain time crosses the game's
-//   `finalExpiration`, that leaf authorizes the PLAYER to sweep the WHOLE pot to
-//   their own payout address with NO cooperation from the house operator —
-//   only arkd + the emulator (both liveness parties) need to co-sign.
-//
-//   It is the recovery for exactly one bad state: the pot was co-funded, but the
-//   server never settled it (crash, exhausted retries, malice). The win-settle
-//   leaf is [arkd, emu] — the server settles UNILATERALLY long before
-//   finalExpiration — so a losing player cannot stall to reach the forfeit
-//   window. The window only opens if the SERVER fails.
-//
-// WHY v4 IS DIFFERENT FROM v3 (and gets its own type/store):
-//   v3 stashes a SERVER-BUILT forfeit PSBT (from a /forfeit endpoint) plus a
-//   player escrow. v4's claim is CLIENT-BUILT: `buildJointPotForfeitClaim`
-//   reconstructs the pot from the covenant params and spends the playerForfeit
-//   leaf locally. So the v4 stash persists the COVENANT PARAMS + the pot
-//   outpoint + the CLTV — not a PSBT — and needs no `revealed` precondition
-//   (the leaf is a bare payTo; it reads no secret).
-//
-// WHY A PURE FUNCTION (mirrors v3's resolveForfeitStash):
-//   The play flow is SDK-and-network-bound and impractical to unit-test. The
-//   security-critical part is a small, pure decision: is the covenant
-//   co-signer reachable, and does the pot actually pay US? Extracting it here
-//   lets us prove the guards deterministically (see v4ForfeitStash.spec.ts).
-// ---------------------------------------------------------------------------
+// Recovery stores the committed covenant, pot outpoint, and local player secret.
+// The secret enables the staged contest; a restored no-secret record can split
+// back only the player's stake after cancelDelay.
 
 /** The pot outpoint shape (matches V4CofundFinalizeResponse.potOutpoint). */
 export interface V4PotOutpoint {
@@ -46,7 +18,7 @@ export interface V4PotOutpoint {
 export interface StashedV4Forfeit {
   contractVersion: 'v4'
   gameId: string
-  /** Bet tier (sats) — for display parity with v3 stashes. */
+  /** Original bet amount in sats. */
   tier: number
   /** The co-funded joint pot. */
   potOutpoint: V4PotOutpoint
@@ -73,11 +45,12 @@ export interface StashedV4Forfeit {
    *  txid, vout 0, whole-pot value). Its presence means stage 1 is done and the
    *  recovery is waiting for finalExpiration to fire STAGE 2 (`playerTakeAll`). */
   stageTwoOutpoint?: V4PotOutpoint
+  /** A submitted spend remains unconfirmed in the operator/indexer view. */
+  confirmationPending?: boolean
   createdAt: number
   /**
    * Count of consecutive PERMANENT auto-claim failures for the SELF-REFUND path
-   * (a restored, no-secret stash). Mirrors StashedRefund.claimFailures + the #47
-   * reclaimBackoff: a covenant whose split the emulator keeps rejecting can never
+   * (a restored, no-secret stash). a covenant whose split the emulator keeps rejecting can never
    * succeed, so auto-claim backs off after MAX_RECLAIM_ATTEMPTS rather than spamming
    * `/v1/tx`. The "already spent" case is handled separately (the stash is dropped),
    * and transient (network / CLTV-timing) failures do NOT increment this.
@@ -151,9 +124,9 @@ export function resolveV4ForfeitStash(args: {
 
 /**
  * Does this stash hold a structurally COMPLETE v4 forfeit ready to claim?
- * Purely structural (mirrors v3's hasStashedForfeit) — the CLTV maturity gate
+ * Purely structural — the CLTV maturity gate
  * (`chainTime >= forfeitClaimableAt`) is layered on separately by the claim/poll.
- * Note: NO `revealed` requirement — the playerForfeit leaf is a bare payTo.
+ * The staged path separately requires the player secret.
  */
 export function hasClaimableV4Forfeit(stash: Partial<StashedV4Forfeit>): stash is StashedV4Forfeit {
   return (

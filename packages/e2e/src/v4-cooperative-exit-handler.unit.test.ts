@@ -52,7 +52,7 @@ async function fixture(status?: string) {
   const playerSigned = await player.sign(tx, [0])
 
   const state = { protocolVersion: 'v4', cofundTxid: POT_ONCHAIN.txid, covenant }
-  const deps = { repos: { games: { get: async () => ({ house_vtxos_json: JSON.stringify(state), status }) } }, identity: house }
+  const deps = { repos: { games: { get: async () => ({ state_json: JSON.stringify(state), status }) } }, identity: house }
   return { deps, playerSigned, pot }
 }
 

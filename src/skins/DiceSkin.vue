@@ -12,6 +12,7 @@
 </template>
 
 <script lang="ts">
+import type DiceBoxInstance from '@3d-dice/dice-box-threejs'
 import { defineComponent, computed, ref, watch, onMounted, onBeforeUnmount, type PropType } from 'vue'
 import { diceNotation } from './diceNotation'
 import type { SkinState } from './types'
@@ -32,8 +33,7 @@ export default defineComponent({
     const tint = ref<'' | 'win' | 'loss'>('')
     const ready = ref(false)
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let box: any = null
+    let box: DiceBoxInstance | null = null
     let disposed = false
 
     // Force the die onto `value` (1..sides) via the @ notation (provably fair).

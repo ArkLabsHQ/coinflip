@@ -1,11 +1,9 @@
 <template>
   <div id="app" class="app">
-    <!-- Floating balance pill, top-right. Single corner-anchored UI element
-         that replaces the entire topbar nav. Click opens the WalletDrawer. -->
-    <button v-if="isInitialized && !isPlayRoute" class="float-pill mono" @click="walletOpen = true" :title="connTitle">
+    <button v-if="isInitialized && !hasPageWallet" class="float-pill mono" @click="walletOpen = true" :title="connTitle">
       <span class="conn-dot" :class="arkStatus"></span>
       <span class="wallet-ico" aria-hidden="true">👛</span>
-      <span class="balance-num">{{ formatSats(walletBalance) }}</span>
+      <span class="balance-num">{{ balanceKnown ? formatSats(walletBalance) : '—' }}</span>
       <span class="balance-unit">sats</span>
       <span class="pill-caret" aria-hidden="true">›</span>
     </button>
@@ -27,10 +25,12 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, computed, ref, watch } from 'vue'
+import { defineComponent, computed, ref, watch, onBeforeUnmount } from 'vue'
 import { useStore } from 'vuex'
 import { useRoute, useRouter } from 'vue-router'
 import WalletDrawer from '@/components/WalletDrawer.vue'
+import { useBankrollPool } from '@/composables/useBankrollPool'
+import { useFundedPool } from '@/composables/useFundedPool'
 
 export default defineComponent({
   name: 'App',
@@ -39,15 +39,24 @@ export default defineComponent({
     const store = useStore()
     const route = useRoute()
     const router = useRouter()
+    const stopPool = useBankrollPool().start(store)
+    onBeforeUnmount(stopPool)
+    const stopFundedPool = useFundedPool().start(store)
+    onBeforeUnmount(stopFundedPool)
     const isInitialized = computed(() => store.state.wallet?.isInitialized)
     const walletBalance = computed(() => {
       const settled = store.getters['ark/balance']
       return settled !== undefined ? Number(settled) : (store.state.walletBalance || 0)
     })
     const arkStatus = computed(() => store.state.ark?.status as string)
-    // The play view carries its own unified top-hud with the balance folded in, so
-    // the global floating pill would just duplicate/overlap it there — hide it on '/'.
+    const balanceKnown = computed(() => arkStatus.value === 'connected' && store.state.ark?.balanceSynced === true)
     const isPlayRoute = computed(() => route.path === '/')
+    const hasPageWallet = computed(() => isPlayRoute.value || route.path === '/bankroll')
+    watch(() => [route.path, route.query.view, isInitialized.value, store.state.wallet?.publicKey], () => {
+      if (route.path === '/bankroll' && route.query.view !== 'practice' && isInitialized.value && arkStatus.value === 'disconnected') {
+        void store.dispatch('ark/checkConnection').catch(() => {})
+      }
+    }, { immediate: true })
     const connTitle = computed(() => {
       if (arkStatus.value === 'connected') return 'Connected to Ark'
       if (arkStatus.value === 'connecting') return 'Connecting…'
@@ -57,34 +66,18 @@ export default defineComponent({
 
     const walletOpen = ref(false)
 
-    // A connected wallet with a zero balance can't play — force the drawer open
-    // (and non-dismissible, via :dismissible below) so the user funds it first.
-    //
-    // The hard part is knowing the zero is REAL. `walletBalance != null` doesn't
-    // prove it: the SDK publishes a fully-formed balance object whose `settled`
-    // reads 0 while the vtxos are still syncing, so the null check passed and
-    // popped the drawer open on a funded wallet. Waiting a fixed 2s for the zero
-    // to persist didn't fix it either — that's a guess at how long a sync takes,
-    // and it lost the race often enough that users still saw it on load.
-    //
-    // `balanceSynced` replaces the guess with the SDK's own evidence that a sync
-    // completed (see store/modules/ark/balanceReady). It cannot be true before
-    // the balance is meaningful, so no grace period is needed.
+    // SDK balances can report zero before the first completed sync.
     const looksUnfunded = computed(() =>
       isInitialized.value
+      && isPlayRoute.value
       && arkStatus.value === 'connected'
       && store.state.ark?.balanceSynced === true
       && walletBalance.value === 0,
     )
-    // `forceWalletOpen` is the confirmed-empty signal, read both by the auto-open
-    // below and by the drawer's `dismissible` binding. It tracks `looksUnfunded`
-    // rather than latching, so funding the wallet immediately makes the drawer
-    // closable again — and a sync that later degrades stops us insisting the
-    // wallet is empty while we can't see it.
-    const forceWalletOpen = ref(false)
-    watch(looksUnfunded, (unfunded) => {
-      forceWalletOpen.value = unfunded
+    const forceWalletOpen = looksUnfunded
+    watch(looksUnfunded, (unfunded, wasUnfunded) => {
       if (unfunded) walletOpen.value = true
+      else if (wasUnfunded && !isPlayRoute.value) walletOpen.value = false
     }, { immediate: true })
 
     // Deep-link support: /wallet (legacy) or /?wallet=open both open the drawer.
@@ -105,7 +98,7 @@ export default defineComponent({
 
     function formatSats(n: number): string { return n.toLocaleString() }
 
-    return { isInitialized, walletBalance, formatSats, walletOpen, forceWalletOpen, arkStatus, connTitle, isPlayRoute }
+    return { isInitialized, walletBalance, balanceKnown, formatSats, walletOpen, forceWalletOpen, arkStatus, connTitle, hasPageWallet }
   },
 })
 </script>

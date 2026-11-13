@@ -62,10 +62,9 @@
           <section class="section">
             <h4>Transactions</h4>
             <dl class="tx-list">
-              <div v-if="details.playerEscrow"><dt>Player escrow</dt><dd><TxLink :outpoint="details.playerEscrow" :network="network" /></dd></div>
-              <div v-if="details.houseEscrow"><dt>House escrow</dt><dd><TxLink :outpoint="details.houseEscrow" :network="network" /></dd></div>
-              <div v-if="details.resolveTxid"><dt>Sweep (resolve)</dt><dd><TxLink :outpoint="{ txid: details.resolveTxid }" :network="network" /></dd></div>
-              <div v-if="details.houseRefundTxid"><dt>House refund</dt><dd><TxLink :outpoint="{ txid: details.houseRefundTxid }" :network="network" /></dd></div>
+              <div v-if="details.potOutpoint"><dt>Joint pot</dt><dd><TxLink :outpoint="details.potOutpoint" :network="network" /></dd></div>
+              <div v-if="details.settleTxid"><dt>Settlement</dt><dd><TxLink :outpoint="{ txid: details.settleTxid }" :network="network" /></dd></div>
+              <div v-if="details.refundTxid"><dt>Refund</dt><dd><TxLink :outpoint="{ txid: details.refundTxid }" :network="network" /></dd></div>
               <div v-if="!hasAnyTx" class="muted">No transactions recorded yet.</div>
             </dl>
           </section>
@@ -180,9 +179,9 @@ export default defineComponent({
       return 'badge-pending'
     })
     const terminalState = computed(() => details.value?.status === 'resolved' || details.value?.status === 'expired')
-    const potValue = computed(() => (details.value?.tier ?? 0) + (details.value?.houseStake ?? 0))
+    const potValue = computed(() => (details.value?.playerStake ?? details.value?.tier ?? 0) + (details.value?.houseStake ?? 0))
     const hasAnyTx = computed(() =>
-      !!(details.value?.playerEscrow || details.value?.houseEscrow || details.value?.resolveTxid || details.value?.houseRefundTxid),
+      !!(details.value?.potOutpoint || details.value?.settleTxid || details.value?.refundTxid),
     )
 
     function formatSats(n: number | null | undefined): string {

@@ -25,7 +25,7 @@ function makeExecutor() {
       player_choice TEXT NOT NULL, player_hash TEXT NOT NULL, player_change_address TEXT,
       house_secret_hex TEXT NOT NULL, player_secret_hex TEXT, winner TEXT,
       rake_amount INTEGER NOT NULL DEFAULT 0, payout_amount INTEGER,
-      status TEXT NOT NULL DEFAULT 'pending', house_vtxos_json TEXT,
+      status TEXT NOT NULL DEFAULT 'pending', state_json TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')), resolved_at TEXT
     )`)
   const exec = {
@@ -35,9 +35,9 @@ function makeExecutor() {
   }
   return { db, exec }
 }
-function insert(db: any, id: string, houseVtxosJson: string | null) {
-  db.prepare(`INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, status, house_vtxos_json, created_at)
-    VALUES (?, 1000, 'aa', 'trustless-v4', 'hh', 'hs', 'pending', ?, datetime('now'))`).run(id, houseVtxosJson)
+function insert(db: any, id: string, stateJson: string | null) {
+  db.prepare(`INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, status, state_json, created_at)
+    VALUES (?, 1000, 'aa', 'trustless-v4', 'hh', 'hs', 'pending', ?, datetime('now'))`).run(id, stateJson)
 }
 
 describe('isCofundedGame', () => {

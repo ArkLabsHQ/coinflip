@@ -8,14 +8,15 @@
  * singletons.
  */
 
-import type { ArkInfo, Identity, IContractManager, Wallet } from '@arkade-os/sdk'
+import type { OperatorInfo, Identity, IContractManager, Wallet } from '@arkade-os/sdk'
 import type { Repos } from './repositories/types.js'
+import type { PoolService } from './pool/service.js'
 
 export interface AppDeps {
   repos: Repos
   wallet: Wallet
   identity: Identity
-  arkInfo: ArkInfo
+  arkInfo: OperatorInfo
   /**
    * The wallet's SDK ContractManager. Optional so test bootstraps that skip it
    * still typecheck; populated best-effort in `bootstrapDeps`. When present,
@@ -24,6 +25,7 @@ export interface AppDeps {
    * 120s failsafe reconcile still guarantees correctness if it's absent.
    */
   contractManager?: IContractManager
+  pool?: PoolService
 }
 
 /** Subset of AppDeps available before the wallet boots — used by initHouseWallet. */

@@ -1,6 +1,6 @@
 /**
  * v4 joint-pot HTTP routes — thin express wrappers over the trustless-game-v4
- * handlers. Mounted alongside the v3 routes; the v4 game flow is:
+ * handlers. The game flow is:
  *
  *   POST /api/v4/play                       → reserve house VTXO + covenant params
  *   POST /api/v4/game/:id/cofund            → co-fund round 1 (server signs house)

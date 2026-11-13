@@ -45,7 +45,7 @@ function makeExecutor() {
       rake_amount INTEGER NOT NULL DEFAULT 0,
       payout_amount INTEGER,
       status TEXT NOT NULL DEFAULT 'pending',
-      house_vtxos_json TEXT,
+      state_json TEXT NOT NULL CHECK (json_valid(state_json)),
       created_at TEXT NOT NULL,
       resolved_at TEXT
     )
@@ -61,13 +61,13 @@ function makeExecutor() {
 /** Resolved today, so it lands inside the 24h window. */
 function insert(db: any, row: Partial<any> & { id: string }) {
   db.prepare(`
-    INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, status, house_vtxos_json, winner, rake_amount, payout_amount, created_at, resolved_at)
-    VALUES (@id, @tier, @player_pubkey, @player_choice, @player_hash, @house_secret_hex, @status, @house_vtxos_json, @winner, @rake_amount, @payout_amount, datetime('now'), @resolved_at)
+    INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, status, state_json, winner, rake_amount, payout_amount, created_at, resolved_at)
+    VALUES (@id, @tier, @player_pubkey, @player_choice, @player_hash, @house_secret_hex, @status, @state_json, @winner, @rake_amount, @payout_amount, datetime('now'), @resolved_at)
   `).run({
     tier: 1000, player_pubkey: 'a'.repeat(64), player_choice: 'trustless-v4',
     player_hash: 'hh', house_secret_hex: 'hs', status: 'resolved',
-    house_vtxos_json: null, winner: null, rake_amount: 0, payout_amount: null,
-    resolved_at: null, ...row,
+    state_json: null, winner: null, rake_amount: 0, payout_amount: null,
+    resolved_at: new Date().toISOString().replace('T', ' ').slice(0, 19), ...row,
   })
 }
 
@@ -100,14 +100,14 @@ describe('house profit (24h) uses real stakes, not tier', () => {
   it('a player win costs the FULL house stake, not the tier', async () => {
     // ~95%: player stakes 1,000, house stakes 19,000, pot 20,000.
     const profit = await profitOf([
-      { id: 'g1', tier: 1_000, winner: 'player', house_vtxos_json: v4State(20_000, 19_000) },
+      { id: 'g1', tier: 1_000, winner: 'player', state_json: v4State(20_000, 19_000) },
     ])
     expect(profit).toBe(-19_000) // the old formula gave -1,000
   })
 
   it('a house win gains the PLAYER stake (pot minus house stake)', async () => {
     const profit = await profitOf([
-      { id: 'g1', tier: 1_000, winner: 'house', house_vtxos_json: v4State(20_000, 19_000) },
+      { id: 'g1', tier: 1_000, winner: 'house', state_json: v4State(20_000, 19_000) },
     ])
     expect(profit).toBe(1_000)
   })
@@ -118,42 +118,35 @@ describe('house profit (24h) uses real stakes, not tier', () => {
     // which is how a break-even book could read as clear profit.
     const rows = [
       ...Array.from({ length: 19 }, (_v, i) => ({
-        id: `w${i}`, tier: 1_000, winner: 'house', house_vtxos_json: v4State(20_000, 19_000),
+        id: `w${i}`, tier: 1_000, winner: 'house', state_json: v4State(20_000, 19_000),
       })),
-      { id: 'l1', tier: 1_000, winner: 'player', house_vtxos_json: v4State(20_000, 19_000) },
+      { id: 'l1', tier: 1_000, winner: 'player', state_json: v4State(20_000, 19_000) },
     ]
     expect(await profitOf(rows)).toBe(0)
   })
 
   it('an even-money game still works (the low-odds case is unchanged)', async () => {
     const profit = await profitOf([
-      { id: 'g1', tier: 1_000, winner: 'house', house_vtxos_json: v4State(2_000, 1_000) },
-      { id: 'g2', tier: 1_000, winner: 'player', house_vtxos_json: v4State(2_000, 1_000) },
+      { id: 'g1', tier: 1_000, winner: 'house', state_json: v4State(2_000, 1_000) },
+      { id: 'g2', tier: 1_000, winner: 'player', state_json: v4State(2_000, 1_000) },
     ])
     expect(profit).toBe(0)
   })
 
-  it('falls back to tier for legacy rows, which really were even-money', async () => {
-    // Pre-v4 stored a plain string[] of outpoints — valid JSON, but no $.pot.
-    const profit = await profitOf([
-      { id: 'g1', tier: 5_000, winner: 'house', house_vtxos_json: JSON.stringify(['abcd:0']) },
-      { id: 'g2', tier: 5_000, winner: 'player', house_vtxos_json: JSON.stringify(['efgh:1']) },
-    ])
-    expect(profit).toBe(0)
+  it('uses the actual folded player stake when it differs from the requested tier', async () => {
+    expect(await profitOf([{ id: 'folded', tier: 1000, winner: 'house', state_json: v4State(2500, 1000) }])).toBe(1500)
   })
 
-  it('a NULL or malformed blob cannot blank the dashboard', async () => {
-    const profit = await profitOf([
-      { id: 'g1', tier: 3_000, winner: 'house', house_vtxos_json: null },
-      { id: 'g2', tier: 3_000, winner: 'house', house_vtxos_json: 'not json at all {{{' },
-    ])
-    expect(profit).toBe(6_000)
+  it('rejects malformed or missing state at the database boundary', () => {
+    const { db } = makeExecutor()
+    expect(() => insert(db, { id: 'missing', state_json: null })).toThrow()
+    expect(() => insert(db, { id: 'malformed', state_json: '{not json' })).toThrow()
   })
 
   it('ignores unresolved games and resolved ones with no winner (refunds)', async () => {
     const profit = await profitOf([
-      { id: 'p1', tier: 1_000, winner: null, status: 'pending', house_vtxos_json: v4State(20_000, 19_000) },
-      { id: 'r1', tier: 1_000, winner: null, status: 'resolved', house_vtxos_json: v4State(20_000, 19_000) },
+      { id: 'p1', tier: 1_000, winner: null, status: 'pending', state_json: v4State(20_000, 19_000) },
+      { id: 'r1', tier: 1_000, winner: null, status: 'resolved', state_json: v4State(20_000, 19_000) },
     ])
     expect(profit).toBe(0)
   })
@@ -162,10 +155,10 @@ describe('house profit (24h) uses real stakes, not tier', () => {
     const { db, exec } = makeExecutor()
     // Two days ago — outside the window, so it must not move the number.
     db.prepare(`
-      INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, status, house_vtxos_json, winner, rake_amount, payout_amount, created_at, resolved_at)
-      VALUES ('old', 1000, 'a', 'trustless-v4', 'h', 's', 'resolved', ?, 'player', 0, NULL, datetime('now','-2 days'), NULL)
+      INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, status, state_json, winner, rake_amount, payout_amount, created_at, resolved_at)
+      VALUES ('old', 1000, 'a', 'trustless-v4', 'h', 's', 'resolved', ?, 'player', 0, NULL, datetime('now','-2 days'), datetime('now','-2 days'))
     `).run(v4State(20_000, 19_000))
-    insert(db, { id: 'new', tier: 1_000, winner: 'house', house_vtxos_json: v4State(20_000, 19_000) })
+    insert(db, { id: 'new', tier: 1_000, winner: 'house', state_json: v4State(20_000, 19_000) })
 
     const { profit24h } = await new SQLiteGameRepository(exec).stats()
     expect(profit24h).toBe(1_000) // only the new one
@@ -177,7 +170,7 @@ describe('house profit (24h) uses real stakes, not tier', () => {
     const profit = await profitOf([
       {
         id: 'g1', tier: 1_000, winner: 'player', rake_amount: 500,
-        house_vtxos_json: v4State(20_000, 19_000),
+        state_json: v4State(20_000, 19_000),
       },
     ])
     expect(profit).toBe(-19_000) // not -18,500

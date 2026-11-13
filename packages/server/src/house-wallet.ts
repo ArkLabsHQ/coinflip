@@ -7,7 +7,7 @@
  */
 
 import { createHash } from 'crypto'
-import { SingleKey, Wallet, type ArkInfo, type Identity } from '@arkade-os/sdk'
+import { SingleKey, Wallet, RestOperatorProvider, RestIndexerProvider, EsploraProvider, type OperatorInfo, type Identity } from '@arkade-os/sdk'
 import { SQLiteContractRepository, SQLiteWalletRepository } from '@arkade-os/sdk/repositories/sqlite'
 import { getSqlExecutor } from './db.js'
 import type { ConfigRepository, HouseWalletRepository } from './repositories/types.js'
@@ -24,18 +24,11 @@ const ESPLORA_URL = process.env.ESPLORA_URL
 export interface HouseWalletBundle {
   wallet: Wallet
   identity: Identity
-  arkInfo: ArkInfo
+  arkInfo: OperatorInfo
 }
 
 export interface InitHouseWalletOptions {
-  /**
-   * Settlement configuration forwarded to `Wallet.create`. Set to `false` to
-   * disable the wallet's auto-renewal poll-loop. Production keeps it off
-   * because the SDK's self-settle paths are reservation-blind (see
-   * bootstrapDeps in index.ts) and drives renewal/recovery via the
-   * reservation-aware `startRenewalTimer`; tests pass `false` to keep a
-   * background ticker from firing during regtest.
-   */
+  /** Disable the SDK timer when the application schedules denomination-aware renewal. */
   settlementConfig?: false | object
 }
 
@@ -86,8 +79,12 @@ export async function initHouseWallet(
 
   const wallet = await Wallet.create({
     identity,
-    arkServerUrl: ARK_SERVER_URL,
-    ...(ESPLORA_URL ? { esploraUrl: ESPLORA_URL } : {}),
+    concurrentSpending: true,
+    ...(ESPLORA_URL ? {
+      operatorProvider: new RestOperatorProvider(ARK_SERVER_URL),
+      indexerProvider: new RestIndexerProvider(ARK_SERVER_URL),
+      onchainProvider: new EsploraProvider(ESPLORA_URL),
+    } : { service: { operatorUrl: ARK_SERVER_URL } }),
     storage: {
       walletRepository,
       contractRepository: new SQLiteContractRepository(executor),
@@ -117,7 +114,7 @@ export function hashSecret(secret: Uint8Array): string {
   return createHash('sha256').update(secret).digest('hex')
 }
 
-export function networkHrpFromArkInfo(arkInfo: ArkInfo): string {
+export function networkHrpFromOperatorInfo(arkInfo: OperatorInfo): string {
   const network = arkInfo.network
   if (network === 'bitcoin' || network === 'mainnet') return 'ark'
   // testnet / signet / mutinynet / regtest → tark

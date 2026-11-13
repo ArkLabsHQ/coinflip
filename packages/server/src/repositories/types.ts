@@ -12,6 +12,8 @@
 // server's `moduleResolution: "nodenext"` honors `@arkade-os/sdk`'s
 // `exports` map, so this resolves cleanly at both compile and run time.
 export type { SQLExecutor } from '@arkade-os/sdk/repositories/sqlite'
+import type { V4State } from 'arkade-coinflip'
+export type GameStatus = 'pending' | 'resolved' | 'expired'
 
 // ── Game ──────────────────────────────────────────────────────────────────
 
@@ -19,17 +21,15 @@ export interface GameRow {
   id: string
   tier: number
   player_pubkey: string
-  player_choice: string
   player_hash: string
   player_change_address: string | null
   house_secret_hex: string
   player_secret_hex: string | null
   winner: string | null
-  rake_amount: number
   payout_amount: number | null
-  status: string
-  /** JSON-encoded `string[]` of "txid:vout" house VTXO outpoints reserved for this game. */
-  house_vtxos_json: string | null
+  status: GameStatus
+  /** JSON-encoded current joint-pot state. */
+  state_json: string
   created_at: string
   resolved_at: string | null
 }
@@ -38,22 +38,20 @@ export interface NewGame {
   id: string
   tier: number
   playerPubkey: string
-  playerChoice: string
   playerHash: string
   playerChangeAddress?: string
   houseSecretHex: string
-  houseVtxosJson?: string
+  stateJson: string
 }
 
 export interface GameUpdate {
   playerSecretHex?: string
   winner?: string
-  rakeAmount?: number
   payoutAmount?: number
   status?: string
   /** Rewritten at resolve to persist idempotent-replay data (player escrow
    * outpoint + house-win sweep txid) alongside the existing escrow state. */
-  houseVtxosJson?: string
+  stateJson?: string
 }
 
 export interface GameFilter {
@@ -75,10 +73,14 @@ export interface GameStats {
 }
 
 export interface GameRepository {
+  beginCofundSubmission(id: string, submission: NonNullable<V4State['cofundSubmission']>): Promise<boolean>
+  rejectCofundSubmission(id: string, txid: string): Promise<void>
   save(game: NewGame): Promise<void>
   update(id: string, updates: GameUpdate): Promise<void>
   get(id: string): Promise<GameRow | undefined>
   list(filter?: GameFilter): Promise<GameRow[]>
+  /** Complete work queue for recovery and startup, independent of UI paging limits. */
+  listPending(): Promise<GameRow[]>
   /**
    * Every game owned by `playerPubkey`, newest first — the "restore my games"
    * read. Mirrors `countPendingForPlayer`'s `WHERE player_pubkey = ?` filter;

@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import 'fake-indexeddb/auto'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { CSVMultisigTapscript, decodeTapscript } from '@arkade-os/sdk'
+import { CSVMultisigTapscript, decodeTapscript, Transaction, type IndexerProvider, type VirtualCoin } from '@arkade-os/sdk'
+import { base64 } from '@scure/base'
 import {
   buildV4SelfRefund,
   pickV4ClaimPath,
@@ -11,6 +13,10 @@ import {
 } from './v4SelfRefund'
 import type { StashedV4Forfeit } from './v4ForfeitStash'
 import type { V4CovenantParams, V4ReclaimHint } from '@/services/api'
+import type { V4PlayResponse } from '@/services/api'
+import { validatePlay } from './validatePlay'
+import { reconcileRecovery } from './recoveryStatus'
+import { loadV4Forfeits, putV4Forfeit, saveV4Forfeits } from './v4ForfeitStashStore'
 
 // Deterministic, self-consistent fixtures — no SDK wallet / network. The self-refund
 // is the covenant-only `cooperativeSpend` split-back; these tests prove (1) it builds
@@ -84,6 +90,155 @@ describe('rebuildJointPot', () => {
     expect(a.pkScript.length).toBe(34)
     expect(a.pkScript[0]).toBe(0x51) // OP_1
     expect(hexstr(a.pkScript)).toBe(hexstr(b.pkScript))
+  })
+})
+
+describe('player funding authorization', () => {
+  const terms = {
+    playerPubkey: xonly(2), playerHash: h(0xbb), payoutPkScript: PLAYER_PAYOUT,
+    serverPubkey: xonly(3), emulatorPubkey: xonly(4), playerStake: 1000, minimumHouseStake: 1000,
+    chainTime: 1_800_000_000, wallTime: 1_800_000_000,
+    oddsN: 2, oddsTarget: 1, oddsLo: 0,
+  }
+  const termsCovenant = (over: Partial<V4CovenantParams> = {}) => covenant({ cancelDelay: 1_800_000_600, finalExpiration: 1_800_001_200, ...over })
+  function proposal(cv = termsCovenant()): V4PlayResponse {
+    return {
+      gameId: 'game', potAddress: rebuildJointPot(cv).address('tark', xonlyBytes(3)).encode(),
+      networkHrp: 'tark', pot: cv.playerStake + cv.houseStake, betAmount: 1000,
+      houseStake: cv.houseStake, houseInputs: [], housePubkey: cv.creatorPubkey,
+      houseHash: cv.creatorHash, serverPubkey: cv.serverPubkey, emulatorPubkey: cv.emulatorPubkey,
+      finalExpiration: cv.finalExpiration, oddsN: cv.oddsN, oddsTarget: cv.oddsTarget, oddsLo: cv.oddsLo, covenant: cv,
+    }
+  }
+
+  it('accepts the actual compiled pot for the player-selected terms', () => {
+    expect(() => validatePlay(proposal(), terms)).not.toThrow()
+  })
+
+  it('refuses an arbitrary funding address beside otherwise correct covenant JSON', () => {
+    const play = proposal()
+    play.potAddress = proposal(termsCovenant({ playerHash: h(0xcc) })).potAddress
+    expect(() => validatePlay(play, terms)).toThrow('funding address')
+  })
+
+  it.each([
+    [{ playerHash: h(0xcc) }, 'player'],
+    [{ playerPayoutPkScript: p2tr(0x30) }, 'payout'],
+    [{ oddsTarget: 2 }, 'odds'],
+    [{ houseStake: 999 }, 'stakes'],
+  ] as const)('refuses changed committed terms even when the address matches them: %s', (change, error) => {
+    expect(() => validatePlay(proposal(termsCovenant(change)), terms)).toThrow(error)
+  })
+
+  it('refuses a house-selected emulator key even when the entire address matches it', () => {
+    expect(() => validatePlay(proposal(termsCovenant({ emulatorPubkey: xonly(5) })), terms)).toThrow('cosigner')
+  })
+
+  it.each([
+    { cancelDelay: 1_799_999_999 },
+    { cancelDelay: 1_800_000_030 },
+    { finalExpiration: 1_800_000_650 },
+    { finalExpiration: 1_900_000_000 },
+  ])('refuses past, short, or excessive recovery windows before funding: %s', change => {
+    expect(() => validatePlay(proposal(termsCovenant(change)), terms)).toThrow('unsafe funding window')
+  })
+
+  it('uses current wall time even when the chain clock is stale', () => {
+    expect(() => validatePlay(proposal(), { ...terms, chainTime: 1_799_999_000, wallTime: 1_800_000_550 })).toThrow('unsafe funding window')
+  })
+})
+
+describe('authoritative recovery cleanup', () => {
+  beforeEach(async () => { await saveV4Forfeits([]) })
+  const checkpointId = '33'.repeat(32)
+  function coin(stash: StashedV4Forfeit, over: Partial<VirtualCoin> = {}): VirtualCoin {
+    const pot = rebuildJointPot(stash.covenant)
+    return {
+      ...(stash.stageTwoOutpoint ?? stash.potOutpoint),
+      createdAt: new Date(), status: { confirmed: false },
+      script: hexstr(stash.stageTwoOutpoint ? pot.stageTwo.pkScript : pot.pkScript),
+      isUnrolled: false, ...over,
+    }
+  }
+  function spend(script: Uint8Array, inputTxid = checkpointId): Transaction {
+    const tx = new Transaction()
+    tx.addInput({ txid: inputTxid, index: 0, witnessUtxo: { script: rebuildJointPot(covenant()).pkScript, amount: 2000n } })
+    tx.addOutput({ script, amount: 2000n })
+    return tx
+  }
+  function source(coins: VirtualCoin[], tx?: Transaction): Pick<IndexerProvider, 'getVtxos' | 'getVirtualTxs'> {
+    return {
+      getVtxos: vi.fn(async () => ({ vtxos: coins })),
+      getVirtualTxs: vi.fn(async () => ({ txs: tx ? [base64.encode(tx.toPSBT())] : [] })),
+    }
+  }
+
+  it('keeps the player secret while the actual pot is unspent, regardless of a claimed house resolution', async () => {
+    const stash = { ...baseStash({ playerSecretHex: '01'.repeat(17), confirmationPending: true }), status: 'resolved' }
+    await putV4Forfeit(stash)
+    expect((await reconcileRecovery(stash, source([coin(stash)]))).kind).toBe('unspent')
+    expect((await loadV4Forfeits())[0].playerSecretHex).toBe(stash.playerSecretHex)
+  })
+
+  it('keeps recovery after a missing-input/indexer-lag answer to an ambiguous broadcast', async () => {
+    const stash = baseStash({ confirmationPending: true })
+    await putV4Forfeit(stash)
+    const indexer = source([])
+    indexer.getVtxos = vi.fn().mockRejectedValue(new Error('VTXO_NOT_FOUND'))
+    expect((await reconcileRecovery(stash, indexer)).kind).toBe('pending')
+    expect((await loadV4Forfeits())[0].confirmationPending).toBe(true)
+  })
+
+  it('does not treat an unknown outpoint as evidence of a completed spend', async () => {
+    const stash = baseStash()
+    await putV4Forfeit(stash)
+    expect((await reconcileRecovery(stash, source([]))).kind).toBe('pending')
+    expect(await loadV4Forfeits()).toHaveLength(1)
+  })
+
+  it('clears only after the known operator reports and supplies the exact pot spend', async () => {
+    const stash = baseStash()
+    await putV4Forfeit(stash)
+    const tx = spend(new Uint8Array(Buffer.from(PLAYER_PAYOUT, 'hex')))
+    const observed = coin(stash, { isSpent: true, spentBy: checkpointId, arkTxId: tx.id })
+    expect((await reconcileRecovery(stash, source([observed], tx))).kind).toBe('spent')
+    expect(await loadV4Forfeits()).toEqual([])
+  })
+
+  it('keeps the record when a reported spend transaction does not spend its checkpoint', async () => {
+    const stash = baseStash()
+    await putV4Forfeit(stash)
+    const tx = spend(new Uint8Array(Buffer.from(PLAYER_PAYOUT, 'hex')), '44'.repeat(32))
+    const observed = coin(stash, { isSpent: true, spentBy: checkpointId, arkTxId: tx.id })
+    expect((await reconcileRecovery(stash, source([observed], tx))).kind).toBe('pending')
+    expect(await loadV4Forfeits()).toHaveLength(1)
+  })
+
+  it('adopts the contest continuation after a stage-one crash instead of deleting the secret', async () => {
+    const stash = baseStash({ playerSecretHex: '01'.repeat(17) })
+    await putV4Forfeit(stash)
+    const tx = spend(rebuildJointPot(stash.covenant).stageTwo.pkScript)
+    const observed = coin(stash, { isSpent: true, spentBy: checkpointId, arkTxId: tx.id })
+    expect((await reconcileRecovery(stash, source([observed], tx))).kind).toBe('staged')
+    const saved = (await loadV4Forfeits())[0]
+    expect(saved.stageTwoOutpoint).toEqual({ txid: tx.id, vout: 0, value: 2000 })
+    expect(saved.playerSecretHex).toBe(stash.playerSecretHex)
+  })
+
+  it('accepts a confirmed onchain spend after unroll, while keeping an unconfirmed one', async () => {
+    const stash = baseStash()
+    await putV4Forfeit(stash)
+    const tx = spend(new Uint8Array(Buffer.from(PLAYER_PAYOUT, 'hex')), stash.potOutpoint.txid)
+    const chain = {
+      getTxOutspends: vi.fn(async () => [{ spent: true, txid: tx.id }]),
+      getTxStatus: vi.fn(async () => ({ confirmed: false as const })),
+      getRawTransaction: vi.fn(async () => tx.toBytes(false, false)),
+    }
+    expect((await reconcileRecovery(stash, source([]), chain)).kind).toBe('pending')
+    expect(await loadV4Forfeits()).toHaveLength(1)
+    const confirmed = { ...chain, getTxStatus: vi.fn(async () => ({ confirmed: true as const, blockTime: 1_800_000_000, blockHeight: 100 })) }
+    expect((await reconcileRecovery(stash, source([]), confirmed)).kind).toBe('spent')
+    expect(await loadV4Forfeits()).toEqual([])
   })
 })
 

@@ -1,3 +1,5 @@
+import { signCheckpointsByOutpoint } from './test-helpers/checkpoint-signers'
+import { createTestWallet } from './helpers'
 /**
  * v4 Phase 2 SPIKE PROBE — does the staged-forfeit contest work end-to-end?
  *
@@ -15,14 +17,14 @@ import { base64, hex } from '@scure/base'
 import { createHash } from 'crypto'
 import {
   CoinflipJointPotScript, determineWinnerV3, getConditionWitness,
-  buildPlayerRevealTx, buildStageTwoSettleTx, buildStageTwoTakeAllTx, encodeSettleForEmulator,
+  buildPlayerRevealTx, buildStageTwoSettleTx, buildStageTwoTakeAllTx, prepareSettleForEmulator,
 } from 'arkade-coinflip'
 import {
-  Wallet, SingleKey, RestArkProvider, RestIndexerProvider, InMemoryWalletRepository,
+  Wallet, SingleKey, RestOperatorProvider, RestIndexerProvider, InMemoryWalletRepository,
   InMemoryContractRepository, decodeTapscript, buildOffchainTx, CSVMultisigTapscript,
-  Transaction, ArkAddress, type ArkInfo, type ArkProvider, type ArkTxInput,
+  Transaction, ArkAddress, type OperatorInfo, type OperatorProvider, type ArkTxInput,
 } from '@arkade-os/sdk'
-import { packets } from '@arklabshq/contract-workflows-prototype'
+import { packets } from 'arkade-coinflip'
 import { faucet, setChainTime, resetChainTime, waitVtxos } from './helpers'
 
 const ARK = process.env.ARK_SERVER_URL || 'http://localhost:7070'
@@ -36,9 +38,8 @@ const sha = (b: Uint8Array) => new Uint8Array(createHash('sha256').update(b).dig
 const toXOnly = (p: Uint8Array) => (p.length === 33 ? p.slice(1) : p)
 
 async function makeWallet(id: SingleKey): Promise<Wallet> {
-  return Wallet.create({
-    identity: id, arkServerUrl: ARK, esploraUrl: ESPLORA,
-    storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+  return createTestWallet(id, {
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
     settlementConfig: false,
   })
 }
@@ -73,25 +74,26 @@ jest.retryTimes(2, { logErrorsBeforeRetry: true })
 
 describe('v4 Phase 2 spike: staged-forfeit contest', () => {
   let arkAvailable = false
-  let arkProvider: ArkProvider
-  let arkInfo: ArkInfo
+  let arkProvider: OperatorProvider
+  let arkInfo: OperatorInfo
   let serverUnroll: CSVMultisigTapscript.Type
   let emuPubkey: Uint8Array
   beforeAll(async () => {
     try {
-      arkProvider = new RestArkProvider(ARK)
+      arkProvider = new RestOperatorProvider(ARK)
       arkInfo = await arkProvider.getInfo()
       serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
       const info = await (await fetch(`${EMU}/v1/info`)).json() as { signerPubkey: string }
-      emuPubkey = hex.decode(info.signerPubkey)
+      emuPubkey = toXOnly(hex.decode(info.signerPubkey))
       arkAvailable = !!arkInfo?.signerPubkey && !!emuPubkey
     } catch { arkAvailable = false }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
   }, 25_000)
   afterAll(() => resetChainTime())
 
   // POST a built (unsigned-by-operator) covenant tx to the emulator, retry transient lag.
   async function postEmu(built: { arkTx: Transaction; checkpoints: Transaction[] }, label: string): Promise<string> {
-    const body = JSON.stringify(encodeSettleForEmulator(built))
+    const body = JSON.stringify(await prepareSettleForEmulator(built, new RestIndexerProvider(ARK)))
     for (let a = 0; a < 12; a++) {
       const r = await fetch(`${EMU}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(25_000) })
       if (r.ok) return Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id
@@ -153,15 +155,10 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
       const { arkTxid: cofundTxid, signedCheckpointTxs } = await arkProvider.submitTx(
         base64.encode(cofundSigned.toPSBT()), cofund.checkpoints.map((c) => base64.encode(c.toPSBT())),
       )
-      const finals: string[] = []
-      for (let i = 0; i < signedCheckpointTxs.length; i++) {
-        const tx = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[i]))
-        const owner = i === 0 ? playerId : houseId
-        let s = tx
-        try { s = await owner.sign(tx, Array.from({ length: tx.inputsLength }, (_, k) => k)) }
-        catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
-        finals.push(base64.encode(s.toPSBT()))
-      }
+      const finals = await signCheckpointsByOutpoint(signedCheckpointTxs, [
+        { checkpoint: cofund.checkpoints[0], identity: playerId },
+        { checkpoint: cofund.checkpoints[1], identity: houseId },
+      ])
       try {
         await arkProvider.finalizeTx(cofundTxid, finals)
         return { pot, cofundTxid, playerId, playerPayout, housePayout, playerRevealBytes, creatorRevealBytes, winner, finalExpiration: now + 3600 }
@@ -207,7 +204,7 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
   }
 
   it('stage 1 reveal -> stage 2 HOUSE SETTLE pays the winner', async () => {
-    if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const g = await cofundPot()
     const stageTwoTxid = await stageOneReveal(g)
     console.log('[v4-staged] stage 1: pot -> StageTwo', stageTwoTxid)
@@ -227,7 +224,7 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
   }, 300_000)
 
   it('stage 2 HOUSE SETTLE pays the HOUSE when the player LOSES (theft-defence direction)', async () => {
-    if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     // houseDigit 1 + playerDigit 0 -> roll 1 -> HOUSE wins. A losing player who
     // revealed on-chain must NOT get the pot: the house settles it to itself, and
     // the emulator enforces the winner (the house can't pay itself if it lost).
@@ -246,7 +243,7 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
   }, 300_000)
 
   it('stage 2 settle to the WRONG winner is REJECTED — the house cannot cheat', async () => {
-    if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     // The PLAYER wins (houseDigit 0). The house tries to settle to ITSELF via the
     // creatorWin leaf anyway — the emulator runs the creator-win predicate against
     // both on-chain secrets, it evaluates FALSE, and the settle is rejected.
@@ -259,14 +256,14 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
       winner: 'creator', winnerPayoutPkScript: g.housePayout, // wrong winner — house lost
       potAmount: BigInt(2 * BET), playerRevealBytes: g.playerRevealBytes, creatorRevealBytes: g.creatorRevealBytes, serverUnroll,
     })
-    const body = JSON.stringify(encodeSettleForEmulator(cheat))
+    const body = JSON.stringify(await prepareSettleForEmulator(cheat, new RestIndexerProvider(ARK)))
     const r = await fetch(`${EMU}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(30_000) })
     expect(r.ok).toBe(false)
     console.log('[v4-staged] CHEAT REJECTED: house cannot settle to itself when the player won — status', r.status)
   }, 300_000)
 
   it('stage 1 reveal -> stage 2 PLAYER TAKE-ALL after finalExpiration', async () => {
-    if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const g = await cofundPot()
     const stageTwoTxid = await stageOneReveal(g)
     console.log('[v4-staged] stage 1: pot -> StageTwo', stageTwoTxid)
@@ -327,7 +324,7 @@ describe('v4 Phase 2 spike: staged-forfeit contest', () => {
   }
 
   it('stage 1 publishes the player secret on-chain — the house can extract it', async () => {
-    if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const g = await cofundPot()
     const stageTwoTxid = await stageOneReveal(g)
     expect(await vtxoLanded(g.pot.stageTwo.pkScript, stageTwoTxid, 2 * BET)).toBe(true)

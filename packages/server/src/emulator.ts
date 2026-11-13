@@ -1,21 +1,3 @@
-/**
- * Arkade-script emulator wiring.
- *
- * The emulator (https://github.com/arkade-os/emulator) is the off-chain
- * signing service that validates arkade-script covenants and signs the
- * matching tweaked key. We use it for the v4 joint-pot settle + playerForfeit
- * covenants (see `packages/lib/src/arkade-forfeit.ts`).
- *
- * Configuration: set `EMULATOR_URL` (e.g. `http://localhost:7073`). v4 REQUIRES the
- * emulator — the joint-pot settle/forfeit path is arkade-script, so there is NO legacy
- * CSV fallback for new v4 games.
- *
- * Failure mode: if `EMULATOR_URL` is unset or the service can't be reached at boot,
- * `loadEmulatorConfig` returns `undefined` (with a console warning) and `handleV4Play`
- * REJECTS new games ("Emulator not configured…") — the server stays up, but no new
- * games can be created until the emulator is reachable (restart to re-probe).
- */
-
 const EMULATOR_URL = process.env.EMULATOR_URL?.trim() || ''
 // Publicly-reachable URL the browser uses to POST forfeit txs. Defaults to
 // EMULATOR_URL — only override when the server's network name (e.g. inside
@@ -37,16 +19,23 @@ export interface EmulatorConfig {
 }
 
 let cached: EmulatorConfig | null | undefined
+let cacheExpiresAt = 0
+let probing: Promise<EmulatorConfig | undefined> | undefined
 
-/**
- * Probe the emulator's `/v1/info` once and cache the result. Returns
- * `undefined` if `EMULATOR_URL` is unset or the probe failed. Safe to
- * call repeatedly — only the first call hits the network.
- */
+/** Collapse concurrent probes and refresh health without restarting the server. */
 export async function loadEmulatorConfig(): Promise<EmulatorConfig | undefined> {
-  if (cached !== undefined) return cached ?? undefined
+  if (Date.now() < cacheExpiresAt) return cached ?? undefined
+  if (probing) return probing
+  const pending = probeEmulator()
+  probing = pending
+  try { return await pending }
+  finally { if (probing === pending) probing = undefined }
+}
+
+async function probeEmulator(): Promise<EmulatorConfig | undefined> {
   if (!EMULATOR_URL) {
     cached = null
+    cacheExpiresAt = Infinity
     return undefined
   }
   try {
@@ -62,14 +51,17 @@ export async function loadEmulatorConfig(): Promise<EmulatorConfig | undefined> 
     if (!body.signerPubkey || typeof body.signerPubkey !== 'string') {
       throw new Error('missing signerPubkey in /v1/info response')
     }
-    const signerPubkey = hexToBytes(body.signerPubkey)
+    const decoded = hexToBytes(body.signerPubkey)
+    const signerPubkey = decoded.length === 33 ? decoded.slice(1) : decoded
+    if (signerPubkey.length !== 32) throw new Error('Expected a 32-byte x-only emulator signer')
     cached = {
       url: EMULATOR_URL,
       publicUrl: EMULATOR_PUBLIC_URL,
-      signerPubkeyHex: body.signerPubkey,
+      signerPubkeyHex: Buffer.from(signerPubkey).toString('hex'),
       signerPubkey,
       version: body.version,
     }
+    cacheExpiresAt = Date.now() + 30_000
     console.log(
       `[emulator] connected at ${EMULATOR_URL} (v${body.version}, signer=${body.signerPubkey.slice(0, 16)}…)`,
     )
@@ -79,9 +71,10 @@ export async function loadEmulatorConfig(): Promise<EmulatorConfig | undefined> 
     console.warn(
       `[emulator] EMULATOR_URL set but probe failed (${msg}); ` +
         `v4 /play will be REJECTED until the emulator is reachable (no legacy fallback). ` +
-        `Restart the server once it's reachable to re-probe.`,
+        `A later request will retry the connection.`,
     )
     cached = null
+    cacheExpiresAt = Date.now() + 5000
     return undefined
   }
 }
@@ -92,6 +85,7 @@ export async function loadEmulatorConfig(): Promise<EmulatorConfig | undefined> 
  */
 export function _resetEmulatorConfigCache(): void {
   cached = undefined
+  cacheExpiresAt = 0
 }
 
 function hexToBytes(s: string): Uint8Array {

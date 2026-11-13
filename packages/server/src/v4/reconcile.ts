@@ -14,7 +14,7 @@ import { base64, hex } from '@scure/base'
 import { Transaction, decodeTapscript, CSVMultisigTapscript, RestIndexerProvider } from '@arkade-os/sdk'
 import {
   determineWinnerV3, buildStageTwoSettleTx, buildJointPotRefundTx,
-  encodeSettleForEmulator, getConditionWitness, type BuiltJointPotTx,
+  prepareSettleForEmulator, getConditionWitness, type BuiltJointPotTx,
 } from 'arkade-coinflip'
 import { hashSecret, ARK_SERVER_URL } from '../house-wallet.js'
 import { reservations } from '../vtxo-pool.js'
@@ -55,7 +55,7 @@ export async function broadcastV4Refund(gameId: string, deps: AppDeps): Promise<
 
   const cfg = await loadEmulatorConfig()
   if (!cfg) throw new Error('Emulator not configured')
-  const body = JSON.stringify(encodeSettleForEmulator(refund))
+  const body = JSON.stringify(await prepareSettleForEmulator(refund, deps.wallet.indexerProvider, deps.wallet.onchainProvider))
   // The emulator co-signs the split covenant + forwards to arkd (each POST is an
   // arkd submit) — serialize it, retry transient lag. arkd enforces the CLTV, so
   // this only succeeds once the chain's MTP is past cancelDelay.
@@ -74,7 +74,7 @@ export async function broadcastV4Refund(gameId: string, deps: AppDeps): Promise<
   }
 
   reservations.release(gameId)
-  await deps.repos.games.update(gameId, { status: 'resolved' })
+  await deps.repos.games.update(gameId, { status: 'resolved', stateJson: JSON.stringify({ ...state, refundTxid }) })
   return { refundTxid }
 }
 
@@ -96,7 +96,7 @@ export async function reconcileV4Refunds(deps: AppDeps): Promise<string[]> {
   for (const game of stalled) {
     let state: V4State
     try {
-      state = JSON.parse(game.house_vtxos_json as string) as V4State
+      state = JSON.parse(game.state_json as string) as V4State
     } catch {
       continue
     }
@@ -118,10 +118,10 @@ export async function reconcileV4Refunds(deps: AppDeps): Promise<string[]> {
  * forwards to arkd). Serialized via withArkSubmit + transient-retry, exactly like
  * the inline settle/refund posts. Returns the on-chain txid.
  */
-async function submitBuiltToEmulator(built: BuiltJointPotTx, label: string): Promise<string> {
+async function submitBuiltToEmulator(built: BuiltJointPotTx, label: string, deps: AppDeps): Promise<string> {
   const cfg = await loadEmulatorConfig()
   if (!cfg) throw new Error('Emulator not configured')
-  const body = JSON.stringify(encodeSettleForEmulator(built))
+  const body = JSON.stringify(await prepareSettleForEmulator(built, deps.wallet.indexerProvider, deps.wallet.onchainProvider))
   const postOnce = async (): Promise<{ ok: true; txid: string } | { ok: false; status: number; text: string }> => {
     const r = await fetch(`${cfg.url}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(25_000) })
     if (r.ok) return { ok: true, txid: Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id }
@@ -182,7 +182,7 @@ export async function settleV4StageTwo(gameId: string, deps: AppDeps): Promise<{
 async function settleV4StageTwoInner(gameId: string, deps: AppDeps): Promise<{ settleTxid: string; winner: 'player' | 'house' }> {
   const game = await deps.repos.games.get(gameId)
   if (!game) throw new Error('Game not found')
-  const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
+  const state = JSON.parse(game.state_json || '{}') as V4State
   if (state.protocolVersion !== 'v4') throw new Error('Not a v4 game')
   if (!state.cofundTxid) throw new Error('Pot not co-funded')
   if (game.status === 'resolved') throw new Error('Game already resolved')
@@ -212,12 +212,13 @@ async function settleV4StageTwoInner(gameId: string, deps: AppDeps): Promise<{ s
     winner: outcome, winnerPayoutPkScript, potAmount: BigInt(state.pot),
     playerRevealBytes: playerSecret, creatorRevealBytes: houseSecret, serverUnroll,
   })
-  const settleTxid = await submitBuiltToEmulator(settle, 'stage-2 settle')
+  const settleTxid = await submitBuiltToEmulator(settle, 'stage-2 settle', deps)
 
   const winner: 'player' | 'house' = outcome === 'player' ? 'player' : 'house'
   reservations.release(gameId)
   await deps.repos.games.update(gameId, {
     status: 'resolved', winner, payoutAmount: state.pot, playerSecretHex: hex.encode(playerSecret),
+    stateJson: JSON.stringify({ ...state, settleTxid }),
   })
   return { settleTxid, winner }
 }
@@ -235,7 +236,7 @@ export async function reconcileV4StageTwo(deps: AppDeps): Promise<string[]> {
   const settleTxids: string[] = []
   for (const game of cofunded) {
     let state: V4State
-    try { state = JSON.parse(game.house_vtxos_json as string) as V4State } catch { continue }
+    try { state = JSON.parse(game.state_json as string) as V4State } catch { continue }
     if (state.protocolVersion !== 'v4' || !state.cofundTxid) continue
     try {
       const pot = rebuildCovenant(state.covenant)

@@ -5,30 +5,32 @@
          epilepsy-grade strobing. -->
     <div v-if="winFlash" class="win-flash" />
 
-    <!-- Top HUD: skin selector (left) + P&L pill (right). -->
     <div class="top-hud">
-      <div class="skin-selector">
-        <button
-          v-for="skin in skins"
-          :key="skin.id"
-          class="skin-chip"
-          :class="{ selected: currentSkinId === skin.id }"
-          :title="skin.name"
-          @click="selectSkin(skin.id)"
-        >
-          <span class="skin-icon">{{ skin.icon }}</span>
-        </button>
-      </div>
-      <div class="hud-right">
-        <button class="history-btn" title="Game history" @click="openHistory">&#9827;</button>
-        <router-link to="/how-it-works" class="history-btn help-btn" title="How it works">?</router-link>
-        <!-- Wallet balance folded into the one HUD (the global float-pill is hidden
-             on this route) so there's a single top nav, not two overlapping ones. -->
+      <div class="mode-hud">
+        <GameModeNav />
         <button class="wallet-chip mono" @click="$emit('open-wallet')" :title="`Wallet — ${arkStatus}`">
           <span class="conn-dot" :class="arkStatus"></span>
           <span class="wallet-ico" aria-hidden="true">&#128176;</span>
           <span class="wallet-bal">{{ walletBalanceLabel }}</span>
         </button>
+      </div>
+      <div class="skin-hud">
+        <div class="skin-selector">
+          <button
+            v-for="skin in skins"
+            :key="skin.id"
+            class="skin-chip"
+            :class="{ selected: currentSkinId === skin.id }"
+            :title="skin.name"
+            @click="selectSkin(skin.id)"
+          >
+            <span class="skin-icon">{{ skin.icon }}</span>
+          </button>
+        </div>
+        <div class="hud-right">
+          <button class="history-btn" title="Game history" @click="openHistory">&#9827;</button>
+          <router-link to="/how-it-works" class="history-btn help-btn" title="How it works">?</router-link>
+        </div>
       </div>
     </div>
 
@@ -113,7 +115,7 @@
         />
         <div class="amount-ends">
           <span>{{ tiersLoaded ? amountBounds.min.toLocaleString() : '—' }}</span>
-          <span v-if="!tiersLoaded">Loading bet range…</span>
+          <span v-if="!tiersLoaded">{{ tiersFailed ? 'The house is not reachable yet — retrying…' : 'Loading bet range…' }}</span>
           <!-- ORDER MATTERS, and it is about which lever the player can pull.
                A high win chance needs a BIG stake (the house side must clear
                dust), so a modest balance is blocked at 95% but fine at 50% —
@@ -268,6 +270,7 @@
 import { defineComponent, ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useStore } from 'vuex'
 import GameHistoryList, { type GameHistoryItem } from '@/components/GameHistoryList.vue'
+import GameModeNav from '@/components/GameModeNav.vue'
 import GameDetailsModal from '@/components/GameDetailsModal.vue'
 import StalledBets from '@/components/StalledBets.vue'
 import { getTiers } from '@/services/api'
@@ -279,7 +282,7 @@ import { getErrorMessage, friendlyError } from '@/utils/errors'
 import { logDiag } from '@/utils/diagnosticsLog'
 // House-stake / odds formula — single-sourced in the lib so this preview can't
 // drift from what the server charges (crypto-free subpath, like game-math).
-import { computeHouseStake, amountBoundsForOdds, feasibleOddsWindow } from 'arkade-coinflip/dist/stake-math'
+import { computeHouseStake, amountBoundsForOdds, feasibleOddsWindow } from 'arkade-coinflip/dist/stake-math.js'
 
 const AUTO_OPTIONS = [
   { label: 'OFF', value: null },
@@ -305,9 +308,9 @@ interface SlabResult { won: boolean; amount: number }
 
 export default defineComponent({
   name: 'PlayView',
-  components: { GameHistoryList, GameDetailsModal, StalledBets, NumberField },
+  components: { GameHistoryList, GameDetailsModal, StalledBets, NumberField, GameModeNav },
   emits: ['open-wallet'],
-  setup(_props, { emit }) {
+  setup() {
     const store = useStore()
 
     // ── Game config ───────────────────────────────────────────────────
@@ -328,6 +331,8 @@ export default defineComponent({
     // template gates on this so the pre-load render is neutral rather than a
     // false "no capacity" / inverted-range flash.
     const tiersLoaded = ref(false)
+    const tiersFailed = ref(false)
+    let tiersRetry: ReturnType<typeof setTimeout> | undefined, tiersAttempt = 0
     // Per-bet ceiling published by /api/tiers (reservation-aware). Distinct from
     // houseBankroll, which is the whole spendable balance.
     const capacity = ref(0)
@@ -564,7 +569,7 @@ export default defineComponent({
     // Wallet balance + connection status for the HUD wallet chip (mirrors what
     // App.vue's float-pill shows, since that pill is hidden on this route).
     const arkStatus = computed(() => store.state.ark?.status as string)
-    const walletBalanceLabel = computed(() => Number(store.getters['ark/balance'] || 0).toLocaleString())
+    const walletBalanceLabel = computed(() => arkStatus.value === 'connected' && store.state.ark?.balanceSynced === true ? Number(store.getters['ark/balance'] || 0).toLocaleString() : '—')
 
     // Spendable offchain balance (settled + preconfirmed). Infinity only while
     // the wallet is still connecting (ark.walletBalance === null), so the UI
@@ -643,8 +648,15 @@ export default defineComponent({
         betMin.value = data.betMin ?? 331
         betMax.value = data.betMax ?? 50_000
         tiersLoaded.value = true
+        tiersFailed.value = false; tiersAttempt = 0
       } catch (e) {
         console.warn('Failed to load tiers:', e)
+        // Until a first success the page has no bet range at all, so keep retrying instead of waiting for a reload.
+        if (!tiersLoaded.value && !stopRequested.value) {
+          tiersFailed.value = true
+          clearTimeout(tiersRetry)
+          tiersRetry = setTimeout(loadTiers, Math.min(30_000, 5_000 * 2 ** tiersAttempt++))
+        }
       }
     }
 
@@ -750,10 +762,10 @@ export default defineComponent({
         }
         const [result] = await Promise.all([
           // Routes to v0.4 (joint pot) or v0.3 (per-party escrow) by the server's
-          // advertised protocolVersion — v0.4 is the default; PROTOCOL_VERSION=v3 opts out.
+          // advertised joint-pot protocol.
           store.dispatch('ark/placeTrustlessBet', {
             tier: betAmount.value,
-            oddsN: bet.n, oddsTarget: bet.target, oddsLo: bet.lo,
+            oddsN: bet.n, oddsTarget: bet.target, oddsLo: bet.lo, oddsEdgeBps: oddsEdgeBps.value,
           }),
           new Promise((r) => setTimeout(r, MIN_FLIP_MS)),
         ])
@@ -870,17 +882,13 @@ export default defineComponent({
         // Align to the server's network (env-driven) before connecting.
         store.dispatch('ark/syncNetworkFromServer').catch(() => { /* surfaced in drawer */ })
       }
-      setTimeout(() => {
-        const settled = Number(store.getters['ark/balance'] || 0)
-        const boarding = Number(store.getters['ark/boardingBalance'] || 0)
-        if (settled === 0 && boarding === 0) emit('open-wallet')
-      }, 1500)
     })
 
     onUnmounted(() => {
       stopRequested.value = true
       window.removeEventListener('keydown', handleKey)
       if (slabTimer) clearTimeout(slabTimer)
+      clearTimeout(tiersRetry)
     })
 
     // Switching skins swaps in that skin's own ladder — restore the step the
@@ -966,7 +974,7 @@ export default defineComponent({
 
     return {
       // Game config
-      tiers, maxAvailable, houseReady, tiersLoaded,
+      tiers, maxAvailable, houseReady, tiersLoaded, tiersFailed,
       // Amount slider
       betAmount, amountBounds, usableMax, balanceCapped, canAffordRung, canBet,
       // Odds slider
@@ -1020,14 +1028,15 @@ export default defineComponent({
 .top-hud {
   width: 100%;
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mode-hud, .skin-hud {
+  width: 100%;
+  display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  /* Deliberately NO wrap. Wrapping put the wallet/help/history on a second row
-     on a phone, which is half of what read as "things in different rows,
-     jumping around": the row count changed with the viewport AND with the P/L
-     width. The skin chips shrink instead (see .skin-selector) — a slightly
-     tighter chip is a much smaller cost than a HUD whose shape moves. */
   flex-wrap: nowrap;
 }
 

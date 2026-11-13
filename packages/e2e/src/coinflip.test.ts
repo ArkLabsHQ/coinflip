@@ -8,7 +8,7 @@
 import { hex } from '@scure/base'
 import {
   SingleKey,
-  RestArkProvider,
+  RestOperatorProvider,
   DefaultVtxo,
 } from '@arkade-os/sdk'
 
@@ -32,14 +32,14 @@ describe('integration: ark server connection', () => {
       })
       arkAvailable = resp.ok
     } catch {
-      console.log('Ark server not available, skipping integration tests')
+      throw new Error('Required regtest services are unavailable')
     }
   })
 
   it('should connect to ark server and get info', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
-    const provider = new RestArkProvider(ARK_SERVER_URL)
+    const provider = new RestOperatorProvider(ARK_SERVER_URL)
     const info = await provider.getInfo()
 
     expect(info.signerPubkey).toBeTruthy()
@@ -48,13 +48,13 @@ describe('integration: ark server connection', () => {
   })
 
   it('should create an identity and derive an ark address', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     const identity = SingleKey.fromRandomBytes()
     const pubkey = await identity.xOnlyPublicKey()
     expect(pubkey.length).toBe(32)
 
-    const provider = new RestArkProvider(ARK_SERVER_URL)
+    const provider = new RestOperatorProvider(ARK_SERVER_URL)
     const info = await provider.getInfo()
     const serverPubkey = toXOnly(hex.decode(info.signerPubkey))
 

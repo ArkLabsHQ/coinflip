@@ -1,23 +1,20 @@
-# Sample docker-compose for deploying from pre-built GHCR images.
-# Copy this to docker-compose.yml and adjust as needed.
-#
-# Usage:
-#   docker compose -f docker-compose.sample.yml up -d
-
+# Run published images against Mutinynet; keep the admin UI on host loopback.
 services:
   server:
     image: ghcr.io/arklabshq/coinflip-server:latest
     volumes:
       - server-data:/app/data
     environment:
-      - ARK_SERVER_URL=https://mutinynet.arkade.sh
-      - ESPLORA_URL=https://mutinynet.com/api
-      - PUBLIC_PORT=3001
-      - ADMIN_PORT=3002
-      - DATA_DIR=/app/data
-    # Uncomment to expose admin dashboard (internal use only)
-    # ports:
-    #   - "127.0.0.1:3002:3002"
+      ARK_SERVER_URL: https://mutinynet.arkade.sh
+      ESPLORA_URL: https://mempool.mutinynet.arkade.sh/api
+      EMULATOR_URL: https://emulator.mutinynet.arkade.sh
+      EMULATOR_PUBLIC_URL: https://emulator.mutinynet.arkade.sh
+      PUBLIC_PORT: 3001
+      ADMIN_PORT: 3002
+      ADMIN_HOST: 0.0.0.0
+      DATA_DIR: /app/data
+    ports:
+      - "127.0.0.1:3002:3002"
     restart: unless-stopped
 
   client:
@@ -25,10 +22,9 @@ services:
     ports:
       - "8080:80"
     environment:
-      - API_HOST=server
-      - API_PORT=3001
-    depends_on:
-      - server
+      API_HOST: server
+      API_PORT: 3001
+    depends_on: [server]
     restart: unless-stopped
 
 volumes:

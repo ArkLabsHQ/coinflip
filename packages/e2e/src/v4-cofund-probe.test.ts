@@ -1,22 +1,12 @@
-/**
- * v4 SPIKE PROBE — is a two-party atomic co-fund possible at all?
- *
- * v3 funds its two escrows with two SEPARATE single-party offchain txs because
- * (per per-party-escrow.spike) co-signing a checkpoint across the client/server
- * boundary was deemed impractical. v4's joint pot needs the opposite: ONE
- * offchain tx with BOTH the player's and the house's inputs → one joint-pot
- * VTXO. This probe builds exactly that and tries to submit+finalize it, with
- * each party signing only its own input + its own checkpoint (the realistic
- * API handshake). Pass ⇒ the joint pot is feasible. Fail ⇒ v4 falls back to
- * per-party funding (design §ammend). This decides the architecture.
- */
+import { signCheckpointsByOutpoint } from './test-helpers/checkpoint-signers'
+/** Two parties atomically co-fund one compiled game contract and sign only their own checkpoints. */
 import { base64, hex } from '@scure/base'
 import {
   Wallet, SingleKey, RestArkProvider, InMemoryWalletRepository, InMemoryContractRepository,
   decodeTapscript, buildOffchainTx, CSVMultisigTapscript, Transaction, ArkAddress,
-  type ArkInfo, type ArkProvider, type ArkTxInput, type Identity,
+  type OperatorInfo, type ArkProvider, type ArkTxInput, type Identity,
 } from '@arkade-os/sdk'
-import { faucet, waitVtxos } from './helpers'
+import { createTestWallet, faucet, waitVtxos } from './helpers'
 
 const ARK_SERVER_URL = process.env.ARK_SERVER_URL || 'http://localhost:7070'
 const ESPLORA_URL = process.env.ESPLORA_URL || 'http://localhost:3000/api'
@@ -25,8 +15,7 @@ const FUND_BTC = 0.001
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 async function makeWallet(identity: SingleKey): Promise<Wallet> {
-  return Wallet.create({
-    identity, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+  return createTestWallet(identity, {
     storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
     settlementConfig: false,
   })
@@ -65,7 +54,7 @@ jest.retryTimes(2, { logErrorsBeforeRetry: true })
 describe('v4 spike: two-party atomic co-fund', () => {
   let arkAvailable = false
   let arkProvider: ArkProvider
-  let arkInfo: ArkInfo
+  let arkInfo: OperatorInfo
   let serverUnroll: CSVMultisigTapscript.Type
   beforeAll(async () => {
     try {
@@ -74,10 +63,11 @@ describe('v4 spike: two-party atomic co-fund', () => {
       serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
       arkAvailable = !!arkInfo?.signerPubkey
     } catch { arkAvailable = false }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
   }, 20_000)
 
   it('builds + submits ONE offchain tx with player + house inputs (the joint-pot co-fund)', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     const playerId = SingleKey.fromRandomBytes()
     const houseId = SingleKey.fromRandomBytes()
@@ -111,16 +101,10 @@ describe('v4 spike: two-party atomic co-fund', () => {
     )
     console.log('[v4-probe] co-fund submitTx ok, arkTxid =', arkTxid, 'checkpoints =', signedCheckpointTxs.length)
 
-    // Each party signs its OWN checkpoint (checkpoint i belongs to input i).
-    const finals: string[] = []
-    for (let i = 0; i < signedCheckpointTxs.length; i++) {
-      const tx = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[i]))
-      const idx = Array.from({ length: tx.inputsLength }, (_, k) => k)
-      const owner = i === 0 ? playerId : houseId
-      let s = tx
-      try { s = await owner.sign(tx, idx) } catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
-      finals.push(base64.encode(s.toPSBT()))
-    }
+    const finals = await signCheckpointsByOutpoint(signedCheckpointTxs, [
+      { checkpoint: checkpoints[0], identity: playerId },
+      { checkpoint: checkpoints[1], identity: houseId },
+    ])
     await arkProvider.finalizeTx(arkTxid, finals)
     console.log('[v4-probe] co-fund finalized — TWO-PARTY ATOMIC CO-FUND IS FEASIBLE')
 

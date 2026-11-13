@@ -1,0 +1,446 @@
+pragma arkade ^0.1.0;
+import "./fresh_pool_input.ark";
+
+struct PoolState { int supply; int loss; int fees; int phase; int nav; }
+struct PoolGame {
+  bytes playerHash; bytes houseHash; ScriptPubKey playerPayout;
+  int playerStake; int houseStake; int n; int lo; int target; int cancelAt; int finalAt;
+}
+
+contract PoolGameVault(
+  bytes32 controlTxid, int controlGidx, bytes32 shareTxid, int shareGidx,
+  pubkey operator, ScriptPubKey operatorPayout,
+  int operatorFeeBps, int minHouseEdgeBps, int maxStakeBps, int recoveryMargin
+) {
+  const int MAX_NAV = 1000000;
+  const int MAX_SUPPLY = 1000000000000;
+  const int RESERVE = 330;
+
+  private function minimumTTL() int {
+    int ttl = recoveryMargin + 3600;
+    if (ttl < 6000) { ttl = 6000; }
+    return ttl;
+  }
+
+  private function memberPayout() ScriptPubKey {
+    require(tx.inputs[1].script == new FreshPoolInput(controlTxid, controlGidx, shareTxid, shareGidx, recoveryMargin), "fresh member staging");
+    require(this.expiry >= 500000000 && this.expiry <= 4294967295 && !checkTime(this.expiry - minimumTTL()), "fresh pool input");
+    bytes payout = tx.inputs[1].packet(43);
+    require(size(tx.inputs[1].packet(42)) == 32 && size(payout) == 33 && substr(payout, 0, 1) == 0x01, "member payout metadata");
+    require(!tx.packet.has(42) && !tx.packet.has(43), "no staged metadata");
+    ScriptPubKey result = { version: 1, program: substr(payout, 1, 32) };
+    require(result != tx.inputs[0].script, "member payout differs");
+    return result;
+  }
+
+  private function copyPacket(int packetType) {
+    if (tx.inputs[1].packet.has(packetType)) {
+      require(tx.packet(packetType) == tx.inputs[1].packet(packetType), "renewed state packet");
+    } else {
+      require(!tx.packet.has(packetType), "no invented state packet");
+    }
+  }
+
+  @allow(output-script-unchecked, "the last proof output is a zero-valued state extension")
+  private function renewal(bool sponsored) {
+    require(this.activeInputIndex == 1, "intent ownership input");
+    require(tx.intent.field("type") == 0x7265676973746572, "registration intent");
+    require(tx.intent.field("onchain_output_indexes") == 0x5b5d, "offchain renewal");
+    let script = tx.inputs[1].script;
+    require(tx.inputs[0].value == 0 && tx.inputs[0].script == script, "synthetic message input");
+    require(tx.inputs[1].assets.length == 1 && tx.inputs[1].assets.lookup(controlTxid, controlGidx) == 1, "canonical renewal control");
+    require(tx.outputs[0].script == script && tx.outputs[0].value == tx.inputs[1].value, "unchanged canonical value");
+    require(tx.outputs[0].assets.length == 1 && tx.outputs[0].assets.lookup(controlTxid, controlGidx) == 1, "renewed control");
+    require(tx.assetGroups.length == 1, "renewal asset group");
+    let token = tx.assetGroups.find(controlTxid, controlGidx);
+    require(!token.isFresh && !token.hasControl && token.numInputs == 1 && token.sumInputs == 1, "renewal control input");
+    require(token.inputs[0].type == 1 && token.inputs[0].index == 1, "local ownership input");
+    require(token.numOutputs == 1 && token.sumOutputs == 1 && token.outputs[0].index == 0, "single renewed control");
+    if (sponsored) {
+      require(tx.numInputs == 3 && tx.numOutputs == 3, "sponsored renewal shape");
+      let sponsorScript = tx.inputs[2].script;
+      require(tx.inputs[2].assets.length == 0 && sponsorScript != script, "plain renewal sponsor");
+      require(tx.outputs[1].script == sponsorScript && tx.outputs[1].value >= 330, "renewal sponsor change");
+      require(tx.outputs[1].assets.length == 0 && tx.outputs[2].value == 0, "renewal tail");
+      int fee = tx.inputs[2].value - tx.outputs[1].value;
+      require(fee >= 0 && fee <= 100000, "sponsored batch fee");
+    } else {
+      require(tx.numInputs == 2 && tx.numOutputs == 2 && tx.outputs[1].value == 0, "exact renewal shape");
+    }
+    copyPacket(32);
+    copyPacket(33);
+    copyPacket(34);
+    copyPacket(35);
+    copyPacket(36);
+    copyPacket(37);
+    copyPacket(38);
+    copyPacket(39);
+    copyPacket(40);
+    copyPacket(16);
+    copyPacket(17);
+  }
+
+  function renew() { renewal(false); }
+
+  function renew(signature operatorSig, signature serverSig, signature emulatorSig) tapscript {
+    require(checkMultisig([operator, server, emulator], [operatorSig, serverSig, emulatorSig], 3));
+  }
+
+  function renewSponsored() { renewal(true); }
+
+  function renewSponsored(signature operatorSig, signature serverSig, signature emulatorSig) tapscript {
+    require(checkMultisig([operator, server, emulator], [operatorSig, serverSig, emulatorSig], 3));
+  }
+
+  @allow(unsigned-spend-path, "anyone may submit an unchanged continuation once new operations have closed")
+  function rescue() {
+    require(this.expiry >= 500000000 && checkTime(this.expiry - minimumTTL()), "rescue window");
+    renewal(false);
+  }
+
+  @allow(unsigned-spend-path, "anyone may submit an unchanged continuation once new operations have closed")
+  function rescueSponsored() {
+    require(this.expiry >= 500000000 && checkTime(this.expiry - minimumTTL()), "rescue window");
+    renewal(true);
+  }
+
+  private function game() PoolGame {
+    bytes hashes = tx.inputs[0].packet(36);
+    bytes payout = tx.inputs[0].packet(37);
+    bytes stakes = tx.inputs[0].packet(38);
+    bytes odds = tx.inputs[0].packet(39);
+    bytes deadlines = tx.inputs[0].packet(40);
+    require(size(hashes) == 64 && size(payout) == 33, "game commitments");
+    require(size(stakes) == 8 && size(odds) == 6 && size(deadlines) == 10, "game encoding");
+    require(substr(payout, 0, 1) == 0x01, "player taproot");
+    PoolGame g = {
+      playerHash: substr(hashes, 0, 32), houseHash: substr(hashes, 32, 32),
+      playerPayout: { version: 1, program: substr(payout, 1, 32) },
+      playerStake: bin2num(substr(stakes, 0, 4)), houseStake: bin2num(substr(stakes, 4, 4)),
+      n: bin2num(substr(odds, 0, 2)), lo: bin2num(substr(odds, 2, 2)), target: bin2num(substr(odds, 4, 2)),
+      cancelAt: bin2num(substr(deadlines, 0, 5)), finalAt: bin2num(substr(deadlines, 5, 5))
+    };
+    require(g.playerStake >= 330 && g.playerStake <= MAX_NAV, "player stake");
+    require(g.houseStake >= 330 && g.houseStake <= MAX_NAV, "house stake");
+    require(g.n >= 2 && g.n <= 128 && g.lo >= 0 && g.lo < g.target && g.target <= g.n, "odds");
+    require(g.cancelAt >= 500000000 && g.cancelAt < g.finalAt && g.finalAt <= 4294967295, "deadlines");
+    return g;
+  }
+
+  private function state() PoolState {
+    require(this.activeInputIndex == 0, "canonical input zero");
+    require(controlTxid != shareTxid || controlGidx != shareGidx, "distinct assets");
+    require(controlGidx >= 0 && controlGidx <= 65535 && shareGidx >= 0 && shareGidx <= 65535, "asset indices");
+    require(operatorFeeBps >= 0 && operatorFeeBps <= 3000, "operator fee policy");
+    require(minHouseEdgeBps >= 0 && minHouseEdgeBps <= 1000, "house edge policy");
+    require(maxStakeBps > 0 && maxStakeBps <= 2000, "stake policy");
+    require(recoveryMargin >= 2400 && recoveryMargin <= 33553920, "recovery margin");
+    require(operatorPayout.version == 1 && size(operatorPayout.program) == 32, "operator taproot");
+    require(tx.inputs[0].assets.length == 1 && tx.inputs[0].assets.lookup(controlTxid, controlGidx) == 1, "singleton control");
+    bytes issued = tx.inputs[0].packet(32);
+    bytes loss = tx.inputs[0].packet(33);
+    bytes fees = tx.inputs[0].packet(34);
+    bytes phase = tx.inputs[0].packet(35);
+    require(size(issued) >= 1 && size(issued) <= 6, "supply size");
+    require(size(loss) == 4 && size(fees) == 4 && size(phase) == 1, "state sizes");
+    int supply = bin2num(issued);
+    int carried = bin2num(loss);
+    int accrued = bin2num(fees);
+    int mode = bin2num(phase);
+    require(supply > 0 && supply <= MAX_SUPPLY && issued == bytes(supply), "supply");
+    require(carried >= 0 && carried <= MAX_NAV && accrued >= 0 && accrued <= MAX_NAV, "accounting bounds");
+    require(mode >= 0 && mode <= 2, "phase");
+    require(loss == num2bin(carried, 4) && fees == num2bin(accrued, 4) && phase == num2bin(mode, 1), "canonical state encoding");
+    int principal = 0;
+    if (mode > 0) {
+      PoolGame g = game();
+      principal = g.playerStake;
+      if (mode == 2) {
+        bytes reveal = tx.inputs[0].packet(16);
+        require(size(reveal) >= 17 && sha256(reveal) == g.playerHash, "recorded player reveal");
+      }
+    } else {
+      require(!tx.inputs[0].packet.has(36) && !tx.inputs[0].packet.has(37) && !tx.inputs[0].packet.has(38), "idle game fields");
+      require(!tx.inputs[0].packet.has(39) && !tx.inputs[0].packet.has(40), "idle game fields");
+    }
+    int nav = tx.inputs[0].value - RESERVE - accrued - principal;
+    require(nav > 0 && nav <= MAX_NAV, "distributable NAV");
+    PoolState result = { supply: supply, loss: carried, fees: accrued, phase: mode, nav: nav };
+    return result;
+  }
+
+  private function writeState(int supply, int loss, int fees, int phase) {
+    require(tx.packet(32) == bytes(supply), "next supply");
+    require(tx.packet(33) == num2bin(loss, 4) && tx.packet(34) == num2bin(fees, 4), "next accounting");
+    require(tx.packet(35) == num2bin(phase, 1), "next phase");
+    if (phase == 0) {
+      require(!tx.packet.has(36) && !tx.packet.has(37) && !tx.packet.has(38), "clear game fields");
+      require(!tx.packet.has(39) && !tx.packet.has(40), "clear game fields");
+    }
+  }
+
+  private function control(int groups, bool retire) {
+    require(tx.assetGroups.length == groups, "asset group count");
+    let token = tx.assetGroups.find(controlTxid, controlGidx);
+    require(!token.isFresh && !token.hasControl, "existing control");
+    require(token.numInputs == 1 && token.sumInputs == 1, "control input");
+    require(token.inputs[0].type == 1 && token.inputs[0].index == 0, "local control input");
+    if (retire) {
+      require(token.numOutputs == 0 && token.sumOutputs == 0, "retired control");
+    } else {
+      require(token.numOutputs == 1 && token.sumOutputs == 1 && token.outputs[0].index == 0, "control continuation");
+      require(tx.outputs[0].script == tx.inputs[0].script, "stable vault script");
+      require(tx.outputs[0].assets.length == 1 && tx.outputs[0].assets.lookup(controlTxid, controlGidx) == 1, "vault control output");
+    }
+  }
+
+  private function inputs(int ordinary, bool recovery) {
+    if (recovery) {
+      require(tx.numInputs == ordinary + 1, "recovery sponsor input");
+      require(tx.inputs[ordinary].assets.length == 0 && tx.inputs[ordinary].script != tx.inputs[0].script, "plain sponsor");
+    } else {
+      require(tx.numInputs == ordinary, "input count");
+    }
+  }
+
+  @allow(output-script-unchecked, "zero-valued extension and anchor outputs carry no payout")
+  private function outputs(int values, int ordinary, bool recovery) {
+    int tail = values;
+    if (recovery) {
+      require(tx.outputs[values].script == tx.inputs[ordinary].script, "sponsor destination");
+      require(tx.outputs[values].assets.length == 0 && tx.outputs[values].value >= 330, "sponsor carrier");
+      int fee = tx.inputs[ordinary].value - tx.outputs[values].value;
+      require(fee > 0 && fee <= 100000, "sponsor mining fee");
+      tail = values + 1;
+    }
+    require(tx.numOutputs == tail + 2, "output count");
+    require(tx.outputs[tail].value == 0 && tx.outputs[tail + 1].value == 0, "no hidden value");
+  }
+
+  @allow(unsigned-spend-path, "the member authorizes their input and all value and shares return to its script")
+  function subscribe(int deposit, int minShares) {
+    PoolState s = state();
+    inputs(2, false);
+    require(s.phase == 0, "admission only");
+    let memberScript = memberPayout();
+    require(deposit > 0 && deposit <= MAX_NAV - s.nav && minShares > 0 && minShares <= MAX_SUPPLY, "deposit bounds");
+    require(tx.inputs[1].assets.length == 0 && memberScript != tx.inputs[0].script, "member funding");
+    require(tx.inputs[1].value >= deposit + 330, "member carrier");
+    int minted = deposit * s.supply / s.nav;
+    require(minted > 0 && minted >= minShares && minted <= MAX_SUPPLY - s.supply, "share quote");
+    control(2, false);
+    require(tx.outputs[0].value == tx.inputs[0].value + deposit, "funded NAV");
+    require(tx.outputs[1].script == memberScript && tx.outputs[1].value == tx.inputs[1].value - deposit, "member change");
+    require(tx.outputs[1].assets.length == 1 && tx.outputs[1].assets.lookup(shareTxid, shareGidx) == minted, "member shares");
+    let shares = tx.assetGroups.find(shareTxid, shareGidx);
+    require(!shares.isFresh && !shares.hasControl && shares.numInputs == 0 && shares.sumInputs == 0, "share issuance");
+    require(shares.numOutputs == 1 && shares.sumOutputs == minted && shares.outputs[0].index == 1, "exact mint");
+    writeState(s.supply + minted, s.loss, s.fees, 0);
+    outputs(2, 2, false);
+  }
+
+  private function redemption(int burnShares, int minSats, bool recovery) {
+    PoolState s = state();
+    inputs(2, recovery);
+    require(s.phase == 0, "admission only");
+    let memberScript = memberPayout();
+    require(burnShares > 0 && burnShares <= s.supply && minSats > 0 && minSats <= MAX_NAV, "redemption bounds");
+    require(memberScript != tx.inputs[0].script && tx.inputs[1].value >= 330, "member carrier");
+    require(tx.inputs[1].assets.length == 1, "member asset");
+    int held = tx.inputs[1].assets.lookup(shareTxid, shareGidx);
+    require(held >= burnShares && held <= s.supply, "member share balance");
+    let shares = tx.assetGroups.find(shareTxid, shareGidx);
+    require(!shares.isFresh && !shares.hasControl && shares.numInputs == 1 && shares.sumInputs == held, "share burn input");
+    require(shares.inputs[0].type == 1 && shares.inputs[0].index == 1, "local share input");
+    int payout = burnShares * s.nav / s.supply;
+    require(payout > 0 && payout >= minSats, "redemption quote");
+    int remaining = held - burnShares;
+    int issued = s.supply - burnShares;
+    require(shares.sumOutputs == remaining, "exact share burn");
+    if (issued == 0) {
+      control(2, true);
+      require(tx.outputs[0].script == memberScript && tx.outputs[0].value == tx.inputs[1].value + s.nav, "final member payout");
+      require(tx.outputs[1].script == operatorPayout && tx.outputs[1].value == RESERVE + s.fees, "reserve and final fees");
+      require(tx.outputs[0].assets.length == 0 && tx.outputs[1].assets.length == 0 && shares.numOutputs == 0, "retired shares");
+      require(!tx.packet.has(32) && !tx.packet.has(33) && !tx.packet.has(34) && !tx.packet.has(35), "retired accounting");
+      require(!tx.packet.has(36) && !tx.packet.has(37) && !tx.packet.has(38) && !tx.packet.has(39) && !tx.packet.has(40), "retired game");
+    } else {
+      control(2, false);
+      require(tx.outputs[0].value == tx.inputs[0].value - payout, "redemption NAV");
+      require(tx.outputs[1].script == memberScript && tx.outputs[1].value == tx.inputs[1].value + payout, "member payout");
+      if (remaining == 0) {
+        require(shares.numOutputs == 0 && tx.outputs[1].assets.length == 0, "no share change");
+      } else {
+        require(shares.numOutputs == 1 && shares.outputs[0].index == 1, "share change destination");
+        require(tx.outputs[1].assets.length == 1 && tx.outputs[1].assets.lookup(shareTxid, shareGidx) == remaining, "remaining shares");
+      }
+      int loss = (s.loss * issued + s.supply - 1) / s.supply;
+      writeState(issued, loss, s.fees, 0);
+    }
+    outputs(2, 2, recovery);
+  }
+
+  @allow(unsigned-spend-path, "burned member-owned shares determine the input-script-bound payout")
+  function redeem(int burnShares, int minSats) { redemption(burnShares, minSats, false); }
+
+  function openGame(bytes32 playerHash, bytes32 houseHash, int playerStake, int houseStake,
+    int oddsN, int oddsLo, int oddsTarget, int cancelAt, int finalAt) {
+    PoolState s = state();
+    inputs(2, false);
+    require(s.phase == 0, "admission only");
+    let playerScript = memberPayout();
+    require(playerStake >= 330 && playerStake <= MAX_NAV - s.nav, "player stake bounds");
+    require(houseStake >= 330 && houseStake <= s.nav * maxStakeBps / 10000, "house exposure cap");
+    require(houseStake <= MAX_NAV - s.loss, "loss counter cap");
+    require(playerStake * operatorFeeBps / 10000 <= MAX_NAV - s.fees, "fee counter cap");
+    require(oddsN >= 2 && oddsN <= 128 && oddsLo >= 0 && oddsLo < oddsTarget && oddsTarget <= oddsN, "odds interval");
+    int wins = oddsTarget - oddsLo;
+    int edge = (oddsN - wins) * playerStake - wins * houseStake;
+    require(edge * 10000 >= oddsN * playerStake * minHouseEdgeBps, "minimum house edge");
+    require(cancelAt >= 500000000 && cancelAt < finalAt && finalAt <= 4294967295, "deadline order");
+    require(finalAt - cancelAt <= 86400 && !checkTime(cancelAt) && checkTime(cancelAt - 86400), "deadline window");
+    require(finalAt <= 4294967295 - recoveryMargin && this.expiry >= finalAt + recoveryMargin, "pool game recovery lifetime");
+    require(tx.inputs[1].assets.length == 0 && playerScript != tx.inputs[0].script, "plain player input");
+    require(playerScript.version == 1 && size(playerScript.program) == 32, "player taproot");
+    require(tx.inputs[1].value >= playerStake + 330, "player change carrier");
+    control(1, false);
+    require(tx.outputs[0].value == tx.inputs[0].value + playerStake, "funded player principal");
+    require(tx.outputs[1].script == playerScript && tx.outputs[1].value == tx.inputs[1].value - playerStake, "player change");
+    require(tx.outputs[1].assets.length == 0, "player change assets");
+    writeState(s.supply, s.loss, s.fees, 1);
+    require(tx.packet(36) == cat(playerHash, houseHash), "committed reveals");
+    require(tx.packet(37) == cat(0x01, playerScript.program), "committed player payout");
+    require(tx.packet(38) == cat(num2bin(playerStake, 4), num2bin(houseStake, 4)), "committed stakes");
+    require(tx.packet(39) == cat(cat(num2bin(oddsN, 2), num2bin(oddsLo, 2)), num2bin(oddsTarget, 2)), "committed odds");
+    require(tx.packet(40) == cat(num2bin(cancelAt, 5), num2bin(finalAt, 5)), "committed deadlines");
+    outputs(2, 2, false);
+  }
+
+  function openGame(signature operatorSig, signature serverSig, signature emulatorSig) tapscript {
+    require(checkMultisig([operator, server, emulator], [operatorSig, serverSig, emulatorSig], 3));
+  }
+
+  private function reveal(bool recovery) {
+    PoolState s = state();
+    inputs(1, recovery);
+    require(s.phase == 1, "funded phase");
+    PoolGame g = game();
+    bytes secret = tx.packet(16);
+    require(size(secret) >= 17 && sha256(secret) == g.playerHash, "player reveal");
+    control(1, false);
+    require(tx.outputs[0].value == tx.inputs[0].value, "contest principal");
+    writeState(s.supply, s.loss, s.fees, 2);
+    require(tx.packet(36) == tx.inputs[0].packet(36) && tx.packet(37) == tx.inputs[0].packet(37), "contest commitments");
+    require(tx.packet(38) == tx.inputs[0].packet(38) && tx.packet(39) == tx.inputs[0].packet(39) && tx.packet(40) == tx.inputs[0].packet(40), "contest terms");
+    outputs(1, 1, recovery);
+  }
+
+  @allow(unsigned-spend-path, "the committed player secret advances the fixed contest without releasing value")
+  function playerReveal() { reveal(false); }
+
+  @allow(unsigned-spend-path, "the committed player secret advances the fixed contest with a signed fee sponsor")
+  function revealRecovery() { reveal(true); }
+
+  function playerRevealOffline(signature emulatorSig) tapscript {
+    require(older(serverExitDelay));
+    require(checkSig(emulatorSig, tweak(emulator, revealRecovery)));
+  }
+
+  private function playerWins(PoolGame g, int phase) bool {
+    bytes playerReveal = tx.packet(16);
+    bytes houseReveal = tx.packet(17);
+    require(size(playerReveal) >= 17 && size(houseReveal) >= 17, "reveal size");
+    require(sha256(playerReveal) == g.playerHash && sha256(houseReveal) == g.houseHash, "committed outcome");
+    if (phase == 2) { require(playerReveal == tx.inputs[0].packet(16), "recorded contest reveal"); }
+    int playerDigit = bin2num(cat(substr(playerReveal, 0, 1), 0x00));
+    int houseDigit = bin2num(cat(substr(houseReveal, 0, 1), 0x00));
+    if (houseDigit >= g.n) { return true; }
+    if (playerDigit >= g.n) { return false; }
+    int roll = (playerDigit + houseDigit) % g.n;
+    return roll >= g.lo && roll < g.target;
+  }
+
+  private function terminal(int kind, bool recovery) {
+    PoolState s = state();
+    inputs(1, recovery);
+    require(s.phase > 0, "active game");
+    PoolGame g = game();
+    bool winner = false;
+    if (kind == 0) { winner = playerWins(g, s.phase); }
+    if (kind == 1) { require(s.phase == 1 && checkTime(g.cancelAt), "refund maturity"); }
+    if (kind == 2) { require(s.phase == 2 && checkTime(g.finalAt), "contest maturity"); winner = true; }
+    int loss = s.loss;
+    int fees = s.fees;
+    int payout = 0;
+    if (kind == 1) {
+      payout = g.playerStake;
+    } else {
+      if (winner) {
+        payout = g.playerStake + g.houseStake;
+        loss = s.loss + g.houseStake;
+      } else {
+        int feeable = 0;
+        if (g.playerStake > s.loss) { feeable = g.playerStake - s.loss; }
+        fees = s.fees + feeable * operatorFeeBps / 10000;
+        if (s.loss > g.playerStake) { loss = s.loss - g.playerStake; } else { loss = 0; }
+      }
+    }
+    require(loss >= 0 && loss <= MAX_NAV && fees >= 0 && fees <= MAX_NAV, "terminal accounting bounds");
+    control(1, false);
+    require(tx.outputs[0].value == tx.inputs[0].value - payout, "bounded game payout");
+    writeState(s.supply, loss, fees, 0);
+    if (payout > 0) {
+      require(tx.outputs[1].script == g.playerPayout && tx.outputs[1].value == payout, "player payout");
+      require(tx.outputs[1].assets.length == 0, "player payout assets");
+      outputs(2, 1, recovery);
+    } else {
+      outputs(1, 1, recovery);
+    }
+  }
+
+  @allow(unsigned-spend-path, "both committed reveals determine the exact bounded payout and accounting")
+  function settleGame() { terminal(0, false); }
+
+  @allow(unsigned-spend-path, "the committed cancellation deadline returns only the player's principal")
+  function refundGame() { terminal(1, false); }
+
+  @allow(unsigned-spend-path, "the revealed contest deadline pays only the committed maximum liability")
+  function playerTimeout() { terminal(2, false); }
+
+  @allow(unsigned-spend-path, "committed reveals and a signed sponsor authorize operator-offline settlement")
+  function settleRecovery() { terminal(0, true); }
+
+  @allow(unsigned-spend-path, "the cancellation deadline and a signed sponsor authorize the principal refund")
+  function refundRecovery() { terminal(1, true); }
+
+  @allow(unsigned-spend-path, "the revealed deadline and a signed sponsor authorize the bounded timeout")
+  function timeoutRecovery() { terminal(2, true); }
+
+  function settleOffline(signature emulatorSig) tapscript {
+    require(older(serverExitDelay));
+    require(checkSig(emulatorSig, tweak(emulator, settleRecovery)));
+  }
+
+  function refundOffline(signature emulatorSig) tapscript {
+    require(older(serverExitDelay));
+    require(checkSig(emulatorSig, tweak(emulator, refundRecovery)));
+  }
+
+  function timeoutOffline(signature emulatorSig) tapscript {
+    require(older(serverExitDelay));
+    require(checkSig(emulatorSig, tweak(emulator, timeoutRecovery)));
+  }
+
+  @allow(unsigned-spend-path, "only crystallized fees go to the immutable operator destination")
+  function sweepFees() {
+    PoolState s = state();
+    inputs(1, false);
+    require(s.phase == 0 && s.fees >= 330, "withdrawable fees");
+    control(1, false);
+    require(tx.outputs[0].value == tx.inputs[0].value - s.fees, "preserved member NAV");
+    require(tx.outputs[1].script == operatorPayout && tx.outputs[1].value == s.fees, "operator fee payout");
+    require(tx.outputs[1].assets.length == 0, "fee assets");
+    writeState(s.supply, s.loss, 0, 0);
+    outputs(2, 1, false);
+  }
+}

@@ -1,58 +1,9 @@
 <template>
-  <div v-if="bets.length || v4Bets.length" class="stalled">
+  <div v-if="v4Bets.length" class="stalled">
     <div class="stalled-head">
       <span class="title">⚠ Reclaim stalled bets</span>
-      <span class="sub">A game didn't resolve — reclaim your escrowed stake trustlessly. Auto-claims at expiry; manual buttons stay as a backup.</span>
+      <span class="sub">The wallet retries eligible claims while open. Available recovery paths depend on network services and your saved game data.</span>
     </div>
-    <div v-for="b in bets" :key="b.gameId" class="bet-row">
-      <!-- R1 forfeit, arkade-script path: execution bucket, no unilateral exit.
-           Preferred when present (CSV penalty stays in stash as silent fallback). -->
-      <template v-if="hasForfeit(b)">
-        <div class="bet-info">
-          <span class="amount penalty-amount">Claim full pot — {{ b.tier.toLocaleString() }} sats (your stake + house)</span>
-          <span class="state" :class="{ ready: isForfeitReady(b), auto: isAutoClaiming(b) }">{{ forfeitStatusLabel(b) }}</span>
-          <span class="penalty-note">{{ forfeitNote(b) }}</span>
-        </div>
-        <div class="bet-actions">
-          <button
-            class="claim-btn"
-            :disabled="!isForfeitReady(b) || isClaiming(b)"
-            :title="isForfeitReady(b) ? '' : forfeitStatusLabel(b)"
-            @click="claimForfeit(b.gameId)"
-          >
-            {{ claimBtnLabel(b, 'forfeit') }}
-          </button>
-          <button
-            class="reclaim-link"
-            :disabled="!isReady(b) || isClaiming(b)"
-            :title="isReady(b) ? '' : statusLabel(b)"
-            @click="reclaim(b.gameId)"
-          >
-            {{ claimBtnLabel(b, 'refund-link') }}
-          </button>
-        </div>
-      </template>
-
-      <!-- No forfeit stashed (pre-reveal abandonment): self-refund only -->
-      <template v-else>
-        <div class="bet-info">
-          <span class="amount">{{ b.tier.toLocaleString() }} sats</span>
-          <span class="state" :class="{ ready: isReady(b), auto: isAutoClaiming(b) }">{{ statusLabel(b) }}</span>
-        </div>
-        <button
-          class="reclaim-btn"
-          :disabled="!isReady(b) || isClaiming(b)"
-          :title="isReady(b) ? '' : statusLabel(b)"
-          @click="reclaim(b.gameId)"
-        >
-          {{ claimBtnLabel(b, 'refund') }}
-        </button>
-      </template>
-    </div>
-
-    <!-- v0.4 joint-pot recovery: the whole pot via the staged forfeit when we hold
-         the secret, else the player's own stake via the covenant-only self-refund
-         (a RESTORED, no-secret stash). -->
     <div v-for="b in v4Bets" :key="b.gameId" class="bet-row">
       <div class="bet-info">
         <span class="amount" :class="{ 'penalty-amount': !isV4SelfRefund(b) }">{{ v4AmountLabel(b) }}</span>
@@ -78,18 +29,15 @@
 <script lang="ts">
 import { defineComponent, ref, computed, onMounted, onUnmounted } from 'vue'
 import { useStore } from 'vuex'
-import type { StashedRefund, ClaimingInfo } from '@/store/modules/ark/ark'
-import { hasStashedForfeit } from '@/store/modules/ark/ark'
+import type { ClaimingInfo } from '@/store/modules/ark/ark'
 import type { StashedV4Forfeit } from '@/store/modules/ark/v4ForfeitStash'
 import { pickV4ClaimPath } from '@/store/modules/ark/v4SelfRefund'
 import { isCltvMatured } from '@/utils/cltv'
-import { hasExhaustedReclaim } from '@/utils/reclaimBackoff'
 
 export default defineComponent({
   name: 'StalledBets',
   setup() {
     const store = useStore()
-    const bets = ref<StashedRefund[]>([])
     const v4Bets = ref<StashedV4Forfeit[]>([])
     const message = ref('')
     // Store-backed in-flight map — populated by BOTH the manual buttons
@@ -100,20 +48,10 @@ export default defineComponent({
     const claimingGames = computed<Record<string, ClaimingInfo>>(
       () => store.getters['ark/claimingGames'] || {},
     )
-    const isClaiming = (b: StashedRefund) => !!claimingGames.value[b.gameId]
-    const isAutoClaiming = (b: StashedRefund) =>
-      claimingGames.value[b.gameId]?.mode === 'auto'
-    // arkd releases the refund at its CLTV measured in the chain's block time
-    // (BIP113 MTP), which lags wall-clock when blocks are sparse. Gate readiness
-    // STRICTLY on chain time — never a wall-clock fallback, which would flash
-    // "Reclaimable now" before the first chain read and invite a click arkd then
-    // rejects with FORFEIT_CLOSURE_LOCKED. Until chain time is known we show
-    // "Checking…" and keep the button disabled; the action backstops either way.
     const chainTime = ref<number | null>(null)
     let timer: number | undefined
 
     async function refresh() {
-      bets.value = await store.dispatch('ark/listStalledBets')
       v4Bets.value = await store.dispatch('ark/listV4StalledBets')
     }
     async function refreshChainTime() {
@@ -121,99 +59,6 @@ export default defineComponent({
       if (typeof t === 'number') chainTime.value = t
     }
 
-    /** True when the stash holds a complete, revealed arkade-script forfeit.
-     *  Single source of truth shared with the store's claimForfeit guard and
-     *  the background auto-claim poll (see forfeitStash.hasStashedForfeit). */
-    const hasForfeit = (b: StashedRefund) => hasStashedForfeit(b)
-
-    /** Forfeit claimable-at: absolute CLTV pinned in the leaf at /play time. */
-    const forfeitClaimableAt = (b: StashedRefund): number => b.forfeitClaimableAt ?? Number.MAX_SAFE_INTEGER
-
-    /** Self-refund readiness — chain time has reached the refund CLTV. */
-    const isReady = (b: StashedRefund) => isCltvMatured(chainTime.value, b.finalExpiration)
-
-    /** Forfeit readiness — chain time has reached the absolute forfeit CLTV. */
-    const isForfeitReady = (b: StashedRefund) => isCltvMatured(chainTime.value, forfeitClaimableAt(b))
-
-    /** A stash whose auto-claim has permanently failed (e.g. a pre-v4/rotated
-     *  escrow whose stashed refund no longer matches the server VTXO). The stake
-     *  still recovers via the operator sweep, so we reassure rather than alarm. */
-    const isExhausted = (b: StashedRefund) => hasExhaustedReclaim(b.claimFailures)
-
-    function statusLabel(b: StashedRefund): string {
-      if (isExhausted(b)) return 'Recovers automatically via the operator — no action needed'
-      if (isAutoClaiming(b)) return 'Auto-claiming…'
-      if (chainTime.value === null) return 'Checking chain time…'
-      if (isReady(b)) return 'Reclaimable now'
-      const mins = Math.ceil((b.finalExpiration - chainTime.value) / 60)
-      // Label as chain-time so a lagging regtest clock reads as expected, not a bug.
-      return `Reclaimable in ~${mins} min (chain time)`
-    }
-
-    /**
-     * CLTV-aware forfeit note. Before the forfeit is claimable a stalled game is
-     * almost always just settling (the operator finishes it autonomously), so we
-     * stay calm and frame the forfeit as the trustless backup. Once the CLTV is
-     * reached and the forfeit is genuinely claimable, we explain the take-the-pot
-     * outcome.
-     */
-    function forfeitNote(b: StashedRefund): string {
-      return isForfeitReady(b)
-        ? 'The house never revealed its secret. Forfeit kicks in — you take the whole pot.'
-        : 'Settling — the operator completes this automatically, usually within a minute. This is your trustless backup if it stalls.'
-    }
-
-    function forfeitStatusLabel(b: StashedRefund): string {
-      if (isExhausted(b)) return 'Recovers automatically via the operator — no action needed'
-      if (isAutoClaiming(b)) return 'Auto-claiming…'
-      if (chainTime.value === null) return 'Checking chain time…'
-      if (isForfeitReady(b)) return 'Claimable now (arkade)'
-      const at = forfeitClaimableAt(b)
-      const mins = Math.ceil((at - chainTime.value) / 60)
-      return `Claimable in ~${mins} min (arkade, chain time)`
-    }
-
-    /** Per-button label. `kind` distinguishes the three button slots so each gets a fitting verb. */
-    function claimBtnLabel(b: StashedRefund, kind: 'forfeit' | 'refund' | 'refund-link'): string {
-      const info = claimingGames.value[b.gameId]
-      if (info) {
-        if (info.mode === 'auto') return 'Auto-claiming…'
-        return kind === 'forfeit' ? 'Claiming…' : 'Reclaiming…'
-      }
-      if (kind === 'forfeit') return 'Claim full pot'
-      if (kind === 'refund-link') return 'Reclaim principal only'
-      return 'Reclaim'
-    }
-
-    async function reclaim(gameId: string) {
-      message.value = ''
-      try {
-        await store.dispatch('ark/reclaimStalledBet', { gameId, mode: 'manual' })
-        message.value = 'Reclaimed — stake returned to your wallet.'
-      } catch (e: unknown) {
-        message.value = e instanceof Error ? e.message : 'Reclaim failed'
-      } finally {
-        await refresh()
-      }
-    }
-
-    async function claimForfeit(gameId: string) {
-      message.value = ''
-      try {
-        await store.dispatch('ark/claimForfeit', { gameId, mode: 'manual' })
-        message.value = 'Full pot claimed via arkade — both stakes returned to your wallet.'
-      } catch (e: unknown) {
-        message.value = e instanceof Error ? e.message : 'Forfeit failed'
-      } finally {
-        await refresh()
-      }
-    }
-
-    // ── v0.4 joint-pot recovery row ─────────────────────────────────────────
-    // Two shapes share this row, by whether we hold the player secret:
-    //  - FORFEIT (secret present): sweep the WHOLE pot via the staged contest.
-    //  - SELF-REFUND (no secret — a RESTORED stash): reclaim only OUR OWN stake via
-    //    the covenant-only cooperativeSpend split-back, gated on cancelDelay.
     const isV4Claiming = (b: StashedV4Forfeit) => !!claimingGames.value[b.gameId]
     const isV4AutoClaiming = (b: StashedV4Forfeit) => claimingGames.value[b.gameId]?.mode === 'auto'
     const isV4SelfRefund = (b: StashedV4Forfeit) => pickV4ClaimPath(b) === 'self-refund'
@@ -230,6 +75,7 @@ export default defineComponent({
 
     function v4StatusLabel(b: StashedV4Forfeit): string {
       if (isV4AutoClaiming(b)) return 'Auto-claiming…'
+      if (b.confirmationPending) return 'Waiting for operator confirmation — recovery data kept'
       if (chainTime.value === null) return 'Checking chain time…'
       if (isV4SelfRefund(b)) {
         if (isV4Ready(b)) return 'Reclaimable now'
@@ -285,7 +131,7 @@ export default defineComponent({
       // responsive: chain time gates EVERY claim button, so a slow poll strands
       // them on "Checking chain time…" (and a failed first read on a cold wallet
       // would otherwise take a full cycle to recover).
-      timer = window.setInterval(() => { if (bets.value.length || v4Bets.value.length) refreshChainTime() }, 5000)
+      timer = window.setInterval(() => { if (v4Bets.value.length) refreshChainTime() }, 5000)
       // Re-read the stash list periodically so an auto-claim that
       // succeeded in the background removes its row without the user
       // having to refresh. Cheap (localStorage read) so 5s is fine.
@@ -297,11 +143,7 @@ export default defineComponent({
     })
 
     return {
-      bets, message,
-      hasForfeit, isReady, isForfeitReady,
-      isClaiming, isAutoClaiming,
-      statusLabel, forfeitStatusLabel, forfeitNote, claimBtnLabel,
-      reclaim, claimForfeit,
+      message,
       v4Bets, isV4Claiming, isV4AutoClaiming, isV4Ready, isV4SelfRefund,
       v4StatusLabel, v4Note, v4AmountLabel, v4BtnLabel, claimV4,
     }

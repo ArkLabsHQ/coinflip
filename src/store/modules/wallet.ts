@@ -131,7 +131,7 @@ const wallet: Module<WalletState, RootState> = {
       //  - purgeLocalData clears the SDK's persisted IndexedDB store (so a restored
       //    same-key wallet is fresh — the VTXO store outlives the localStorage keys);
       //  - purgeStashes wipes the trustless stalled-bet stashes (a separate
-      //    `coinflip-stashes` DB) so stale "Reclaim stalled bets" rows don't survive.
+      //    `coinflip-recovery` DB) so stale "Reclaim stalled bets" rows don't survive.
       // Both live in the namespaced `ark` module (`ark/` prefix + `{ root: true }`).
       // A failure here must NOT propagate — the key is already cleared.
       try {

@@ -17,7 +17,7 @@
  * cap/preview can't drift from what the server charges.
  */
 
-import { computeHouseStake } from 'arkade-coinflip/dist/stake-math'
+import { computeHouseStake } from 'arkade-coinflip/dist/stake-math.js'
 
 /**
  * Range resolution. Higher = finer multiplier granularity. v0.3 escrow
@@ -35,8 +35,7 @@ import { computeHouseStake } from 'arkade-coinflip/dist/stake-math'
  *
  * Was `300` in v0.2.x: the secret-length encoding had no high-bit problem,
  * so n could be picked as the LCM of ladder denominators to make every
- * P(win) exact. 100 is the v3-compatible analogue — preserves the full
- * v0.2.x rocket ladder (1.2× through 100×) under the v3 cap.
+ * P(win) is exact; this ladder spans 1.2× through 100×.
  */
 export const ROCKET_ODDS_N = 100
 

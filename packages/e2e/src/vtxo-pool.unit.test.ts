@@ -83,71 +83,38 @@ describe('KeyedMutex', () => {
 })
 
 describe('rebuildReservations', () => {
-  const fakeDeps = (rows: any[]) => ({ repos: { games: { list: async () => rows } } }) as any
-
-  it('restores trustless (object) + legacy (array) liability; skips malformed/null', async () => {
-    const rows = [
-      // Trustless per-party: TrustlessState object → liability = tier, 0 outpoints.
-      { id: 'tl-1', tier: 1000, house_vtxos_json: JSON.stringify({ finalExpiration: 1, setupExpiration: 1, houseEscrow: { txid: 'aa', vout: 0, value: 1000 } }) },
-      // Legacy setup/final: array of outpoints → reserve outpoints + maxLiabilityForTier.
-      { id: 'lg-1', tier: 5000, house_vtxos_json: JSON.stringify(['deadbeef:0', 'deadbeef:1']) },
-      // Malformed JSON → skipped.
-      { id: 'bad-1', tier: 1000, house_vtxos_json: '{not json' },
-      // Null column → skipped.
-      { id: 'nul-1', tier: 1000, house_vtxos_json: null },
-      // Empty legacy array → nothing to protect → skipped.
-      { id: 'empty-1', tier: 1000, house_vtxos_json: '[]' },
-    ]
-    const before = { liability: reservations.totalLiability(), games: reservations.activeGames() }
-    const restored = await rebuildReservations(fakeDeps(rows))
-    try {
-      expect(restored).toBe(2) // tl-1 + lg-1 only
-      expect(reservations.activeGames() - before.games).toBe(2)
-      expect(reservations.has('tl-1')).toBe(true)
-      expect(reservations.has('lg-1')).toBe(true)
-      expect(reservations.has('bad-1')).toBe(false)
-      expect(reservations.has('nul-1')).toBe(false)
-      expect(reservations.has('empty-1')).toBe(false)
-      // Trustless liability = tier (1000); legacy = maxLiabilityForTier(5000).
-      expect(reservations.totalLiability() - before.liability).toBe(1000 + maxLiabilityForTier(5000))
-      // Legacy outpoints are re-protected; trustless reserves none (already spent into escrow).
-      expect(reservations.isReserved('deadbeef:0')).toBe(true)
-      expect(reservations.isReserved('deadbeef:1')).toBe(true)
-      expect(reservations.isReserved('aa:0')).toBe(false)
-    } finally {
-      reservations.release('tl-1'); reservations.release('lg-1')
-    }
+  afterEach(() => {
+    for (const reservation of reservations.snapshot()) reservations.release(reservation.gameId)
   })
 
-  it('reserves the escrowed HOUSE STAKE for variable-odds games, not the player tier', async () => {
-    // Variable-odds: the house escrows a multiple of the player tier. The
-    // escrowed amount lives in houseEscrow.value (6000), well above tier (1000).
-    // rebuildReservations must restore 6000 of liability, or concurrent
-    // post-restart plays would under-count and over-commit the house.
+  it('restores exact pre-funding holds and only liability after submit/finalize', async () => {
+    const held = new Set<string>()
+    reservations.bindWallet({ reserveVtxos: (outpoints: any[]) => {
+      for (const outpoint of outpoints) {
+        const key = `${outpoint.txid}:${outpoint.vout}`
+        if (held.has(key)) throw new Error('already held')
+        held.add(key)
+      }
+      return { outpoints, release: () => outpoints.forEach((outpoint) => held.delete(`${outpoint.txid}:${outpoint.vout}`)) }
+    } })
+    const state = { protocolVersion: 'v4', houseInputs: [{ txid: 'aa', vout: 1 }], houseStake: 6000 }
     const rows = [
-      { id: 'tl-var', tier: 1000, house_vtxos_json: JSON.stringify({ finalExpiration: 1, setupExpiration: 1, houseEscrow: { txid: 'bb', vout: 0, value: 6000 } }) },
+      { id: 'prepared', state_json: JSON.stringify(state) },
+      { id: 'submitted', state_json: JSON.stringify({ ...state, cofundArkTxid: 'submitted' }) },
+      { id: 'funded', state_json: JSON.stringify({ ...state, cofundTxid: 'finalized' }) },
     ]
-    const before = reservations.totalLiability()
-    const restored = await rebuildReservations(fakeDeps(rows))
-    try {
-      expect(restored).toBe(1)
-      expect(reservations.totalLiability() - before).toBe(6000) // houseStake, not tier
-    } finally {
-      reservations.release('tl-var')
-    }
+    expect(await rebuildReservations({ repos: { games: { listPending: async () => rows } } })).toBe(3)
+    expect([...held]).toEqual(['aa:1'])
+    expect(reservations.totalLiability()).toBe(18_000)
+    expect(reservations.snapshot().find((entry: any) => entry.gameId === 'submitted').outpoints).toEqual([])
+    reservations.reserve('prepared', [], 6000)
+    expect(held.size).toBe(0)
+    expect(reservations.totalLiability()).toBe(18_000)
   })
 
-  it('falls back to tier when an older row has no houseEscrow.value', async () => {
-    const rows = [
-      { id: 'tl-old', tier: 1500, house_vtxos_json: JSON.stringify({ finalExpiration: 1, setupExpiration: 1, houseEscrow: { txid: 'cc', vout: 0 } }) },
-    ]
-    const before = reservations.totalLiability()
-    await rebuildReservations(fakeDeps(rows))
-    try {
-      expect(reservations.totalLiability() - before).toBe(1500) // fallback = tier
-    } finally {
-      reservations.release('tl-old')
-    }
+  it('fails startup on malformed durable state instead of admitting unprotected games', async () => {
+    await expect(rebuildReservations({ repos: { games: { listPending: async () => [{ id: 'invalid', state_json: '{}' }] } } }))
+      .rejects.toThrow('Invalid durable game state')
   })
 })
 

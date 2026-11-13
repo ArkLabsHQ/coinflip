@@ -400,21 +400,51 @@
     </table>
   </div>
 
+  <div class="section" aria-labelledby="communityPoolTitle">
+    <h2 id="communityPoolTitle">Community Bankroll</h2>
+    <p class="op-hint">The community pool has its own contract and share asset. Its equity is separate from the normal house wallet above.</p>
+    <p id="communityPoolState" class="op-hint" role="status">Checking pool…</p>
+    <dl id="communityPoolDetails" style="display:none;line-height:1.8"></dl>
+    <form id="communityPoolForm" onsubmit="previewCommunityPool(event)">
+      <div class="config-row"><label for="communityPoolName">Pool name</label><input id="communityPoolName" value="Community bankroll" maxlength="64" required></div>
+      <div class="config-row"><label for="communityPoolSeed">Initial equity (sats)</label><input id="communityPoolSeed" type="number" value="100000" min="330" max="1000000" step="1" required></div>
+      <div class="config-row"><label for="communityPoolFee">Performance fee (bps)</label><input id="communityPoolFee" type="number" value="2000" min="0" max="3000" step="1" required><span class="op-hint">2000 = 20% of new net profit after losses.</span></div>
+      <div class="config-row"><label for="communityPoolEdge">Minimum house margin (bps)</label><input id="communityPoolEdge" type="number" value="100" min="1" max="1000" step="1" required></div>
+      <div class="config-row"><label for="communityPoolRisk">Maximum stake (bps)</label><input id="communityPoolRisk" type="number" value="1000" min="1" max="2000" step="1" required><span class="op-hint">1000 = 10% of pool equity per game.</span></div>
+      <button class="btn btn-gold" id="communityPoolPreview">Review and seed pool</button>
+    </form>
+    <div id="communityPoolAdminActions" hidden>
+      <h3 class="op-label">Admission and game fairness</h3>
+      <p id="communityPoolPolicy" class="op-hint"></p>
+      <div class="config-row"><label for="communityPoolPolicyChoice">New contributions / games</label><select id="communityPoolPolicyChoice"><option value="unresolved">Disabled pending fairness policy</option><option value="honest-operator">Enable with operator-fairness disclosure</option></select><button class="btn" onclick="reviewCommunityPolicy()">Review policy</button></div>
+      <h3 class="op-label">Operator position</h3>
+      <div class="config-row"><button class="btn" onclick="loadCommunityPosition()">Check shares and fees</button><button class="btn" onclick="checkCommunityOperation()">Check last operation</button></div>
+      <p id="communityOperatorState" class="op-hint" role="status"></p>
+      <p id="communityOperatorRenewal" class="op-hint" role="status" hidden></p>
+      <div id="communityOperatorPosition" hidden>
+        <p id="communityOperatorFees" class="op-hint"></p><button class="btn btn-gold" onclick="reviewCommunityFees()">Review accrued fee payout</button>
+        <div class="config-row" style="margin-top:16px"><label for="communityFounderCoin">Founder share output</label><select id="communityFounderCoin" style="max-width:100%"></select><button class="btn" onclick="reviewCommunityRedemption()">Review full output redemption</button></div>
+        <p class="op-hint">Redeems all shares in the selected output. Its Bitcoin carrier and equity return to the same house-wallet script. Other members keep their shares.</p>
+      </div>
+    </div>
+    <dialog id="communityActionDialog" style="margin:auto;max-width:min(500px,calc(100vw - 32px));padding:28px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:12px">
+      <h2 id="communityActionTitle"></h2><p id="communityActionReview" class="op-hint" style="overflow-wrap:anywhere"></p>
+      <label id="communityPolicyAcknowledgment" class="op-hint" hidden><input type="checkbox" id="communityPolicyAccepted" style="width:auto" onchange="document.getElementById('communityActionConfirm').disabled=!this.checked"> I understand that the operator and a cooperating bettor can force losses onto pool members; this policy does not provide independent randomness.</label>
+      <div class="config-row"><button class="btn" onclick="document.getElementById('communityActionDialog').close()">Cancel</button><button class="btn btn-gold" id="communityActionConfirm" onclick="confirmCommunityAction()">Confirm</button></div>
+    </dialog>
+    <dialog id="communityPoolDialog" style="margin:auto;max-width:min(480px,calc(100vw - 32px));padding:28px;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:12px">
+      <h2>Seed community bankroll?</h2><p id="communityPoolReview" class="op-hint"></p>
+      <p class="op-hint">This moves house-wallet funds into a new pool and issues its founder shares. The operator also funds a 330-sat output reserve. Pool economics are fixed in its contract.</p>
+      <div class="config-row"><button class="btn" onclick="document.getElementById('communityPoolDialog').close()">Cancel</button><button class="btn btn-gold" id="communityPoolConfirm" onclick="createCommunityPool()">Seed pool</button></div>
+    </dialog>
+  </div>
+
   <div class="section">
     <h2>Configuration</h2>
     <div class="config-row">
-      <label>Rake:</label>
-      <input type="number" id="rakeValue" style="width:80px" min="0">
-      <select id="rakeType">
-        <option value="percentage">%</option>
-        <option value="flat">sats (flat)</option>
-      </select>
-      <button class="btn btn-small" onclick="saveConfig()">Save</button>
-    </div>
-    <div class="config-row">
-      <label>House edge:</label>
+      <label>House stake discount:</label>
       <input type="number" id="oddsEdgeBps" style="width:90px" min="0" max="9999">
-      <span style="color:var(--muted)">bps (variable-odds)</span>
+      <span style="color:var(--muted)">bps; effective margin varies with the win probability</span>
       <button class="btn btn-small" onclick="saveConfig()">Save</button>
     </div>
     <div class="config-row">
@@ -450,7 +480,7 @@
     </div>
     <table>
       <thead>
-        <tr><th>ID</th><th>Tier</th><th>Winner</th><th>Rake</th><th>Status</th><th>Time</th></tr>
+        <tr><th>ID</th><th>Tier</th><th>Winner</th><th>Status</th><th>Time</th></tr>
       </thead>
       <tbody id="gamesTable">
         <tr><td colspan="6" class="empty">Loading...</td></tr>
@@ -533,8 +563,6 @@
 
   async function saveConfig() {
     const body = {
-      rakeType: document.getElementById('rakeType').value,
-      rakeValue: parseInt(document.getElementById('rakeValue').value) || 0,
       tiers: currentTiers,
       minHouseBalance: parseInt(document.getElementById('minBalance').value) || 0,
       oddsEdgeBps: parseInt(document.getElementById('oddsEdgeBps').value) || 0,
@@ -573,8 +601,6 @@
   async function loadConfig() {
     const res = await fetch('/api/config');
     const data = await res.json();
-    document.getElementById('rakeValue').value = data.rakeValue;
-    document.getElementById('rakeType').value = data.rakeType;
     document.getElementById('minBalance').value = data.minHouseBalance;
     document.getElementById('oddsEdgeBps').value = data.oddsEdgeBps;
     document.getElementById('maxBetFractionBps').value = data.maxBetFractionBps;
@@ -629,7 +655,6 @@
         <td>${g.id.substring(0, 8)}</td>
         <td>${fmt(g.tier)}</td>
         <td>${badge}</td>
-        <td>${g.rakeAmount}</td>
         <td>${g.status}</td>
         <td>${timeAgo(g.createdAt)}</td>
       </tr>`;
@@ -790,16 +815,145 @@
     refresh();
   }
 
+  let communityPoolDraft = null;
+  let communityPoolBusy = false;
+  let communityPoolResponse = null, communityOperatorPosition = null, communityAction = null;
+  const communityOperationKey = 'coinflip.admin.pool.operation.v1';
+  async function loadCommunityPool() {
+    const status = document.getElementById('communityPoolState');
+    try {
+      const response = await fetch('/api/admin/pool', { signal: AbortSignal.timeout(20000) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Pool status unavailable');
+      communityPoolResponse = data;
+      status.textContent = data.error || (data.status === 'unconfigured' ? 'No community pool has been seeded.' : 'Pool status: ' + data.status);
+      document.getElementById('communityPoolForm').hidden = data.status !== 'unconfigured';
+      const details = document.getElementById('communityPoolDetails');
+      details.replaceChildren(); details.style.display = data.descriptor ? 'block' : 'none';
+      document.getElementById('communityPoolAdminActions').hidden = !data.descriptor;
+      document.getElementById('communityPoolPolicyChoice').value = data.fairnessAssumption === 'honest-operator' ? 'honest-operator' : 'unresolved';
+      document.getElementById('communityPoolPolicy').textContent = data.fairnessAssumption === 'honest-operator' ? 'Operator-fairness policy selected. Members see and acknowledge the collusion risk before contributing.' : 'New contributions and games are disabled. Existing shares can still be redeemed when the contract is idle and available.';
+      if (data.descriptor) {
+        const rows = [['Pool', data.descriptor.name], ['Network', data.descriptor.network], ['Phase', data.head?.phase || 'Unknown'], ['Distributable equity', data.head?.navSats == null ? 'Unknown' : BigInt(data.head.navSats).toLocaleString() + ' sats'], ['Share asset', data.descriptor.shareAssetId], ['Bootstrap', data.descriptor.bootstrapTxid]];
+        for (const [label, value] of rows) {
+          const term = document.createElement('dt'); term.textContent = label; term.style.color = 'var(--muted)';
+          const detail = document.createElement('dd'); detail.textContent = value; detail.style.overflowWrap = 'anywhere';
+          details.append(term, detail);
+        }
+      }
+    } catch (error) { status.textContent = error instanceof Error ? error.message : 'Pool status unavailable'; }
+  }
+  function previewCommunityPool(event) {
+    event.preventDefault(); if (communityPoolBusy) return;
+    const form = document.getElementById('communityPoolForm'); if (!form.reportValidity()) return;
+    communityPoolDraft = { name: document.getElementById('communityPoolName').value.trim(), initialNavSats: document.getElementById('communityPoolSeed').value, operatorFeeBps: Number(document.getElementById('communityPoolFee').value), minHouseEdgeBps: Number(document.getElementById('communityPoolEdge').value), maxStakeBps: Number(document.getElementById('communityPoolRisk').value) };
+    document.getElementById('communityPoolReview').textContent = communityPoolDraft.name + ': ' + BigInt(communityPoolDraft.initialNavSats).toLocaleString() + ' sats initial member equity; ' + communityPoolDraft.operatorFeeBps / 100 + '% performance fee; ' + communityPoolDraft.maxStakeBps / 100 + '% maximum wager exposure.';
+    document.getElementById('communityPoolDialog').showModal();
+  }
+  async function createCommunityPool() {
+    if (!communityPoolDraft || communityPoolBusy) return;
+    communityPoolBusy = true; document.getElementById('communityPoolConfirm').disabled = true;
+    document.getElementById('communityPoolForm').hidden = true;
+    document.getElementById('communityPoolDialog').close();
+    const status = document.getElementById('communityPoolState'); status.textContent = 'Creating and verifying pool…';
+    try {
+      const response = await fetch('/api/admin/pool/bootstrap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(communityPoolDraft), signal: AbortSignal.timeout(60000) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Bootstrap could not be confirmed; check status before trying again.');
+      communityPoolDraft = null; await loadCommunityPool();
+    } catch (error) { await loadCommunityPool(); status.textContent = error instanceof Error ? error.message : 'Check pool status before retrying.'; }
+    finally { communityPoolBusy = false; document.getElementById('communityPoolConfirm').disabled = false; }
+  }
+
+  function communityId() { return 'admin-' + Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join(''); }
+  function reviewCommunityAction(action, title, review, acknowledge = false) {
+    if (communityPoolBusy) return;
+    communityAction = action;
+    document.getElementById('communityActionTitle').textContent = title;
+    document.getElementById('communityActionReview').textContent = review;
+    document.getElementById('communityPolicyAcknowledgment').hidden = !acknowledge;
+    document.getElementById('communityPolicyAccepted').checked = false;
+    document.getElementById('communityActionConfirm').disabled = acknowledge;
+    document.getElementById('communityActionDialog').showModal();
+  }
+  function reviewCommunityPolicy() {
+    const policy = document.getElementById('communityPoolPolicyChoice').value;
+    reviewCommunityAction({ method: 'PUT', path: '/api/admin/pool/policy', body: { fairnessAssumption: policy }, financial: false }, 'Change admission policy?', policy === 'honest-operator' ? 'Allow new contributions and games using the operator-managed commit/reveal scheme. Independent randomness is not provided; members must trust the casino operator not to cooperate with bettors.' : 'Disable new contributions and games. Keep existing-member withdrawals available when the pool is idle.', policy === 'honest-operator');
+  }
+  async function loadCommunityPosition() {
+    const status = document.getElementById('communityOperatorState');
+    try {
+      const response = await fetch('/api/admin/pool/position', { signal: AbortSignal.timeout(20000) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Operator position unavailable');
+      communityOperatorPosition = data;
+      const renewal = data.inputRenewal, renewalStatus = document.getElementById('communityOperatorRenewal');
+      renewalStatus.hidden = !renewal || renewal.status === 'idle';
+      renewalStatus.textContent = renewal && renewal.status !== 'idle' ? (renewal.status === 'recovery' ? 'Wallet share renewal needs recovery. ' : 'Renewing wallet share outputs. ') + (renewal.error || 'Its inputs stay reserved until the recorded batch is reconciled.') : '';
+      document.getElementById('communityOperatorPosition').hidden = false;
+      document.getElementById('communityOperatorFees').textContent = BigInt(data.feeSweepSats).toLocaleString() + ' sats of accrued fees; at least 330 sats are needed for a separate payout.';
+      const select = document.getElementById('communityFounderCoin'), selected = select.value; select.replaceChildren();
+      for (const coin of data.coins) {
+        const option = document.createElement('option'); option.value = coin.outpoint.txid + ':' + coin.outpoint.vout;
+        option.textContent = coin.outpoint.txid.slice(0, 8) + '…:' + coin.outpoint.vout + ' — ' + BigInt(coin.shares).toLocaleString() + ' shares / ' + BigInt(coin.equitySats).toLocaleString() + ' sats equity'; select.append(option);
+      }
+      if (Array.from(select.options).some(option => option.value === selected)) select.value = selected;
+      status.textContent = data.capabilities.reason || (renewal && renewal.status !== 'idle' ? 'Some share outputs are reserved for renewal; their balances are being verified.' : BigInt(data.totalEquitySats).toLocaleString() + ' sats estimated operator equity.');
+      return data;
+    } catch (error) { status.textContent = error instanceof Error ? error.message : 'Operator position unavailable'; return null; }
+  }
+  async function reviewCommunityFees() {
+    const position = await loadCommunityPosition(); if (!position) return;
+    if (!position.capabilities.sweepFees || !position.head) { document.getElementById('communityOperatorState').textContent = position.capabilities.reason || 'No payable accrued fees at this head.'; return; }
+    reviewCommunityAction({ method: 'POST', path: '/api/admin/pool/fees', body: { operationId: communityId(), expectedHead: position.head.outpoint }, financial: true }, 'Pay accrued operator fees?', BigInt(position.feeSweepSats).toLocaleString() + ' sats go to the immutable operator destination. Member equity and share supply stay unchanged.');
+  }
+  async function reviewCommunityRedemption() {
+    const position = await loadCommunityPosition(); if (!position) return;
+    const selected = document.getElementById('communityFounderCoin').value;
+    const coin = position.coins.find(value => value.outpoint.txid + ':' + value.outpoint.vout === selected);
+    if (!position.capabilities.redeem || !position.head || !coin) { document.getElementById('communityOperatorState').textContent = position.capabilities.reason || 'No redeemable founder share output.'; return; }
+    reviewCommunityAction({ method: 'POST', path: '/api/admin/pool/redeem', body: { operationId: communityId(), expectedHead: position.head.outpoint, memberOutpoint: coin.outpoint, burnShares: coin.shares, minSats: coin.equitySats }, financial: true }, 'Redeem selected founder shares?', 'Burn ' + BigInt(coin.shares).toLocaleString() + ' share units for at least ' + BigInt(coin.equitySats).toLocaleString() + ' sats of pool equity. The original Bitcoin carrier returns too; total receiver output: ' + BigInt(coin.fullRedemptionPayoutSats).toLocaleString() + ' sats.');
+  }
+  async function confirmCommunityAction() {
+    if (!communityAction || communityPoolBusy) return;
+    const action = communityAction, status = document.getElementById('communityOperatorState');
+    communityPoolBusy = true; document.getElementById('communityActionConfirm').disabled = true;
+    try {
+      if (action.financial) {
+        if (localStorage.getItem(communityOperationKey)) throw new Error('Check the previous saved operator operation before starting another.');
+        localStorage.setItem(communityOperationKey, JSON.stringify({ operationId: action.body.operationId, controlAssetId: communityPoolResponse.descriptor.controlAssetId }));
+      }
+      document.getElementById('communityActionDialog').close(); status.textContent = 'Submitting the reviewed operation…';
+      const response = await fetch(action.path, { method: action.method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(action.body), signal: AbortSignal.timeout(60000) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Check the saved operation before retrying.');
+      if (action.financial) await checkCommunityOperation(); else { status.textContent = 'Policy saved.'; await loadCommunityPool(); }
+      communityAction = null;
+    } catch (error) { status.textContent = error instanceof Error ? error.message : 'Check operation status before retrying.'; }
+    finally { communityPoolBusy = false; document.getElementById('communityActionConfirm').disabled = false; }
+  }
+  async function checkCommunityOperation() {
+    const status = document.getElementById('communityOperatorState');
+    try {
+      const raw = localStorage.getItem(communityOperationKey); if (!raw) { status.textContent = 'No saved operator operation.'; return; }
+      const saved = JSON.parse(raw);
+      if (saved.controlAssetId !== communityPoolResponse?.descriptor?.controlAssetId) throw new Error('Saved operation belongs to another pool.');
+      const response = await fetch('/api/admin/pool/operations/' + encodeURIComponent(saved.operationId), { signal: AbortSignal.timeout(20000) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Saved operation status is unavailable.');
+      const result = 'Operation ' + saved.operationId + ': ' + data.status + (data.arkTxid ? ' · ' + data.arkTxid : '');
+      if (['confirmed', 'rejected', 'conflict'].includes(data.status)) { localStorage.removeItem(communityOperationKey); await loadCommunityPool(); await loadCommunityPosition(); }
+      status.textContent = result;
+    } catch (error) { status.textContent = error instanceof Error ? error.message : 'Saved operation status is unavailable.'; }
+  }
+
   async function refresh() {
-    await Promise.all([loadStatus(), loadWallet(), loadGames(), loadActivity(), loadVtxos(), loadReservations()]);
+    await Promise.all([loadStatus(), loadWallet(), loadGames(), loadActivity(), loadVtxos(), loadReservations(), loadCommunityPool()]);
   }
 
   async function init() {
-    await Promise.all([loadStatus(), loadConfig(), loadWallet(), loadGames(), loadActivity(), loadVtxos(), loadReservations()]);
+    await Promise.all([loadStatus(), loadConfig(), loadWallet(), loadGames(), loadActivity(), loadVtxos(), loadReservations(), loadCommunityPool()]);
   }
 
   init();
-  setInterval(() => { loadStatus(); loadGames(); loadActivity(); loadVtxos(); loadReservations(); }, 10000);
+  setInterval(() => { loadStatus(); loadGames(); loadActivity(); loadVtxos(); loadReservations(); loadCommunityPool(); }, 10000);
 </script>
 </body>
 </html>

@@ -50,3 +50,9 @@ docs/TRUSTLESS-AUDIT.md
 
 .attachments/
 .env.regtest.bak
+
+# Generated dice textures and audio
+/public/dice-assets/
+
+# Local dev server data (house keys, SQLite)
+/.dev-*-data/

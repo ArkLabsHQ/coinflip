@@ -11,11 +11,6 @@
       "import": "./dist/index.js",
       "require": "./dist/index.js"
     },
-    "./contract": {
-      "types": "./dist/contract.d.ts",
-      "import": "./dist/contract.js",
-      "require": "./dist/contract.js"
-    },
     "./arkade-win": {
       "types": "./dist/arkade-win.d.ts",
       "import": "./dist/arkade-win.js",
@@ -25,14 +20,13 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc",
-    "clean": "rm -rf dist"
+    "build": "npm run clean && tsc",
+    "clean": "node ../../scripts/clean-dist.mjs lib"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.4.55",
-    "@arklabshq/contract-workflows-prototype": "file:../contract-workflows-prototype",
-    "@noble/curves": "^1.6.0",
-    "@scure/base": "^1.2.1",
+    "@arkade-os/sdk": "0.5.4",
+    "@noble/curves": "^2.0.1",
+    "@scure/base": "^2.0.0",
     "@scure/btc-signer": "^2.0.1"
   },
   "devDependencies": {

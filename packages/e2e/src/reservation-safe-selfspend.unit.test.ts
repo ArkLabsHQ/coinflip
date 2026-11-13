@@ -14,7 +14,7 @@
  * Fixed behavior asserted here:
  *   - settle paths pass EXPLICIT SettleParams whose inputs exclude every
  *     reserved outpoint (and never an empty outputs list — arkd rejects that).
- *   - the pool split mints each piece with sendBitcoin({selectedVtxos}) over
+ *   - the pool split mints each piece with send({selectedVtxos}) over
  *     inputs drawn from the UNRESERVED set and pinned under the /play selection
  *     mutex, then sends outside it. It no longer defers while a reservation is
  *     live (that declined almost every attempt under autoplay, and holding the
@@ -25,10 +25,10 @@
  *     (same candidate set: getVtxos({withRecoverable:false}) minus
  *     pendingRecoveryOutpoints(); same selector: selectVirtualCoins to
  *     max(amount, dust)) with reserved outpoints removed, and passes the picks
- *     as sendBitcoin({selectedVtxos}). Every coin it hands to arkd is one the
+ *     as send({selectedVtxos}). Every coin it hands to arkd is one the
  *     SDK's blind path could have picked itself — minus the reserved ones —
  *     so arkd accepts them identically. Free-set shortfall is a clean 400
- *     (no spend); force:true keeps the blind operator hatch.
+ *     (no spend); force:true overrides only the liability ceiling.
  *
  * Imports the BUILT server (dist) directly, like the sibling unit tests.
  */
@@ -52,7 +52,7 @@ const coin = (txid: string, vout: number, value: number) => ({
   txid,
   vout,
   value,
-  virtualStatus: { state: 'settled', batchExpiry: FUTURE_EXPIRY },
+  isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (FUTURE_EXPIRY) === undefined ? undefined : new Date(FUTURE_EXPIRY),
   status: { confirmed: false },
   createdAt: new Date(Date.now() - 60_000),
 })
@@ -64,7 +64,7 @@ const coin = (txid: string, vout: number, value: number) => ({
 const RENEWAL_DUE_EXPIRY = Date.now() + 24 * 3600_000
 const dueCoin = (txid: string, vout: number, value: number) => ({
   ...coin(txid, vout, value),
-  virtualStatus: { state: 'settled', batchExpiry: RENEWAL_DUE_EXPIRY },
+  isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (RENEWAL_DUE_EXPIRY) === undefined ? undefined : new Date(RENEWAL_DUE_EXPIRY),
 })
 const outpoints = (coins: Array<{ txid: string; vout: number }>) => coins.map((c) => `${c.txid}:${c.vout}`)
 
@@ -156,14 +156,9 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
       wallet: {
         getVtxos: async () => vtxos,
         getAddress: async () => HOUSE_ADDRESS,
-        sendBitcoin: async (params: any) => {
+        send: async (params: any) => {
           sentInputs.push(params.selectedVtxos)
           return 'txid-split'
-        },
-        // Must stay unused — it is the reservation-blind path.
-        send: async (...recipients: any[]) => {
-          sendCalls.push(recipients)
-          return 'txid-blind'
         },
       },
     } as any
@@ -213,7 +208,7 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     const free = coin('ee'.repeat(32), 0, 200_000)
     const seenDuringSend: boolean[] = []
     const deps = splitDeps([free], [], [])
-    deps.wallet.sendBitcoin = async () => {
+    deps.wallet.send = async () => {
       // While the send is in flight the coin must be reserved — that is what
       // makes it safe to run OUTSIDE the selection mutex.
       seenDuringSend.push(reservations.isReserved(`${free.txid}:0`))
@@ -232,7 +227,7 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     houseVtxoCache.invalidate()
     const free = coin('ee'.repeat(32), 0, 200_000)
     const deps = splitDeps([free], [], [])
-    deps.wallet.sendBitcoin = async () => { throw new Error('arkd said no') }
+    deps.wallet.send = async () => { throw new Error('arkd said no') }
 
     const r = await ensureHouseVtxoPool(deps, { piecesPerRun: 1 })
 
@@ -270,7 +265,7 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
 
     let releaseSend: (() => void) | null = null
     const sendStarted = new Promise<void>((startResolve) => {
-      deps.wallet.sendBitcoin = async () => {
+      deps.wallet.send = async () => {
         startResolve()
         await new Promise<void>((r) => { releaseSend = r })
         return 'txid-split'
@@ -313,7 +308,7 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     const deps = splitDeps([free], sentInputs, [])
     let concurrentSends = 0
     let maxConcurrent = 0
-    deps.wallet.sendBitcoin = async (params: any) => {
+    deps.wallet.send = async (params: any) => {
       concurrentSends++
       maxConcurrent = Math.max(maxConcurrent, concurrentSends)
       sentInputs.push(params.selectedVtxos)
@@ -339,7 +334,7 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
 
   /**
    * Never spend a coin to recreate a coin of the same size. That is pure churn
-   * costing a tx, and it would drive `sendBitcoin` down a zero-change path
+   * costing a tx, and it would drive `send` down a zero-change path
    * whose behaviour is unverified — so the candidate must clear
    * `amount + dust`, not merely equal `amount`.
    */
@@ -416,15 +411,15 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     // do — and once the splitter tracks the outpoints it has spent, a collision
     // reads as "already spent" and the chain stalls.
     let seq = 0
-    deps.wallet.sendBitcoin = async (params: any) => {
+    deps.wallet.send = async (params: any) => {
       sentInputs.push(params.selectedVtxos)
       seq++
       const txid = String(seq).padStart(2, '0').repeat(32).slice(0, 64)
       const spentKeys = new Set(params.selectedVtxos.map((v: any) => `${v.txid}:${v.vout}`))
       const inSum = params.selectedVtxos.reduce((t: number, v: any) => t + v.value, 0)
       pool = pool.filter((c: any) => !spentKeys.has(`${c.txid}:${c.vout}`))
-      pool.push(coin(txid, 0, params.amount))
-      if (inSum - params.amount > 0) pool.push(coin(txid, 1, inSum - params.amount))
+      pool.push(coin(txid, 0, params.recipients[0].amount))
+      if (inSum - params.recipients[0].amount > 0) pool.push(coin(txid, 1, inSum - params.recipients[0].amount))
       return txid
     }
 
@@ -454,12 +449,12 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     let pool = [coin('11'.repeat(32), 0, 5_000), coin('ee'.repeat(32), 0, 7_000)]
     const deps = splitDeps(pool, sentInputs)
     deps.wallet.getVtxos = async () => pool
-    deps.wallet.sendBitcoin = async (params: any) => {
+    deps.wallet.send = async (params: any) => {
       sentInputs.push(params.selectedVtxos)
       const spent = params.selectedVtxos[0]
-      const change = spent.value - params.amount
+      const change = spent.value - params.recipients[0].amount
       pool = pool.filter((c: any) => !(c.txid === spent.txid && c.vout === spent.vout))
-      pool.push(coin(spent.txid.slice(0, 62) + 'ff', 0, params.amount))
+      pool.push(coin(spent.txid.slice(0, 62) + 'ff', 0, params.recipients[0].amount))
       if (change > 0) pool.push(coin(spent.txid.slice(0, 62) + 'ee', 1, change))
       return 'txid-split'
     }
@@ -474,7 +469,7 @@ describe('P0 #53 — ensureHouseVtxoPool never hands a reserved outpoint to the 
     const { assertSelectedVtxosSupported } =
       require('arkade-coinflip-server/dist/vtxo-pool.js')
     // Present → fine.
-    expect(() => assertSelectedVtxosSupported({ sendBitcoin: () => undefined })).not.toThrow()
+    expect(() => assertSelectedVtxosSupported({ send: () => undefined })).not.toThrow()
     // Gone → must throw, NOT silently fall back to the blind `send` path.
     expect(() => assertSelectedVtxosSupported({})).toThrow(/P0 #53|selectedVtxos/)
     expect(() => assertSelectedVtxosSupported(null)).toThrow(/selectedVtxos/)
@@ -526,7 +521,7 @@ describe('P0 #53 — admin POST /api/wallet/send spends only un-reserved coins',
         getBalance: async () => ({ available: vtxos.reduce((s: number, v: any) => s + v.value, 0) }),
         getVtxos: async () => vtxos,
         pendingRecoveryOutpoints: async () => new Set(pendingRecovery),
-        sendBitcoin: async (params: any) => {
+        send: async (params: any) => {
           sendCalls.push(params)
           return 'txid-send'
         },
@@ -553,17 +548,17 @@ describe('P0 #53 — admin POST /api/wallet/send spends only un-reserved coins',
     expect(res.status).toBe(200)
     expect(res.body.txid).toBe('txid-send')
     expect(sendCalls).toHaveLength(1)
-    // Pre-fix this was a blind sendBitcoin({address, amount}) — the SDK's
+    // Pre-fix this was a blind send({address, amount}) — the SDK's
     // internal selection could pick the reserved coin (the P0 residual).
     expect(sendCalls[0].selectedVtxos).toBeDefined()
     expect(outpoints(sendCalls[0].selectedVtxos)).toEqual([`${freeCoin.txid}:1`])
-    expect(sendCalls[0].address).toBe(HOUSE_ADDRESS)
-    expect(sendCalls[0].amount).toBe(1000)
+    expect(sendCalls[0].recipients[0].address).toBe(HOUSE_ADDRESS)
+    expect(sendCalls[0].recipients[0].amount).toBe(1000)
   })
 
   it('keeps the SDK selector order (near-expiry first) on the free set', async () => {
     const later = coin('55'.repeat(32), 0, 50_000)
-    const sooner = { ...coin('66'.repeat(32), 1, 40_000), virtualStatus: { state: 'settled', batchExpiry: FUTURE_EXPIRY - 3600_000 } }
+    const sooner = { ...coin('66'.repeat(32), 1, 40_000), isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (FUTURE_EXPIRY - 3600_000) === undefined ? undefined : new Date(FUTURE_EXPIRY - 3600_000) }
     const sendCalls: any[] = []
     const app = sendApp([later, sooner], sendCalls)
 
@@ -593,6 +588,39 @@ describe('P0 #53 — admin POST /api/wallet/send spends only un-reserved coins',
     expect(res.body.freeSpendable).toBe(0)
     expect(res.body.error).toContain('force')
     expect(sendCalls).toHaveLength(0)
+  })
+
+  it('keeps a timed-out send\'s inputs pinned until the send itself settles', async () => {
+    process.env.ARK_SUBMIT_TIMEOUT_MS = '50'
+    let isolated: any
+    jest.isolateModules(() => {
+      isolated = { ...require('arkade-coinflip-server/dist/admin/routes.js'), ...require('arkade-coinflip-server/dist/vtxo-pool.js') }
+    })
+    delete process.env.ARK_SUBMIT_TIMEOUT_MS
+    const free = coin('ab'.repeat(32), 0, 40_000)
+    let land!: (txid: string) => void
+    const landed = new Promise<string>((resolve) => { land = resolve })
+    const app = express()
+    app.use(express.json())
+    app.use(isolated.createAdminRoutes({
+      wallet: {
+        dustAmount: 330n,
+        getBalance: async () => ({ available: free.value }),
+        getVtxos: async () => [free],
+        pendingRecoveryOutpoints: async () => new Set(),
+        send: () => landed,
+      },
+    }))
+
+    const res = await request(app).post('/api/wallet/send').send({ address: HOUSE_ADDRESS, amount: 1000 })
+    expect(res.status).toBe(500)
+    expect(res.body.error).toMatch(/timed out/)
+    expect(isolated.reservations.reservedOutpoints().has(`${free.txid}:0`)).toBe(true)
+
+    land('txid-late')
+    await landed
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(isolated.reservations.reservedOutpoints().has(`${free.txid}:0`)).toBe(false)
   })
 
   it('never selects a pending-recovery coin (the coin arkd would reject)', async () => {
@@ -631,7 +659,7 @@ describe('P0 #53 — admin POST /api/wallet/send spends only un-reserved coins',
     expect(sendCalls).toHaveLength(0)
   })
 
-  it('force:true keeps the blind operator hatch (no selectedVtxos)', async () => {
+  it('force:true cannot spend inputs reserved for a live game', async () => {
     const reservedCoin = coin('bb'.repeat(32), 4, 50_000)
     reservations.reserve('p0-53-send', [`${reservedCoin.txid}:4`], 2_000)
     const sendCalls: any[] = []
@@ -640,9 +668,27 @@ describe('P0 #53 — admin POST /api/wallet/send spends only un-reserved coins',
     const res = await request(app).post('/api/wallet/send')
       .send({ address: HOUSE_ADDRESS, amount: 1000, force: true })
 
+    expect(res.status).toBe(400)
+    expect(res.body.freeSpendable).toBe(0)
+    expect(sendCalls).toHaveLength(0)
+    expect(reservations.isReserved(`${reservedCoin.txid}:4`)).toBe(true)
+  })
+
+  it('force:true overrides liability using only explicitly selected free inputs', async () => {
+    const reservedCoin = coin('bb'.repeat(32), 4, 50_000)
+    const freeCoin = coin('cc'.repeat(32), 0, 10_000)
+    reservations.reserve('p0-53-send', [`${reservedCoin.txid}:4`], 60_000)
+    const sendCalls: any[] = []
+    const app = sendApp([reservedCoin, freeCoin], sendCalls)
+
+    await request(app).post('/api/wallet/send')
+      .send({ address: HOUSE_ADDRESS, amount: 1000 }).expect(400)
+    const res = await request(app).post('/api/wallet/send')
+      .send({ address: HOUSE_ADDRESS, amount: 1000, force: true })
+
     expect(res.status).toBe(200)
     expect(sendCalls).toHaveLength(1)
-    expect(sendCalls[0].selectedVtxos).toBeUndefined()
+    expect(outpoints(sendCalls[0].selectedVtxos)).toEqual([`${freeCoin.txid}:0`])
   })
 })
 

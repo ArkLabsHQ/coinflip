@@ -1,3 +1,5 @@
+import { signCheckpointsByOutpoint } from './test-helpers/checkpoint-signers'
+import { createTestWallet } from './helpers'
 /**
  * v4 SPIKE PROBE — does a full joint-pot game SETTLE end-to-end?
  *
@@ -9,13 +11,13 @@
  */
 import { base64, hex } from '@scure/base'
 import { createHash } from 'crypto'
-import { CoinflipJointPotScript, determineWinnerV3, buildJointPotSettleTx, encodeSettleForEmulator } from 'arkade-coinflip'
+import { CoinflipJointPotScript, determineWinnerV3, buildJointPotSettleTx, prepareSettleForEmulator } from 'arkade-coinflip'
 import {
-  Wallet, SingleKey, RestArkProvider, RestIndexerProvider, InMemoryWalletRepository,
+  Wallet, SingleKey, RestOperatorProvider, RestIndexerProvider, InMemoryWalletRepository,
   InMemoryContractRepository, decodeTapscript, buildOffchainTx, CSVMultisigTapscript,
-  Transaction, ArkAddress, type ArkInfo, type ArkProvider, type ArkTxInput,
+  Transaction, ArkAddress, type OperatorInfo, type OperatorProvider, type ArkTxInput,
 } from '@arkade-os/sdk'
-import { packets } from '@arklabshq/contract-workflows-prototype'
+import { packets } from 'arkade-coinflip'
 import { faucet, waitVtxos } from './helpers'
 
 const ARK = process.env.ARK_SERVER_URL || 'http://localhost:7070'
@@ -29,9 +31,8 @@ const sha = (b: Uint8Array) => new Uint8Array(createHash('sha256').update(b).dig
 const toXOnly = (p: Uint8Array) => (p.length === 33 ? p.slice(1) : p)
 
 async function makeWallet(id: SingleKey): Promise<Wallet> {
-  return Wallet.create({
-    identity: id, arkServerUrl: ARK, esploraUrl: ESPLORA,
-    storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
+  return createTestWallet(id, {
+      storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
     settlementConfig: false,
   })
 }
@@ -65,23 +66,24 @@ jest.retryTimes(2, { logErrorsBeforeRetry: true })
 
 describe('v4 spike: full joint-pot game settles end-to-end', () => {
   let arkAvailable = false
-  let arkProvider: ArkProvider
-  let arkInfo: ArkInfo
+  let arkProvider: OperatorProvider
+  let arkInfo: OperatorInfo
   let serverUnroll: CSVMultisigTapscript.Type
   let emuPubkey: Uint8Array
   beforeAll(async () => {
     try {
-      arkProvider = new RestArkProvider(ARK)
+      arkProvider = new RestOperatorProvider(ARK)
       arkInfo = await arkProvider.getInfo()
       serverUnroll = decodeTapscript(hex.decode(arkInfo.checkpointTapscript)) as CSVMultisigTapscript.Type
       const info = await (await fetch(`${EMU}/v1/info`)).json() as { signerPubkey: string }
-      emuPubkey = hex.decode(info.signerPubkey)
+      emuPubkey = toXOnly(hex.decode(info.signerPubkey))
       arkAvailable = !!arkInfo?.signerPubkey && !!emuPubkey
     } catch { arkAvailable = false }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
   }, 25_000)
 
   it('co-funds a joint pot and settles the full pot to the winner', async () => {
-    if (!arkAvailable) { console.warn('ark/emu unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     const playerId = SingleKey.fromRandomBytes()
     const houseId = SingleKey.fromRandomBytes()
@@ -130,15 +132,10 @@ describe('v4 spike: full joint-pot game settles end-to-end', () => {
     const { arkTxid: cofundTxid, signedCheckpointTxs } = await arkProvider.submitTx(
       base64.encode(cofundSigned.toPSBT()), cofund.checkpoints.map((c) => base64.encode(c.toPSBT())),
     )
-    const cofundFinals: string[] = []
-    for (let i = 0; i < signedCheckpointTxs.length; i++) {
-      const tx = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[i]))
-      const owner = i === 0 ? playerId : houseId
-      let s = tx
-      try { s = await owner.sign(tx, Array.from({ length: tx.inputsLength }, (_, k) => k)) }
-      catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
-      cofundFinals.push(base64.encode(s.toPSBT()))
-    }
+    const cofundFinals = await signCheckpointsByOutpoint(signedCheckpointTxs, [
+      { checkpoint: cofund.checkpoints[0], identity: playerId },
+      { checkpoint: cofund.checkpoints[1], identity: houseId },
+    ])
     await arkProvider.finalizeTx(cofundTxid, cofundFinals)
     console.log('[v4-game] joint pot co-funded:', cofundTxid, '(2000 sats)')
 
@@ -154,7 +151,7 @@ describe('v4 spike: full joint-pot game settles end-to-end', () => {
       creatorRevealBytes,
       serverUnroll,
     })
-    const body = JSON.stringify(encodeSettleForEmulator(settle))
+    const body = JSON.stringify(await prepareSettleForEmulator(settle, new RestIndexerProvider(ARK)))
     let settleTxid = ''
     for (let attempt = 0; attempt < 10; attempt++) {
       const resp = await fetch(`${EMU}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(25_000) })

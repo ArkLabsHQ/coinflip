@@ -12,6 +12,7 @@ import Database from 'better-sqlite3'
 import fs from 'fs'
 import path from 'path'
 import type { SQLExecutor } from './repositories/types.js'
+import { POOL_SCHEMA } from './pool/repository.js'
 
 const DATA_DIR = process.env.DATA_DIR || './data'
 const DB_PATH = path.join(DATA_DIR, 'coinflip.db')
@@ -46,39 +47,39 @@ export async function initDb(): Promise<void> {
   db.exec(`
     CREATE TABLE IF NOT EXISTS games (
       id TEXT PRIMARY KEY,
-      tier INTEGER NOT NULL,
+      tier INTEGER NOT NULL CHECK (tier > 0),
       player_pubkey TEXT NOT NULL,
-      player_choice TEXT NOT NULL,
       player_hash TEXT NOT NULL,
       player_change_address TEXT,
       house_secret_hex TEXT NOT NULL,
       player_secret_hex TEXT,
       winner TEXT,
-      rake_amount INTEGER NOT NULL DEFAULT 0,
       payout_amount INTEGER,
-      status TEXT NOT NULL DEFAULT 'pending',
-      house_vtxos_json TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'resolved', 'expired')),
+      state_json TEXT NOT NULL CHECK (json_valid(state_json)),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       resolved_at TEXT
     )
   `)
-  // Backfill columns for pre-existing DBs. ALTER TABLE throws if the column
-  // already exists; swallow that.
-  for (const col of [
-    'house_vtxos_json',
-  ]) {
-    try { db.exec(`ALTER TABLE games ADD COLUMN ${col} TEXT`) } catch { /* already there */ }
-  }
-
   // Index the player-pubkey lookups (countPendingForPlayer / listForPlayer —
   // the "restore my games" path). Additive and idempotent, same IF-NOT-EXISTS
   // bootstrap style as the tables above (no migration framework here).
   db.exec('CREATE INDEX IF NOT EXISTS idx_games_player ON games(player_pubkey)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_games_status ON games(status, created_at)')
+  db.exec(POOL_SCHEMA)
+  const poolBootstrapColumns = db.prepare('PRAGMA table_info(pool_bootstrap)').all() as { name: string }[]
+  if (!poolBootstrapColumns.some(column => column.name === 'journal_json')) db.exec('ALTER TABLE pool_bootstrap ADD COLUMN journal_json TEXT')
+  const poolOperationColumns = db.prepare('PRAGMA table_info(pool_operations)').all() as { name: string }[]
+  if (!poolOperationColumns.some(column => column.name === 'operator_request_json')) db.exec('ALTER TABLE pool_operations ADD COLUMN operator_request_json TEXT')
+  for (const [name, definition] of [['operation_kind', "TEXT NOT NULL DEFAULT 'transaction'"], ['renewal_journal_json', 'TEXT'],
+    ['renewal_session_json', 'TEXT'], ['renewal_receipt_json', 'TEXT'], ['operator_stage_json', 'TEXT'], ['renewal_replay_json', 'TEXT']]) {
+    if (!poolOperationColumns.some(column => column.name === name)) db.exec(`ALTER TABLE pool_operations ADD COLUMN ${name} ${definition}`)
+  }
 
   // Seed default config
   const seed = db.prepare('INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)')
-  seed.run('rake_type', 'percentage')
-  seed.run('rake_value', '2')
+  seed.run('variable_odds_edge_bps', '300')
+  seed.run('max_bet_fraction_bps', '2500')
   seed.run('tiers', JSON.stringify([1000, 5000, 10000, 50000]))
   seed.run('min_house_balance', '100000')
 }

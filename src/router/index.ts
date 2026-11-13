@@ -3,6 +3,7 @@ import PlayView from '../views/PlayView.vue'
 import SetupView from '../views/SetupView.vue'
 import HistoryView from '../views/HistoryView.vue'
 import HowItWorksView from '../views/HowItWorksView.vue'
+import BankrollView from '../views/BankrollView.vue'
 import store from '../store'
 import { redirectFor } from './guard'
 
@@ -33,6 +34,7 @@ const routes: Array<RouteRecordRaw> = [
     name: 'how-it-works',
     component: HowItWorksView
   },
+  { path: '/bankroll', name: 'bankroll', component: BankrollView },
   // Backward-compat: the rocket game used to live at /rocket; it's now the
   // Rocket SKIN on the unified play view. Redirect old bookmarks home.
   { path: '/rocket', redirect: '/' },

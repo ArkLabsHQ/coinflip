@@ -1,31 +1,13 @@
-/**
- * House VTXO concurrency management.
- *
- * The house serves many players at once. Two concerns arise:
- *
- *   1. Reservation — `handleV4Play` picks a specific house VTXO to
- *      fund a game's house escrow. Two concurrent games must NOT pick the
- *      same VTXO, or the second game's escrow tx would reference an
- *      already-spent input.
- *
- *   2. Liability — the per-request balance check doesn't account for
- *      games already in flight. Without it, the house can accept more
- *      concurrent games than it can pay out (e.g. balance 100k, ten 50k
- *      games). We track the worst-case payout obligation of in-flight
- *      games and reject new plays that would exceed available balance.
- *
- * Reservations live in-memory (single-process server) and are rebuilt on
- * boot from the `house_vtxos_json` column of pending games. The select +
- * reserve step is serialized through a mutex so the check-and-claim is
- * atomic across concurrent requests.
- */
+/** SDK-backed input holds and the house liability ledger. Rebuilt from durable games on startup. */
 
-import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { canSpendOffchain, type NormalizedExtendedVirtualCoin, type Wallet, type VtxoReservation } from '@arkade-os/sdk'
+import type { V4State } from './v4/types.js'
 import type { AppDeps } from './deps.js'
 import {
   type Denomination, planSplit, parseLadder, defaultLadder,
 } from './vtxo-denominations.js'
-import { selectableHouseVtxos, RENEWAL_EXPIRY_BUFFER_MS } from './game-engine.js'
+import { selectableHouseVtxos } from './game-engine.js'
+import { houseRenewalBufferForWalletMs, RENEWAL_EXPIRY_BUFFER_MS } from './house-renewal-policy.js'
 import { timeoutReject, ARK_SYNC_TIMEOUT_MS, ARK_SUBMIT_TIMEOUT_MS } from './async-timeout.js'
 import { makeLogDedup } from './log-dedup.js'
 
@@ -35,6 +17,9 @@ export function maxLiabilityForTier(tier: number): number {
 }
 
 export const outpointKey = (txid: string, vout: number): string => `${txid}:${vout}`
+
+export const isPlainHouseVtxo = (coin: Pick<NormalizedExtendedVirtualCoin, 'assets'>): boolean =>
+  !coin.assets?.length
 
 /** A minimal FIFO async mutex. */
 export class Mutex {
@@ -116,18 +101,71 @@ export const SPLIT_RESERVATION_ID = '__house_pool_split__'
 interface Reservation {
   outpoints: Set<string>
   liability: number
+  holds: Map<string, VtxoReservation>
 }
 
 /** In-memory reservation ledger keyed by gameId. */
 export class VtxoReservations {
   private readonly byGame = new Map<string, Reservation>()
+  private wallet?: Pick<Wallet, 'reserveVtxos'>
+
+  bindWallet(wallet: Pick<Wallet, 'reserveVtxos'>): void {
+    if (this.wallet === wallet) return
+    if (this.byGame.size) throw new Error('Cannot replace a wallet while game reservations exist')
+    this.wallet = wallet
+  }
 
   reserve(gameId: string, outpoints: string[], liability: number): void {
-    this.byGame.set(gameId, { outpoints: new Set(outpoints), liability })
+    const next = new Set(outpoints)
+    const previous = this.byGame.get(gameId)
+    const holds = new Map(previous?.holds)
+    const acquired: string[] = []
+    try {
+      // Acquire the delta first: a conflict must leave the previous hold intact.
+      for (const key of next) {
+        if (holds.has(key)) continue
+        if ([...this.byGame].some(([id, reservation]) => id !== gameId && reservation.outpoints.has(key))) {
+          throw new HouseBusyError(`VTXO ${key} is already reserved`)
+        }
+        if (this.wallet) {
+          const separator = key.lastIndexOf(':')
+          const txid = key.slice(0, separator)
+          const vout = Number(key.slice(separator + 1))
+          if (separator < 1 || !Number.isSafeInteger(vout) || vout < 0) throw new Error('Invalid reservation outpoint')
+          holds.set(key, this.wallet.reserveVtxos([{ txid, vout }]))
+          acquired.push(key)
+        }
+      }
+    } catch (error) {
+      for (const key of acquired) holds.get(key)!.release()
+      throw error
+    }
+    for (const [key, hold] of holds) {
+      if (!next.has(key)) {
+        hold.release()
+        holds.delete(key)
+      }
+    }
+    this.byGame.set(gameId, { outpoints: next, liability, holds })
   }
 
   release(gameId: string): void {
+    const reservation = this.byGame.get(gameId)
+    if (!reservation) return
+    for (const hold of reservation.holds.values()) hold.release()
     this.byGame.delete(gameId)
+  }
+
+  trackExternal(id: string, outpoints: string[]): void {
+    const previous = this.byGame.get(id)
+    if (previous) {
+      if (previous.outpoints.size !== outpoints.length || outpoints.some(key => !previous.outpoints.has(key))) {
+        throw new Error('External reservation changed its inputs')
+      }
+      return
+    }
+    if (outpoints.some(key => this.isReserved(key))) throw new HouseBusyError('External maintenance input is already reserved')
+    this.byGame.set(id, { outpoints: new Set(outpoints), liability: 0, holds: new Map() })
   }
 
   has(gameId: string): boolean {
@@ -165,7 +203,7 @@ export class VtxoReservations {
   activeGames(): number {
     let n = 0
     for (const gameId of this.byGame.keys()) {
-      if (!gameId.startsWith(SPLIT_RESERVATION_ID)) n++
+      if (![SPLIT_RESERVATION_ID, 'settlement:', 'withdrawal:', 'pool-maint:'].some((prefix) => gameId.startsWith(prefix))) n++
     }
     return n
   }
@@ -184,51 +222,34 @@ export class VtxoReservations {
 export const reservations = new VtxoReservations()
 export const selectionMutex = new Mutex()
 
-/**
- * Cached snapshot of the house wallet's VTXOs.
- *
- * `wallet.getVtxos()` forces the SDK to re-sync AND re-annotate the wallet's
- * FULL VTXO history on every call — including thousands of long-spent outputs
- * on the house's receive address — which costs seconds for a long-lived house.
- * /play needs the VTXO set on its hot path (to size the liability check and
- * pick an escrow VTXO), so it reads this snapshot — kept warm in the background
- * by pool maintenance — instead of paying for a full sync per request.
- *
- * Staleness is safe by construction:
- *  - Selection excludes already-reserved outpoints (`freeHouseVtxos`), so a
- *    stale snapshot can never hand the same VTXO to two concurrent games.
- *  - A VTXO spent by a settlement between refreshes that lingers in the
- *    snapshot only makes the escrow submit fail — caught by the caller and
- *    surfaced as a retryable "busy", never a double-spend or fund loss.
- *  - The liability check stays conservative: each in-flight game adds its
- *    worst-case pot to `reservations.totalLiability()` immediately, which grows
- *    at least as fast as a stale `available` can over-count, so the check never
- *    over-accepts.
- * Callers force-refresh on a selection/liability miss, so a stale snapshot
- * self-corrects within one request.
- */
+/** Caches house coins for game admission; spending paths evict consumed inputs. */
 export class HouseVtxoCache {
-  private snapshot: ExtendedVirtualCoin[] | null = null
+  private snapshot: NormalizedExtendedVirtualCoin[] | null = null
   private fetchedAt = 0
-  private inflight: Promise<ExtendedVirtualCoin[]> | null = null
+  chainHeight?: number
+  private inflight: Promise<NormalizedExtendedVirtualCoin[]> | null = null
 
   constructor(private readonly ttlMs: number) {}
 
   /** Snapshot if younger than the TTL, else a fresh (de-duped) fetch. */
-  async get(deps: AppDeps): Promise<ExtendedVirtualCoin[]> {
-    if (this.snapshot && Date.now() - this.fetchedAt < this.ttlMs) return this.snapshot
+  async get(deps: AppDeps): Promise<NormalizedExtendedVirtualCoin[]> {
+    if (this.snapshot && Date.now() - this.fetchedAt < this.ttlMs) return this.snapshot.filter(isPlainHouseVtxo)
     return this.refresh(deps)
   }
 
   /** Force a live fetch, collapsing concurrent refreshes onto one getVtxos(). */
-  async refresh(deps: AppDeps): Promise<ExtendedVirtualCoin[]> {
+  async refresh(deps: AppDeps): Promise<NormalizedExtendedVirtualCoin[]> {
     if (this.inflight) return this.inflight
     // Bound the re-sync: a stalled getVtxos otherwise wedges /play (which awaits this).
     this.inflight = timeoutReject(deps.wallet.getVtxos(), ARK_SYNC_TIMEOUT_MS, 'house getVtxos')
-      .then((vtxos) => {
-        this.snapshot = vtxos
+      .then(async (vtxos) => {
+        const plain = vtxos.filter(isPlainHouseVtxo)
+        if (plain.some((vtxo) => vtxo.expiresAtHeight !== undefined)) {
+          this.chainHeight = (await deps.wallet.onchainProvider.getChainTip()).height
+        }
+        this.snapshot = plain
         this.fetchedAt = Date.now()
-        return vtxos
+        return plain
       })
       .finally(() => {
         this.inflight = null
@@ -303,8 +324,8 @@ export class BetExceedsCapacityError extends Error {
  * Return spendable house VTXOs that are neither expiring nor already
  * reserved by an in-flight game. Pure read — does not mutate the ledger.
  */
-export function freeHouseVtxos(all: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] {
-  const { selectable } = selectableHouseVtxos(all)
+export function freeHouseVtxos(all: NormalizedExtendedVirtualCoin[]): NormalizedExtendedVirtualCoin[] {
+  const { selectable } = selectableHouseVtxos(all.filter(isPlainHouseVtxo))
   const reserved = reservations.reservedOutpoints()
   return selectable.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
 }
@@ -362,8 +383,8 @@ class SpentOutpointDenyList {
 export const spentOutpoints = new SpentOutpointDenyList()
 
 /** Settled or preconfirmed — a coin state usable to fund a NEW bet. */
-const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
-  v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed'
+const settledOrPre = (v: NormalizedExtendedVirtualCoin): boolean =>
+  isPlainHouseVtxo(v) && canSpendOffchain(v, { timestamp: new Date(), height: houseVtxoCache.chainHeight })
 
 /**
  * Total house value that can back a NEW bet: settled-or-preconfirmed coins not
@@ -375,7 +396,7 @@ const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
  * filters on near-expiry rather than coin state — neither set contains the
  * other.
  */
-export function freeStakeTotal(vtxos: ExtendedVirtualCoin[]): number {
+export function freeStakeTotal(vtxos: NormalizedExtendedVirtualCoin[]): number {
   return vtxos
     .filter((v) => settledOrPre(v)
       && !reservations.isReserved(outpointKey(v.txid, v.vout))
@@ -399,7 +420,7 @@ export function freeStakeTotal(vtxos: ExtendedVirtualCoin[]): number {
  * full SDK re-sync — that read alone was costing ~4.9s per `/api/tiers` in
  * production, roughly as much server time as placing every bet in the session.
  */
-export function spendableTotal(vtxos: ExtendedVirtualCoin[]): number {
+export function spendableTotal(vtxos: NormalizedExtendedVirtualCoin[]): number {
   return vtxos.filter(settledOrPre).reduce((s, v) => s + v.value, 0)
 }
 
@@ -419,7 +440,7 @@ export const POOL_MAX_COUNT = Number(process.env.HOUSE_VTXO_POOL_MAX || 64)
 /*
  * There used to be a MAX_SPLIT_OUTPUTS_PER_TX = 16 here, bounding how many
  * recipients one self-send could carry against arkd's maxTxWeight. Each split
- * send now mints exactly ONE piece (that is the shape `sendBitcoin` supports,
+ * send now mints exactly ONE piece (that is the shape `send` supports,
  * and it is what lets us pin the inputs), so tx weight is no longer the
  * binding constraint — SPLIT_PIECES_PER_RUN bounds a tick instead.
  */
@@ -442,48 +463,10 @@ let splitInFlight = false
 /** Per-run reservation id, so two runs can never collide on one ledger key. */
 let splitRunSeq = 0
 
-/**
- * Pieces one run will mint. The ONLY bound on a run's length.
- *
- * 16 matches what the old single-tx split effectively produced
- * (`min(maxCount - free.length, affordable, MAX_SPLIT_OUTPUTS_PER_TX=16)`), so
- * per-call throughput is unchanged. It is deliberately not paired with a
- * second, count-based stopping rule: `planSplit` already stops when every
- * ladder rung's target is met, and a run that has nothing to plan costs
- * exactly one snapshot read.
- *
- * A first attempt bounded runs at 4 and stopped early once the pool reached
- * POOL_TARGET_COUNT. Both were wrong. The v4 e2e mints its pool in ONE call
- * and then plays ~10 games that each spend a WHOLE house VTXO, so stopping at
- * the floor of 8 starved the last game — "per-bet cap is 0 sat (25% of 0 sat
- * free)". targetCount was never a sizing input for the old code either; it
- * pushed toward maxCount, 16 at a time.
- *
- * Cost note: unlike the old code this is 16 SEQUENTIAL txs rather than one tx
- * with 16 outputs, because `sendBitcoin` mints one piece per call. Moving to
- * `settle({inputs, outputs})` would restore the single-tx form (and produce
- * settled rather than preconfirmed pieces) once its change/intent-fee
- * accounting for a self-split is verified.
- */
+/** Bound the number of denomination outputs created in one maintenance run. */
 export const SPLIT_PIECES_PER_RUN = Number(process.env.HOUSE_VTXO_SPLIT_PIECES_PER_RUN || 16)
 
-/**
- * Transient-failure budget for ONE split run (not per piece).
- *
- * Every iteration spends the PREVIOUS iteration's change, and that change is a
- * freshly preconfirmed VTXO. arkd occasionally has not registered it yet when
- * the next `submitTx` names it as an input, and answers `VTXO_NOT_FOUND (30):
- * some vtxos not found` — the same known arkd race the v4 e2e handles with a
- * bounded retry for co-fund inputs, and the scale harness with retry-fresh-inputs.
- *
- * It used to abort the whole run. Observed in CI: the run minted ONE piece,
- * lost the second to this race, and stopped with 2 free coins — then the first
- * two /play calls pinned both and every later game died with "per-bet cap is 0
- * sat (25% of 0 sat free)". One racy send must not leave the house unable to
- * take bets, so a transient failure now costs a re-read and a retry instead of
- * the run. The budget is shared across the run so a genuinely wedged arkd still
- * stops quickly rather than burning `piecesPerRun` × retries.
- */
+/** Retry only definite indexing failures; ambiguous timed-out sends must not be repeated. */
 export const SPLIT_TRANSIENT_RETRIES = Number(process.env.HOUSE_VTXO_SPLIT_RETRIES || 3)
 
 /** Pause before re-reading the pool and retrying a transient split failure. */
@@ -540,17 +523,17 @@ export type SplitInputKind = 'peel' | 'consolidate' | 'none'
  * a rung the pool cannot otherwise reach.
  */
 export function pickSplitInputs(
-  free: ExtendedVirtualCoin[],
+  free: NormalizedExtendedVirtualCoin[],
   amount: number,
   dust: number,
   maxInputs: number = SPLIT_MAX_INPUTS_PER_PIECE,
-): { inputs: ExtendedVirtualCoin[]; kind: SplitInputKind } {
-  const desc = [...free].sort((a, b) => b.value - a.value)
+): { inputs: NormalizedExtendedVirtualCoin[]; kind: SplitInputKind } {
+  const desc = free.filter(isPlainHouseVtxo).sort((a, b) => b.value - a.value)
 
   const single = desc.find((v) => v.value >= amount + dust)
   if (single) return { inputs: [single], kind: 'peel' }
 
-  const chosen: ExtendedVirtualCoin[] = []
+  const chosen: NormalizedExtendedVirtualCoin[] = []
   let sum = 0
   for (const v of desc) {
     if (chosen.length >= maxInputs) break
@@ -561,52 +544,14 @@ export function pickSplitInputs(
   return { inputs: [], kind: 'none' }
 }
 
-/**
- * Coins the SPLITTER may spend: free, and comfortably clear of renewal.
- *
- * `freeHouseVtxos` filters on VTXO_LIFETIME_BUFFER_MS (30 minutes) — the right
- * horizon for /play, whose games last minutes. It is the wrong one here, and
- * the gap is 71.5 hours wide: renewal treats anything within
- * RENEWAL_EXPIRY_BUFFER_MS (72h) as needing settlement, so the splitter was
- * free to spend coins renewal was about to settle anyway.
- *
- * Pieces inherit their parent's batch expiry, so splitting a near-expiry coin
- * mints near-expiry pieces, which renewal then immediately settles — undoing
- * the shaping the split just paid transactions for. OBSERVED in production:
- *
- *   19:14:12 [house pool] minted 13 piece(s) — 32/64 free
- *   19:14:49 [renewal]    32 needing renewal (buffer 72h) -> settling all 32
- *   19:18:00 [house pool] minted 16 piece(s) — 17/64 free      (all over again)
- *
- * The same tick reported "nearest batch expiry ~1h", so those 32 coins were an
- * hour from being swept. Renewal caught them, but the splitter had spent a
- * transaction each to mint pieces from parents already inside the sweep window
- * — the precondition of the 1M-sat sweep loss, not merely wasted fees.
- *
- * Deferring costs nothing in the healthy state: the same log shows the pool at
- * ~152h expiry with 0 needing renewal once renewal has run, which is more than
- * double this buffer. The splitter simply waits its turn.
- */
-export function splittableHouseVtxos(all: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] {
+/** Split outputs inherit expiry, so only shape coins outside the renewal horizon. */
+export function splittableHouseVtxos(all: NormalizedExtendedVirtualCoin[], bufferMs = RENEWAL_EXPIRY_BUFFER_MS): NormalizedExtendedVirtualCoin[] {
   const reserved = reservations.reservedOutpoints()
-  const unreserved = (vs: ExtendedVirtualCoin[]) =>
+  const unreserved = (vs: NormalizedExtendedVirtualCoin[]) =>
     vs.filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
 
-  const { selectable } = selectableHouseVtxos(all, RENEWAL_EXPIRY_BUFFER_MS)
-  const clear = unreserved(selectable)
-  if (clear.length > 0) return clear
-
-  // PREFER, don't REQUIRE. Requiring it starves the splitter on any network
-  // whose batch lifetime is shorter than the renewal buffer, because then EVERY
-  // coin is always inside the horizon. Regtest is exactly that: CI failed 8 v4
-  // tests with "deferring to renewal — all 1 free coin(s)" followed by "per-bet
-  // cap is 0 sat (25% of 0 sat free)" — the pool never got built at all.
-  //
-  // So when nothing is clear of renewal, fall back to /play's horizon. That is
-  // no worse than the behaviour this replaced, and it keeps the win where it
-  // matters: whenever healthy coins DO exist, they are used and the near-expiry
-  // ones are left for renewal.
-  return freeHouseVtxos(all)
+  const { selectable } = selectableHouseVtxos(all.filter(isPlainHouseVtxo), bufferMs)
+  return unreserved(selectable)
 }
 
 export interface SplitOutcome {
@@ -622,40 +567,7 @@ export interface SplitOutcome {
   reason: string
 }
 
-/**
- * Shape the house bankroll toward the configured denomination ladder.
- *
- * Two things changed from the single-`pieceSize` design:
- *
- * 1. WHAT to mint now comes from `planSplit` (vtxo-denominations.ts), which
- *    targets a per-size count and stops when each rung is satisfied, instead
- *    of `floor(freeTotal/pieceSize) - 1` — a rule that could not split a
- *    bankroll under 2x pieceSize at all and kept minting a size the pool was
- *    already full of.
- *
- * 2. HOW it spends no longer blocks games. The old path called
- *    `wallet.send(...recipients)`, which picks its inputs internally from ALL
- *    spendable coins with no way to exclude our reservations — so the only
- *    safe option was to hold `selectionMutex` across the network send and
- *    REFUSE to split whenever any outpoint was reserved. With autoplay that is
- *    nearly always true, which is why the fragment button looked like a no-op,
- *    and the send holding the mutex is what produced a MEASURED 9,389ms
- *    `select+reserve` stall in /play.
- *
- *    Instead each piece is minted with `sendBitcoin({selectedVtxos})`, whose
- *    inputs we dictate. We pick and PIN them under the mutex (microseconds, no
- *    network) and then send OUTSIDE it: /play skips reserved coins, we only
- *    ever spend unreserved ones, so the exclusion is the same and neither side
- *    waits on the other.
- *
- * Note `sendBitcoin` is marked `@deprecated Use send` upstream, but `send` is
- * precisely the variant with no input control. `assertSelectedVtxosSupported`
- * below fails loudly if a future SDK drops it, rather than letting us fall
- * back to unconstrained selection silently. The longer-term upgrade is
- * `settle({inputs, outputs})` — it pins inputs AND takes many outputs in one
- * batch swap, producing settled rather than preconfirmed pieces — once its
- * change/intent-fee accounting for a self-split has been verified live.
- */
+/** Shape free coins toward the denomination ladder. Select and hold inputs under the mutex, then send outside it. */
 export async function ensureHouseVtxoPool(
   deps: AppDeps,
   opts: {
@@ -683,6 +595,7 @@ export async function ensureHouseVtxoPool(
   const runId = `${SPLIT_RESERVATION_ID}#${++splitRunSeq}`
 
   try {
+    const renewalBufferMs = houseRenewalBufferForWalletMs(deps.wallet, deps.arkInfo)
     const targetCount = opts.targetCount ?? POOL_TARGET_COUNT
     const maxCount = opts.maxCount ?? POOL_MAX_COUNT
       const piecesPerRun = opts.piecesPerRun ?? SPLIT_PIECES_PER_RUN
@@ -692,7 +605,7 @@ export async function ensureHouseVtxoPool(
       parseLadder(process.env.HOUSE_VTXO_DENOMINATIONS) ??
       defaultLadder(await pieceSizeFromTiers(deps))
 
-    return await runSplit(deps, { targetCount, maxCount, piecesPerRun, ladder, runId })
+    return await runSplit(deps, { targetCount, maxCount, piecesPerRun, ladder, runId, renewalBufferMs })
   } finally {
     splitInFlight = false
     // Belt and braces: the per-piece finally already releases, but a throw
@@ -709,9 +622,10 @@ async function runSplit(
     piecesPerRun: number
     ladder: Denomination[]
     runId: string
+    renewalBufferMs: number
   },
 ): Promise<SplitOutcome> {
-  const { targetCount, maxCount, piecesPerRun, ladder, runId } = cfg
+  const { targetCount, maxCount, piecesPerRun, ladder, runId, renewalBufferMs } = cfg
   const dust = Number(deps.arkInfo.dust)
   const ownAddress = await deps.wallet.getAddress()
 
@@ -738,7 +652,7 @@ async function runSplit(
   const readPrivate = () =>
     timeoutReject(deps.wallet.getVtxos(), ARK_SYNC_TIMEOUT_MS, 'house getVtxos (split)')
 
-  let working = splittableHouseVtxos(await readPrivate())
+  let working = splittableHouseVtxos(await readPrivate(), renewalBufferMs)
   /** Every outpoint this run has committed to spending. */
   const consumed = new Set<string>()
 
@@ -755,7 +669,7 @@ async function runSplit(
       const reserved = reservations.reservedOutpoints()
       const free = working.filter((v) => {
         const k = outpointKey(v.txid, v.vout)
-        return !consumed.has(k) && !reserved.has(k)
+        return isPlainHouseVtxo(v) && !consumed.has(k) && !reserved.has(k)
       })
       const plan = planSplit({
         existing: free.map((v) => v.value),
@@ -768,7 +682,7 @@ async function runSplit(
         dust,
       })
       if (plan.outputs.length === 0) {
-        return { inputs: [] as ExtendedVirtualCoin[], amount: 0, kind: 'none' as SplitInputKind, reason: plan.reason }
+        return { inputs: [] as NormalizedExtendedVirtualCoin[], amount: 0, kind: 'none' as SplitInputKind, reason: plan.reason }
       }
 
       const amount = plan.outputs[0]
@@ -778,7 +692,7 @@ async function runSplit(
       if (inputs.length === 0) {
         const total = free.reduce((t, v) => t + v.value, 0)
         return {
-          inputs: [] as ExtendedVirtualCoin[],
+          inputs: [] as NormalizedExtendedVirtualCoin[],
           amount: 0,
           kind,
           reason: `cannot fund a ${amount}-sat piece — ${free.length} free coin(s) totalling ${total} sat, largest ${Math.max(0, ...free.map((v) => v.value))} sat`,
@@ -806,9 +720,8 @@ async function runSplit(
     let retryThisPiece = false
     try {
       await timeoutReject(
-        deps.wallet.sendBitcoin({
-          address: ownAddress,
-          amount: picked.amount,
+        deps.wallet.send({
+          recipients: [{ address: ownAddress, amount: picked.amount }],
           selectedVtxos: picked.inputs,
         }),
         ARK_SUBMIT_TIMEOUT_MS,
@@ -823,7 +736,7 @@ async function runSplit(
       console.log(`[house pool] minted a ${picked.amount}-sat piece (${picked.kind}) from ${from}`)
       // Private re-read so the next piece can spend this one's change. Costs
       // the SPLITTER a sync; costs /play nothing.
-      working = splittableHouseVtxos(await readPrivate())
+      working = splittableHouseVtxos(await readPrivate(), renewalBufferMs)
     } catch (err) {
       lastReason = `split send failed after ${created} piece(s): ${err instanceof Error ? err.message : String(err)}`
       console.warn(`[house pool] ${lastReason}`)
@@ -843,7 +756,7 @@ async function runSplit(
       // Drop the failed attempt's pin (it spent nothing) so the retry can pick
       // those coins again, then re-read privately and try.
       reservations.reserve(runId, [...consumed], 0)
-      working = splittableHouseVtxos(await readPrivate())
+      working = splittableHouseVtxos(await readPrivate(), renewalBufferMs)
     }
   }
 
@@ -862,22 +775,10 @@ async function runSplit(
   return { created, reason: lastReason }
 }
 
-/**
- * Guard the one SDK affordance this design depends on.
- *
- * `sendBitcoin` is `@deprecated Use send` upstream, and `send` has no input
- * control — so if a future SDK bump removes it, the splitter must fail loudly
- * rather than quietly regress to reservation-blind selection, which is the P0
- * #53 hazard this replaced.
- */
+/** Fail at startup if the installed SDK cannot submit explicit inputs. */
 export function assertSelectedVtxosSupported(wallet: unknown): void {
-  const fn = (wallet as { sendBitcoin?: unknown } | null)?.sendBitcoin
-  if (typeof fn !== 'function') {
-    throw new Error(
-      'house pool split requires wallet.sendBitcoin({selectedVtxos}) to pin its inputs; ' +
-        'the SDK no longer exposes it — port the splitter to settle({inputs, outputs}) ' +
-        'before relying on wallet.send, which cannot exclude reserved coins (P0 #53)',
-    )
+  if (typeof (wallet as { send?: unknown } | null)?.send !== 'function') {
+    throw new Error('House pool requires wallet.send({ recipients, selectedVtxos })')
   }
 }
 
@@ -927,76 +828,22 @@ export function startPoolMaintenance(deps: AppDeps, intervalMs = 120_000): NodeJ
   return setInterval(tick, intervalMs)
 }
 
-/**
- * Rebuild the in-memory reservation ledger from pending games after a
- * restart. Each pending game's `house_vtxos_json` lists the outpoints it
- * committed to; re-reserve them so a post-restart play can't pick a VTXO
- * still baked into a live game's fallback tx.
- */
+/** Rebuild pending game holds before accepting requests. Submitted pots retain liability only. */
 export async function rebuildReservations(deps: AppDeps): Promise<number> {
-  const pending = await deps.repos.games.list({ status: 'pending', limit: 1000 })
+  const pending = await deps.repos.games.listPending()
   let restored = 0
-  for (const g of pending) {
-    if (!g.house_vtxos_json) continue
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(g.house_vtxos_json)
-    } catch {
-      continue // malformed — skip
+  for (const game of pending) {
+    const state = JSON.parse(game.state_json) as V4State
+    if (state.protocolVersion !== 'v4' || !Array.isArray(state.houseInputs) || !Number.isSafeInteger(state.houseStake)) {
+      throw new Error(`Invalid durable game state: ${game.id}`)
     }
-    if (Array.isArray(parsed)) {
-      // Legacy setup/final flow: the JSON is a list of "txid:vout" house VTXOs
-      // baked into the game's fallback tx. Re-reserve those outpoints so a
-      // post-restart play can't pick a VTXO still committed to a live game.
-      if (parsed.length > 0) {
-        reservations.reserve(g.id, parsed as string[], maxLiabilityForTier(g.tier))
-        restored++
-      }
-    } else if (parsed && typeof parsed === 'object' && (
-      'houseEscrow' in parsed || 'houseVtxoOutpoint' in parsed || 'houseVtxoOutpoints' in parsed || 'arkadeForfeit' in parsed
-    )) {
-      // Trustless per-party flow — liability-only reservation (since v0.3.7).
-      // We no longer pin specific outpoints: the SDK's wallet.send mutex
-      // serializes its own VTXO selection at /commit, so cross-game double-
-      // spend protection is the SDK's job. Our reservation just enforces the
-      // bankroll over-commit ceiling. Liability is:
-      //   - houseEscrow.value if the house has already funded (post-/commit
-      //     or legacy ≤0.3.4 eager flow)
-      //   - arkadeForfeit.houseStake otherwise (lazy-fund pending /commit)
-      //   - tier as a final fallback for very old rows
-      const o = parsed as {
-        houseEscrow?: { value?: number }
-        arkadeForfeit?: { houseStake?: number }
-      }
-      let liability = 0
-      if (o.houseEscrow && typeof o.houseEscrow.value === 'number' && o.houseEscrow.value > 0) {
-        liability = o.houseEscrow.value
-      } else if (o.arkadeForfeit && typeof o.arkadeForfeit.houseStake === 'number' && o.arkadeForfeit.houseStake > 0) {
-        liability = o.arkadeForfeit.houseStake
-      } else {
-        liability = g.tier
-      }
-      reservations.reserve(g.id, [], liability)
-      restored++
-    } else if (parsed && typeof parsed === 'object' && (parsed as { protocolVersion?: string }).protocolVersion === 'v4') {
-      // v0.4 joint pot. Pre-cofund: pin the EXACT house input outpoints so a
-      // post-restart /play can't re-pick a VTXO still committed to this pending
-      // game (without this, the v4 state matched no branch and was silently
-      // skipped → double-reservation → VTXO_ALREADY_SPENT). Post-cofund: the
-      // inputs are already spent into the pot, but the house stake stays live
-      // until the game resolves — reserve liability-only, as v3 does.
-      const v4 = parsed as {
-        houseInputs?: { txid: string; vout: number }[]
-        houseStake?: number
-        cofundArkTxid?: string
-      }
-      const outpoints = v4.cofundArkTxid
-        ? []
-        : (v4.houseInputs ?? []).map((h) => `${h.txid}:${h.vout}`)
-      reservations.reserve(g.id, outpoints, v4.houseStake ?? g.tier)
-      restored++
-    }
+    // Submitted co-funds already consume their inputs; keep only their liability.
+    const outpoints = state.cofundArkTxid || state.cofundTxid
+      ? []
+      : state.houseInputs.map((input) => outpointKey(input.txid, input.vout))
+    reservations.reserve(game.id, outpoints, state.houseStake)
+    restored++
   }
-  if (restored > 0) console.log(`[house pool] rebuilt ${restored} reservation(s) from pending games`)
+  if (restored) console.log(`[house pool] restored ${restored} pending game reservation(s)`)
   return restored
 }

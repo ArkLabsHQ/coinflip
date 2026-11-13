@@ -20,12 +20,16 @@ import { getSqlExecutor, initDb, closeDb } from './db.js'
 import { makeRepos } from './repositories/index.js'
 import { initHouseWallet } from './house-wallet.js'
 import { startExpiryTimer, startRenewalTimer } from './game-engine.js'
-import { rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
+import { reservations, rebuildReservations, startPoolMaintenance } from './vtxo-pool.js'
 import { createPublicRoutes } from './public-routes.js'
 import { createV4Routes } from './v4-routes.js'
 import { startV4RefundTimer } from './trustless-game-v4.js'
 import { createAdminRoutes } from './admin/routes.js'
 import type { AppDeps } from './deps.js'
+import { SQLitePoolRepository } from './pool/repository.js'
+import { PoolService } from './pool/service.js'
+import { makePoolAdapter } from './pool/adapter.js'
+import { createPoolRoutes, createPoolAdminRoutes } from './pool/routes.js'
 
 // Re-exports for in-process consumers (tests / embedded use). Keeping these
 // in the main entry rather than a separate `bootstrap.ts` so a test can do
@@ -64,8 +68,13 @@ export { createPublicRoutes } from './public-routes.js'
 export { createV4Routes } from './v4-routes.js'
 export { createAdminRoutes } from './admin/routes.js'
 export type { AppDeps } from './deps.js'
+export { PoolService, PoolError } from './pool/service.js'
+export { SQLitePoolRepository, POOL_SCHEMA } from './pool/repository.js'
+export { createPoolRoutes, createPoolAdminRoutes } from './pool/routes.js'
+export type { PoolAdapter } from './pool/adapter.js'
 
 const PUBLIC_PORT = parseInt(process.env.PUBLIC_PORT || '3001', 10)
+const PUBLIC_HOST = process.env.PUBLIC_HOST || '0.0.0.0'
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '3002', 10)
 
 /**
@@ -81,20 +90,11 @@ export interface BootstrapOptions {
 export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<AppDeps> {
   await initDb()
   const repos = makeRepos(getSqlExecutor())
-  // Keep the SDK's auto-renewal poll-loop OFF (settlementConfig:false) — NOT
-  // for the historical fee-churn reason (the installed SDK's runPeriodicSettle
-  // is gated and fee-aware now) but because every SDK self-settle path
-  // (runPeriodicSettle, renewVtxos, the vtxo_received-driven renewal,
-  // recoverVtxos) gathers its own inputs with no exclusion hook — SettleParams
-  // is a bare {inputs, outputs} and SettlementConfig has no input filter — so
-  // an enabled poll-loop could settle a VTXO reserved for a live game's
-  // co-fund (P0 #53, VTXO_ALREADY_SPENT breaking the player's game). The same
-  // work (renewal at the SDK-default 3-day buffer, swept-fund recovery,
-  // boarding confirmation) runs instead through the reservation-aware
-  // `startRenewalTimer`. Callers (tests) may override.
+  // Rebuild game holds before starting our denomination-aware renewal worker.
   const { wallet, identity, arkInfo } = await initHouseWallet(repos, {
     settlementConfig: options.walletSettlementConfig ?? false,
   })
+  reservations.bindWallet(wallet)
   const deps: AppDeps = { repos, wallet, identity, arkInfo }
   // Best-effort: attach the wallet's ContractManager so trustless settlement can
   // track each escrow and react to its on-chain spend eagerly. A failure here is
@@ -104,6 +104,8 @@ export async function bootstrapDeps(options: BootstrapOptions = {}): Promise<App
   } catch (err) {
     console.warn('[contract] getContractManager failed; continuing without eager contract watch:', err instanceof Error ? err.message : err)
   }
+  deps.pool = new PoolService(deps, new SQLitePoolRepository(getSqlExecutor()), makePoolAdapter(deps))
+  await deps.pool.restoreStartupHolds()
   return deps
 }
 
@@ -111,10 +113,7 @@ async function main() {
   console.log('Bootstrapping server dependencies...')
   const deps = await bootstrapDeps()
 
-  // Probe the arkade-script emulator early so the boot log shows whether
-  // new games will use the 5-leaf escrow or fall back to the 4-leaf CSV
-  // path. loadEmulatorConfig is cache-backed, so this is the only network
-  // hit per process lifetime.
+  // Report the covenant service connection before accepting games.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   await (await import('./emulator.js')).loadEmulatorConfig()
 
@@ -135,10 +134,19 @@ async function main() {
   // Renew expiring VTXOs + confirm boarding deposits on a long cadence (only when
   // there's something to do — the same gate the SDK's own poll-loop applies).
   startRenewalTimer(deps)
+  let poolTickRunning = false
+  const poolTimer = setInterval(() => {
+    deps.pool!.maintain().catch(error => console.error('[pool] renewal:', error instanceof Error ? error.message : error))
+    if (poolTickRunning) return
+    poolTickRunning = true
+    deps.pool!.reconcile().catch(error => console.error('[pool] reconcile:', error instanceof Error ? error.message : error))
+      .finally(() => { poolTickRunning = false })
+  }, 5000)
 
   // Public API server
   const publicApp = express()
   publicApp.use(cors())
+  publicApp.use('/api/pool', express.json({ limit: '1mb' }))
   publicApp.use(express.json())
 
   publicApp.get('/health', (_req, res) => {
@@ -147,6 +155,7 @@ async function main() {
 
   publicApp.use(createPublicRoutes(deps))
   publicApp.use(createV4Routes(deps))
+  publicApp.use(createPoolRoutes(deps.pool!))
 
   // Single-image mode: when CLIENT_DIR is set (the bundled image), the public
   // port also serves the built Vue client + an SPA fallback, so the player gets
@@ -164,8 +173,8 @@ async function main() {
     console.log(`Serving bundled client from ${clientDir}`)
   }
 
-  publicApp.listen(PUBLIC_PORT, () => {
-    console.log(`Public API (+ client when CLIENT_DIR set) listening on port ${PUBLIC_PORT}`)
+  publicApp.listen(PUBLIC_PORT, PUBLIC_HOST, () => {
+    console.log(`Public API (+ client when CLIENT_DIR set) listening on ${PUBLIC_HOST}:${PUBLIC_PORT}`)
   })
 
   // Admin API server
@@ -173,6 +182,7 @@ async function main() {
   adminApp.use(express.json())
 
   adminApp.use(createAdminRoutes(deps))
+  adminApp.use(createPoolAdminRoutes(deps.pool!))
 
   const ADMIN_HOST = process.env.ADMIN_HOST || '127.0.0.1'
   adminApp.listen(ADMIN_PORT, ADMIN_HOST, () => {
@@ -183,6 +193,7 @@ async function main() {
   // WAL into coinflip.db so the persisted volume is left fully merged, not a main
   // file plus an un-applied -wal sidecar.
   const shutdown = (sig: string) => {
+    clearInterval(poolTimer)
     console.log(`Received ${sig} — closing database and exiting.`)
     try { closeDb() } catch (err) { console.error('closeDb failed:', err) }
     process.exit(0)

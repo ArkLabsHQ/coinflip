@@ -22,7 +22,7 @@
 import { ArkAddress } from '@arkade-os/sdk'
 const {
   ensureHouseVtxoPool, reservations, houseVtxoCache, pickSplitInputs,
-  SPLIT_MAX_INPUTS_PER_PIECE, outpointKey,
+  SPLIT_MAX_INPUTS_PER_PIECE, outpointKey, HouseVtxoCache, freeHouseVtxos, freeStakeTotal, spendableTotal,
 } = require('arkade-coinflip-server/dist/vtxo-pool.js')
 
 // 7 days: a HEALTHY house coin must now sit outside renewal's 72h horizon,
@@ -33,13 +33,19 @@ const DUST = 330
 
 const coin = (txid: string, vout: number, value: number) => ({
   txid, vout, value,
-  virtualStatus: { state: 'settled', batchExpiry: FUTURE_EXPIRY },
+  isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (FUTURE_EXPIRY) === undefined ? undefined : new Date(FUTURE_EXPIRY),
   status: { confirmed: false },
   createdAt: new Date(Date.now() - 60_000),
 })
 const hex64 = (n: number, f = 'a') => String(n).padStart(64, f)
 
 describe('pickSplitInputs', () => {
+  it('leaves a larger share-bearing coin untouched when selecting plain split inputs', () => {
+    const token = { ...coin(hex64(9), 0, 500_000), assets: [{ assetId: '11'.repeat(32) + '0000', amount: 1n }] }
+    const plain = coin(hex64(8), 0, 40_000)
+    expect(pickSplitInputs([token, plain], 25_000, DUST).inputs).toEqual([plain])
+    expect(pickSplitInputs([token], 25_000, DUST)).toEqual({ inputs: [], kind: 'none' })
+  })
   it('peels one coin when a single one is big enough', () => {
     const free = [coin(hex64(1), 0, 40_000), coin(hex64(2), 0, 5_000)]
     const r = pickSplitInputs(free, 25_000, DUST)
@@ -98,14 +104,14 @@ describe('the splitter does not churn the shared snapshot', () => {
       wallet: {
         getVtxos: async () => pool,
         getAddress: async () => HOUSE_ADDRESS,
-        sendBitcoin: async (params: any) => {
+        send: async (params: any) => {
           seq++
           const txid = String(seq).padStart(2, '0').repeat(32).slice(0, 64)
           const spentKeys = new Set(params.selectedVtxos.map((v: any) => `${v.txid}:${v.vout}`))
           const inSum = params.selectedVtxos.reduce((t: number, v: any) => t + v.value, 0)
           pool = pool.filter((c: any) => !spentKeys.has(`${c.txid}:${c.vout}`))
-          pool.push(coin(txid, 0, params.amount))
-          if (inSum - params.amount > 0) pool.push(coin(txid, 1, inSum - params.amount))
+          pool.push(coin(txid, 0, params.recipients[0].amount))
+          if (inSum - params.recipients[0].amount > 0) pool.push(coin(txid, 1, inSum - params.recipients[0].amount))
           return txid
         },
       },
@@ -115,6 +121,40 @@ describe('the splitter does not churn the shared snapshot', () => {
   afterEach(() => {
     for (const r of reservations.snapshot()) reservations.release(r.gameId)
     houseVtxoCache.invalidate()
+  })
+
+  it('never submits a share-bearing wallet coin as a plain Bitcoin split input', async () => {
+    const token = { ...coin(hex64(9), 0, 500_000), assets: [{ assetId: '11'.repeat(32) + '0100', amount: 1000n }] }
+    const plain = coin(hex64(8), 0, 40_000)
+    pool = [token, plain]
+    const send = jest.spyOn(deps.wallet, 'send')
+    expect((await ensureHouseVtxoPool(deps, { piecesPerRun: 1, pieceSize: 5000 })).created).toBe(1)
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: [plain] }))
+    expect(pool).toContain(token)
+    send.mockClear()
+    pool = [token]
+    expect((await ensureHouseVtxoPool(deps, { piecesPerRun: 1, pieceSize: 5000 })).created).toBe(0)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('does not count asset carriers as game capacity or free house funds', () => {
+    const token = { ...coin(hex64(9), 0, 500_000), assets: [{ assetId: '11'.repeat(32) + '0100', amount: 1000n }] }
+    const plain = coin(hex64(8), 0, 40_000)
+    expect(freeHouseVtxos([token, plain])).toEqual([plain])
+    expect(freeStakeTotal([token, plain])).toBe(plain.value)
+    expect(spendableTotal([token, plain])).toBe(plain.value)
+  })
+
+  it('evicts newly identified asset carriers on refresh and never serves them from the warm cache', async () => {
+    const plain = coin(hex64(8), 0, 40_000)
+    const identified = { ...plain, assets: [{ assetId: '11'.repeat(32) + '0100', amount: 1000n }] }
+    const fetch = jest.fn().mockResolvedValueOnce([plain]).mockResolvedValue([identified])
+    const cache = new HouseVtxoCache(60_000)
+    const localDeps = { wallet: { getVtxos: fetch } }
+    expect(await cache.get(localDeps)).toEqual([plain])
+    expect(await cache.refresh(localDeps)).toEqual([])
+    expect(await cache.get(localDeps)).toEqual([])
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   /**
@@ -139,8 +179,8 @@ describe('the splitter does not churn the shared snapshot', () => {
   it('keeps every already-spent coin reserved for the rest of the run', async () => {
     const seenReservedDuringSend: boolean[] = []
     let firstSpent = ''
-    const realSend = deps.wallet.sendBitcoin
-    deps.wallet.sendBitcoin = async (params: any) => {
+    const realSend = deps.wallet.send
+    deps.wallet.send = async (params: any) => {
       if (firstSpent) seenReservedDuringSend.push(reservations.isReserved(firstSpent))
       const out = await realSend(params)
       if (!firstSpent) {
@@ -188,7 +228,7 @@ describe('the splitter defers to renewal inside its horizon', () => {
   const HOURS = 3600_000
   const withExpiry = (txid: string, value: number, msFromNow: number) => ({
     ...coin(txid, 0, value),
-    virtualStatus: { state: 'settled', batchExpiry: Date.now() + msFromNow },
+    isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (Date.now() + msFromNow) === undefined ? undefined : new Date(Date.now() + msFromNow),
   })
 
   afterEach(() => {
@@ -209,33 +249,24 @@ describe('the splitter defers to renewal inside its horizon', () => {
     expect(splittableHouseVtxos([healthy])).toEqual([])
   })
 
-  /**
-   * PREFER, don't REQUIRE — the invariant CI taught me.
-   *
-   * Requiring coins clear of renewal starved the splitter on any network whose
-   * batch lifetime is shorter than the 72h buffer, because then EVERY coin is
-   * always inside it. Regtest is exactly that, and the e2e failed 8 v4 tests
-   * with "deferring to renewal — all 1 free coin(s)" followed by "per-bet cap
-   * is 0 sat (25% of 0 sat free)": the pool was never built at all.
-   */
-  it('still splits when EVERY coin is inside the horizon, rather than starving', async () => {
-    let pool: any[] = [withExpiry(hex64(6), 500_000, 1 * HOURS)] // nothing is clear
+  it('splits fresh short-lived coins using the advertised bounded horizon', async () => {
+    let pool: any[] = [withExpiry(hex64(6), 500_000, 8192_000)]
     let n = 0
     const localDeps = {
-      arkInfo: { dust: BigInt(DUST) },
+      arkInfo: { dust: BigInt(DUST), vtxoTreeExpiry: 8192n },
       repos: { config: { get: async () => '[330,1000,5000,10000,50000]' } },
       wallet: {
         getVtxos: async () => pool,
         getAddress: async () => HOUSE_ADDRESS,
-        sendBitcoin: async (params: any) => {
+        send: async (params: any) => {
           n++
           const txid = String(n).padStart(2, '0').repeat(32).slice(0, 64)
           const spent = new Set(params.selectedVtxos.map((v: any) => `${v.txid}:${v.vout}`))
           const inSum = params.selectedVtxos.reduce((t: number, v: any) => t + v.value, 0)
           pool = pool.filter((c: any) => !spent.has(`${c.txid}:${c.vout}`))
-          pool.push(withExpiry(txid, params.amount, 1 * HOURS))
-          if (inSum - params.amount > 0) {
-            pool.push({ ...withExpiry(txid, inSum - params.amount, 1 * HOURS), vout: 1 })
+          pool.push(withExpiry(txid, params.recipients[0].amount, 8192_000))
+          if (inSum - params.recipients[0].amount > 0) {
+            pool.push({ ...withExpiry(txid, inSum - params.recipients[0].amount, 8192_000), vout: 1 })
           }
           return txid
         },
@@ -251,8 +282,15 @@ describe('the splitter defers to renewal inside its horizon', () => {
     const clear = withExpiry(hex64(8), 100_000, 152 * HOURS)
     // Both present -> only the clear one is offered.
     expect(splittableHouseVtxos([due, clear]).map((v: any) => v.txid)).toEqual([clear.txid])
-    // Only the due one -> it is offered anyway, rather than nothing.
-    expect(splittableHouseVtxos([due]).map((v: any) => v.txid)).toEqual([due.txid])
+    expect(splittableHouseVtxos([due])).toEqual([])
+  })
+
+  it('waits for renewal instead of shaping only near-expiry short-lived coins', async () => {
+    const send = jest.fn()
+    const deps = { arkInfo: { dust: BigInt(DUST), vtxoTreeExpiry: 8192n },
+      wallet: { getVtxos: async () => [withExpiry(hex64(9), 500_000, 3600_000)], getAddress: async () => HOUSE_ADDRESS, send } } as any
+    expect((await ensureHouseVtxoPool(deps, { pieceSize: 5000 })).created).toBe(0)
+    expect(send).not.toHaveBeenCalled()
   })
 
   it('splits normally once the pool is clear of the horizon', async () => {
@@ -264,15 +302,15 @@ describe('the splitter defers to renewal inside its horizon', () => {
       wallet: {
         getVtxos: async () => pool,
         getAddress: async () => HOUSE_ADDRESS,
-        sendBitcoin: async (params: any) => {
+        send: async (params: any) => {
           n++
           const txid = String(n).padStart(2, '0').repeat(32).slice(0, 64)
           const spent = new Set(params.selectedVtxos.map((v: any) => `${v.txid}:${v.vout}`))
           const inSum = params.selectedVtxos.reduce((t: number, v: any) => t + v.value, 0)
           pool = pool.filter((c: any) => !spent.has(`${c.txid}:${c.vout}`))
-          pool.push(withExpiry(txid, params.amount, 152 * HOURS))
-          if (inSum - params.amount > 0) {
-            pool.push({ ...withExpiry(txid, inSum - params.amount, 152 * HOURS), vout: 1 })
+          pool.push(withExpiry(txid, params.recipients[0].amount, 152 * HOURS))
+          if (inSum - params.recipients[0].amount > 0) {
+            pool.push({ ...withExpiry(txid, inSum - params.recipients[0].amount, 152 * HOURS), vout: 1 })
           }
           return txid
         },

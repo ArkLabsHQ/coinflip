@@ -1,0 +1,93 @@
+pragma arkade ^0.1.0;
+
+import "./rules.ark";
+import "./contest.ark";
+
+contract CoinflipPot(
+  pubkey player, pubkey house,
+  bytes32 playerHash, bytes32 houseHash,
+  ScriptPubKey playerPayout, ScriptPubKey housePayout,
+  int playerStake, int houseStake,
+  int oddsN, int oddsLo, int oddsTarget,
+  int cancelDelay, int finalExpiration
+) {
+  @allow(unsigned-spend-path, "both committed reveals determine the winner and the payout is pinned")
+  function playerWin() {
+    int amount = CoinflipRules.pot(playerStake, houseStake);
+    require(CoinflipRules.playerWins(houseHash, playerHash, oddsN, oddsLo, oddsTarget), "player did not win");
+    CoinflipRules.pay(playerPayout, amount);
+  }
+
+  function playerWin(signature serverSig, signature emulatorSig) tapscript {
+    require(checkMultisig([server, emulator], [serverSig, emulatorSig], 2));
+  }
+
+  @allow(unsigned-spend-path, "both committed reveals determine the winner and the payout is pinned")
+  function creatorWin() {
+    int amount = CoinflipRules.pot(playerStake, houseStake);
+    require(!CoinflipRules.playerWins(houseHash, playerHash, oddsN, oddsLo, oddsTarget), "house did not win");
+    CoinflipRules.pay(housePayout, amount);
+  }
+
+  function creatorWin(signature serverSig, signature emulatorSig) tapscript {
+    require(checkMultisig([server, emulator], [serverSig, emulatorSig], 2));
+  }
+
+  @allow(unsigned-spend-path, "the matching player-signed hashlock leaf authorizes the pinned contest continuation")
+  function playerReveal() {
+    int amount = CoinflipRules.pot(playerStake, houseStake);
+    require(tx.outputs[0].script == new CoinflipContest(
+      player, playerHash, houseHash, playerPayout, housePayout,
+      playerStake, houseStake, oddsN, oddsLo, oddsTarget, finalExpiration
+    ), "contest destination");
+    require(tx.outputs[0].value == amount, "contest amount");
+  }
+
+  function playerReveal(bytes secret, signature playerSig, signature serverSig, signature emulatorSig) tapscript {
+    require(sha256(secret) == playerHash);
+    require(checkMultisig([player, server, emulator], [playerSig, serverSig, emulatorSig], 3));
+  }
+
+  @allow(unsigned-spend-path, "the matching CLTV leaf gates refunds and both original stakes return to their committed destinations")
+  function cooperativeSpend() {
+    int amount = CoinflipRules.pot(playerStake, houseStake);
+    require(cancelDelay < finalExpiration, "deadline order");
+    require(tx.outputs[0].script == playerPayout, "player refund");
+    require(tx.outputs[0].value == playerStake, "player stake");
+    require(tx.outputs[1].script == housePayout, "house refund");
+    require(tx.outputs[1].value == houseStake, "house stake");
+    require(tx.outputs[0].value + tx.outputs[1].value == amount, "refund total");
+  }
+
+  function cooperativeSpend(signature serverSig, signature emulatorSig) tapscript {
+    require(after(cancelDelay));
+    require(checkMultisig([server, emulator], [serverSig, emulatorSig], 2));
+  }
+
+  @allow(unsigned-spend-path, "the matching hashlock and CSV leaf requires the player's signature")
+  function playerForfeitExit() {
+    int amount = CoinflipRules.pot(playerStake, houseStake);
+    CoinflipRules.pay(playerPayout, amount);
+  }
+
+  function playerForfeitExit(bytes secret, signature playerSig, signature emulatorSig) tapscript {
+    require(sha256(secret) == playerHash);
+    require(older(serverExitDelay));
+    require(checkMultisig([player, emulator], [playerSig, emulatorSig], 2));
+  }
+
+  function playerWinExit(signature playerSig, signature emulatorSig) tapscript {
+    require(older(serverExitDelay));
+    require(checkMultisig([player, tweak(emulator, playerWin)], [playerSig, emulatorSig], 2));
+  }
+
+  function creatorWinExit(signature houseSig, signature emulatorSig) tapscript {
+    require(older(serverExitDelay));
+    require(checkMultisig([house, tweak(emulator, creatorWin)], [houseSig, emulatorSig], 2));
+  }
+
+  function cooperativeSpendExit(signature playerSig, signature houseSig) tapscript {
+    require(older(serverExitDelay));
+    require(checkMultisig([player, house], [playerSig, houseSig], 2));
+  }
+}

@@ -1,182 +1,79 @@
-# Coinflip demo (covenant-resolved, R1-safe)
+# Local CoinFlip demo
 
-End-to-end demo of the trustless coinflip on Ark with arkade-script
-covenants. The server settles **both win and house win via covenant** —
-the player never signs anything after `/commit`. R1 forfeit + unilateral
-exits are the safety nets when the server (or arkd, or both) misbehaves.
+This demo uses a fresh database and the current compiled joint-pot game. Do not attach a data volume from an older installation with unresolved funds or games.
 
-Branch: `feat/r1-via-arkade-script`. Last verified: `86d09fd`.
+## Start the services
 
-## Stack
+Install Node 22.12 or newer and Docker, then run from the repository root:
 
-| Service | Port | Image |
-|---------|------|-------|
-| Coinflip client (nginx + Vue) | `:8080` | built locally |
-| Coinflip server (admin) | `:3002` | built locally |
-| Coinflip server (public, proxied) | via `:8080/api/...` | built locally |
-| Emulator | `:7073` | `ghcr.io/arkade-os/emulator:v0.0.1` |
-| arkd | `:7070` | `ghcr.io/arkade-os/arkd:v0.9.5` |
-| Esplora | `:3000` | from the arkade-regtest stack |
-| Bitcoin Core | `:18443` | from the arkade-regtest stack |
-
-The emulator + arkd come from the `arkade-regtest` submodule, currently
-tracking PR
-[ArkLabsHQ/arkade-regtest#27](https://github.com/ArkLabsHQ/arkade-regtest/pull/27)
-which replaces the old nigiri + shell scripts with a pure-Node
-orchestrator (no Go toolchain, no WSL — runs the same on
-Windows / macOS / Linux).
-
-## Bring it up
-
-```bash
-# 1. Start arkade-regtest + emulator (one-time, from the submodule).
-#    Replaced the old shell/nigiri scripts — pure Node, no Go/WSL.
-node arkade-regtest/regtest.mjs start
-
-# 2. Build + start the coinflip stack
-docker compose build server client
-docker compose up -d server client
-
-# 3. Wait for server to boot (look for `[emulator] connected at ...`)
-docker logs -f coinflip-server-1
+```sh
+npm ci --include=dev
+npm run regtest -- start --profile ark --profile emulator
+docker compose up --build
 ```
 
-The server probes the emulator at boot. If you don't see
-`[emulator] connected at http://emulator:7073 (vv0.0.1, signer=...)`,
-the `/play` endpoint will refuse to mint games — single-path, emulator
-is required.
+| Service | URL |
+| --- | --- |
+| Game | `http://localhost:8080` |
+| Admin UI | `http://localhost:3002` |
+| Arkade operator | `http://localhost:7070` |
+| Emulator | `http://localhost:7073` |
+| Esplora | `http://localhost:3000/api` |
 
-## Fund the house wallet
+The regtest wrapper fetches a pinned stack into `.research/regtest`. Server startup probes the emulator; new games are refused if it is unavailable. The zero-fee test operator and disposable test keys are for regtest only.
 
-Fresh DB → house has zero balance. Top it up from nigiri's faucet, then
-settle into the operator's Ark wallet:
+## Fund the house
 
-```bash
-# 1. Faucet the house boarding address (printed in server boot logs)
-HOUSE_BOARDING=$(curl -s http://localhost:3002/api/wallet | jq -r .boardingAddress)
-curl -s -X POST http://localhost:3000/faucet \
-  -H 'Content-Type: application/json' \
-  -d "{\"address\":\"$HOUSE_BOARDING\",\"amount\":0.5}"
+Open the admin UI and copy its boarding address. Fund it using the wrapper:
 
-# 2. Settle the boarding UTXO into Ark VTXOs
-curl -s -X POST http://localhost:3002/api/wallet/settle
-
-# 3. Fragment into small VTXOs so concurrent plays have outpoints to reserve
-curl -s -X POST http://localhost:3002/api/wallet/fragment \
-  -H 'Content-Type: application/json' \
-  -d '{"pieceSize":1000000,"targetCount":15}'
-
-# 4. Verify
-curl -s http://localhost:8080/api/tiers | jq
-# → {"tiers":[1000,5000,10000,50000], "houseReady":true, ...}
+```sh
+npm run regtest -- faucet <house-boarding-address> 0.01 --confirm
 ```
 
-## Verify the demo end-to-end (one command)
+Use the admin settle action to create offchain funds. Pool maintenance prepares free denomination pieces for concurrent games; the admin wallet and `/api/tiers` report readiness and capacity.
 
-```bash
-cd packages/e2e
-EMULATOR_URL=http://localhost:7073 \
-ARK_SERVER_URL=http://localhost:7070 \
-ESPLORA_URL=http://localhost:3000 \
-COINFLIP_API_URL=http://localhost:8080/api \
-  npx jest src/arkade-forfeit-integration.test.ts
+## Play the normal game
+
+1. Open the game and create a wallet. Keep its backup.
+2. Copy the player's boarding address from the wallet drawer and fund it with the same faucet command.
+3. Wait for the wallet to detect and settle the deposit.
+4. Select a skin, stake and winning band, then play.
+5. Open game details to inspect both commitments, the revealed digits, roll, stakes and transaction links.
+
+The player and house sign one cofund transaction. The compiled covenant then pays the pot to the committed winner destination. The UI's visual skin does not change this protocol.
+
+For a stalled game, the wallet's recovery list offers the path supported by the saved secret and funded state. A refund returns original stakes after the deadline; a published player reveal advances to a contest. Onchain exit is a separate flow with CSV maturity, signing and fee requirements. See [PROTOCOL.md](docs/PROTOCOL.md).
+
+## Explore the separate bankroll mode
+
+Open `/bankroll`. The simulator lets you join a modeled pool, reserve/fund wagers, choose simulated outcomes, close an epoch, inspect the operator's profit fee and redeem modeled shares. It uses the same pure accounting module as the tests.
+
+It accepts no real deposits, creates no pool address and issues no share asset. [BANKROLL.md](docs/BANKROLL.md) describes the recursive-vault proposal and the unresolved redemption/outage-exit work.
+
+## Check the build and contracts
+
+```sh
+npm run build:server
+npm run build
+npm run test:unit
+npm run test:packages:unit
+npm run contracts:check
 ```
 
-All four cases should pass:
-- **5-leaf escrow**: server returns a covenant-pinned address per player
-- **Covenant-bound PSBT**: `/forfeit` builds a 2-input/1-output atomic
-  sweep paying the full pot
-- **Full flow**: `/play → escrow → /commit` settles via covenant, server
-  returns a txid, no PSBT for the client to sign
-- **Route wiring**: unknown gameId → 404
+The last command requires Rust and Git. Integration tests need a live stack; CI gives each retained integration file a fresh stack so chain-time recovery probes cannot age another test's coins. Lightning tests use `@arkade-os/swap` with an intent solver, not Boltz. To start its dependencies:
 
-## Play it in the browser
-
-1. Open `http://localhost:8080`
-2. Create a wallet (the Vue UI generates an Ark address, faucets it,
-   settles it).
-3. Pick a tier or variable-odds bet.
-4. The server escrows house stake, the client escrows player stake,
-   reveal → resolve. On a player win, the server posts to the
-   emulator's `/v1/tx`, the emulator co-signs the covenant, arkd
-   finalizes, txid returned. **You did not sign anything after
-   `/commit`.**
-
-## Architecture in one diagram
-
-```
-                        ┌─────────────┐
-                        │   Player    │
-                        │  (browser)  │
-                        └──────┬──────┘
-                               │ /play, /commit, /forfeit
-                               ▼
-                        ┌─────────────┐
-                        │   Server    │
-                        │ (coinflip-  │
-                        │  server-1)  │
-                        └──┬──┬───────┘
-                           │  │ /v1/tx (covenant sweep)
-                           │  └──────────┐
-                           │ /v1/submitTx▼
-                           │      ┌────────────┐
-                           │      │  Emulator  │
-                           │      │ (arkade-os/│
-                           │      │  emulator) │
-                           │      └─────┬──────┘
-                           ▼            │ runs covenant
-                        ┌──────┐        │ + signs tweaked
-                        │ arkd │◄───────┘ + forwards
-                        └──────┘
+```sh
+npm run regtest -- start --profile intent-solver
+node scripts/regtest-relay.mjs
 ```
 
-The split between arkd and the emulator is the architectural unlock:
-arkd handles standard Ark closures (multisig, CLTV, CSV) while the
-emulator runs arkade-script covenants on top. Together they let the
-server settle every game with a covenant binding destination + amount
-— no client signature on the win path.
+The helper switches only this test project's funded solver from HTTP hosting to Nostr relay mode. Local clients also need its explicitly supplied discovery card. LNURL receiving requires its own compatible service. The normal game does not depend on either payment rail.
 
-## Escrow leaf catalog (per game, 8 leaves)
+## Stop
 
-```
-Collab (execution bucket, arkd cosigns, fires during game window):
-  playerWinCovenant    [server, emu_tweaked]                 + covenant → player payout
-  creatorWinCovenant   [server, emu_tweaked]                 + covenant → house payout
-  playerForfeit        [player, server, emu_tweaked]  + CLTV + covenant → player payout
-  refund               [funder, server]               + CLTV  (no covenant)
-
-Unilateral exits (exit bucket, user alone after CSV exit_delay):
-  playerWinExit        [player, emu_tweaked]          + CSV  + covenant → player payout
-  creatorWinExit       [creator, emu_tweaked]         + CSV  + covenant → house payout
-  playerForfeitExit    [player, emu_tweaked]          + CSV  + covenant → player payout
-  refundExit           [funder]                       + CSV  (no covenant)
+```sh
+docker compose down
+npm run regtest -- stop
 ```
 
-Every collab path has a CSV-gated mirror so funds are never strandable
-by arkd censorship. The win/forfeit exits keep the covenant + emu_tweaked
-key so atomicity + destination binding survive arkd going dark.
-`refundExit` is the lone non-covenant exit — last resort if both arkd
-**and** the emulator are unavailable.
-
-## Where to look
-
-- `packages/lib/src/script.ts` — `CoinflipEscrowScript` (the 8-leaf
-  taptree)
-- `packages/lib/src/arkade-forfeit.ts` — covenant builders (thin
-  wrappers over `@arklabshq/contract-workflows-prototype`)
-- `packages/contract-workflows-prototype/` — covenant + emulator
-  primitives (the framework incubator)
-- `packages/server/src/trustless-game.ts` — `/play`, `/commit`,
-  `/forfeit`, recovery; emulator-required at boot
-- `docs/TRUSTLESS-AUDIT.md` — security analysis incl. R1 mitigation
-- `docs/superpowers/specs/2026-05-28-r1-via-arkade-script-research.md`
-  — original arkade-script research + design
-
-## Known limitations
-
-- Coin (50/50 odds) is now break-even — no rake; configure house edge
-  via variable-odds parameters (`oddsN`, `oddsTarget`, `oddsLo`).
-- The demo currently uses a 30-min `finalExpiration` and ~24h
-  `exit_delay`. For longer games adjust the server.
-- Restoring from a DB backed up before this branch will fail — the
-  `arkadeForfeit` pin format changed.
+These preserve data. `npm run regtest -- clean` removes the selected regtest project's volumes; `docker compose down --volumes` removes this demo's house data volume.

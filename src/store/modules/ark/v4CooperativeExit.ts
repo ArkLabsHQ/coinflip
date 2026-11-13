@@ -16,7 +16,7 @@
  */
 import { hex, base64 } from '@scure/base'
 import { Transaction } from '@arkade-os/sdk'
-import { buildCooperativeSpendExitTx } from 'arkade-coinflip/dist/joint-pot-tx'
+import { buildCooperativeSpendExitTx } from 'arkade-coinflip/dist/joint-pot-tx.js'
 import { rebuildJointPot } from './v4SelfRefund'
 import type { StashedV4Forfeit, V4PotOutpoint } from './v4ForfeitStash'
 

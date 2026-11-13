@@ -33,7 +33,7 @@ const server = require('arkade-coinflip-server')
 const emulatorModule = require('arkade-coinflip-server/dist/emulator.js')
 const { createPublicRoutes } = require('arkade-coinflip-server/dist/public-routes.js')
 const {
-  BetExceedsCapacityError, reservations, freeStakeTotal, freeHouseVtxos, spendableTotal,
+  BetExceedsCapacityError, reservations, houseVtxoCache, freeStakeTotal, freeHouseVtxos, spendableTotal,
 } = require('arkade-coinflip-server/dist/vtxo-pool.js')
 
 const DUST = 330
@@ -59,7 +59,7 @@ function houseCoin(
 ) {
   return {
     txid, vout, value,
-    virtualStatus: { state: opts.state ?? 'settled', batchExpiry: opts.batchExpiry ?? FAR_EXPIRY },
+    isSpent: (opts.state ?? 'settled') === 'spent', isSwept: (opts.state ?? 'settled') === 'swept', isUnrolled: (opts.state ?? 'settled') === 'unrolled', isPreconfirmed: (opts.state ?? 'settled') === 'preconfirmed', spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (opts.batchExpiry ?? FAR_EXPIRY) === undefined ? undefined : new Date(opts.batchExpiry ?? FAR_EXPIRY),
     status: { confirmed: false },
     createdAt: new Date(Date.now() - 60_000),
     forfeitTapLeafScript: [
@@ -193,6 +193,22 @@ describe('advertised capacity === enforced capacity', () => {
     // Both sides read the SAME reservation ledger: the 40,005-sat coin greedy
     // selection just pinned is gone from the next advertised capacity.
     expect(await advertisedCapacity(deps)).toBe(Math.floor((NEAR_EXPIRY.value * 2500) / 10000))
+  })
+
+  it('applies the exposure ceiling to the actual folded house stake', async () => {
+    houseVtxoCache.invalidate()
+    const deps = makeDeps()
+    deps.wallet.getVtxos = async () => [1300, 900, 900, 900].map((value, index) => houseCoin(String(index + 1).repeat(64), 0, value))
+    const save = jest.fn()
+    deps.repos.games.save = save
+    try {
+      expect(await advertisedCapacity(deps)).toBe(1000)
+      await expect(server.handleV4Play(playReq(1000), deps)).rejects.toThrow(/after change folding.*1300.*1000/)
+      expect(save).not.toHaveBeenCalled()
+      expect(reservations.activeGames()).toBe(0)
+    } finally {
+      houseVtxoCache.invalidate()
+    }
   })
 
   it('a malformed max_bet_fraction_bps clamps identically on both sides', async () => {

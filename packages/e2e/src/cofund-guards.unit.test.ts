@@ -10,7 +10,7 @@
  *   Guard 0 — the trailing (house) checkpoints must spend the reserved house
  *             outpoints, in order.
  *   Guard 1 — co-fund output 0 must equal the agreed pot amount + script.
- *   Guard 2 — the house contribution must be within [houseStake, houseStake+dust].
+ *   Guard 2 — the house contribution must be exactly the committed house stake.
  * plus the stakeTopUp bound in handleV4Play (must be an integer in (0, dust]).
  *
  * The guards run SEQUENTIALLY, so each fixture is built correct up to the target
@@ -22,7 +22,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 export {} // module scope
 import { base64, hex } from '@scure/base'
-import { Transaction, ArkAddress, SingleKey } from '@arkade-os/sdk'
+import { Transaction, ArkAddress, SingleKey, ArkError, VtxoScript, MultisigTapscript } from '@arkade-os/sdk'
 import { CoinflipJointPotScript } from 'arkade-coinflip'
 const { schnorr } = require('@noble/curves/secp256k1.js')
 const server = require('arkade-coinflip-server')
@@ -41,9 +41,9 @@ function mkInput(txidHex: string, vout: number) {
   return { txid: hex.decode(txidHex), index: vout, witnessUtxo: { script: IN_SCRIPT, amount: 1000n } }
 }
 /** A checkpoint PSBT whose input 0 spends {txid, vout} — all Guard 0 reads. */
-function mkCheckpoint(txidHex: string, vout: number, extraInputs = 0): string {
+function mkCheckpoint(txidHex: string, vout: number, extraInputs = 0, value = 1000, script: Uint8Array = IN_SCRIPT): string {
   const tx = new Transaction()
-  tx.addInput(mkInput(txidHex, vout))
+  tx.addInput({ ...mkInput(txidHex, vout), witnessUtxo: { script, amount: BigInt(value) } })
   for (let i = 0; i < extraInputs; i++) tx.addInput(mkInput(hex.encode(h(0xf0 + i)), i))
   return base64.encode(tx.toPSBT())
 }
@@ -74,7 +74,8 @@ async function buildState(opts: BuildOpts = {}) {
 
   // Guard 0 reads txid/vout; Guard 2 reads value. leaf/tapTree only matter at signing
   // (never reached in a reject), so they're omitted.
-  const houseInputs = houseInputVals.map((value, i) => ({ txid: hex.encode(h(0x50 + i)), vout: i, value }))
+  const houseTree = new VtxoScript([MultisigTapscript.encode({ pubkeys: [serverPub, housePub] }).script])
+  const houseInputs = houseInputVals.map((value, i) => ({ txid: hex.encode(h(0x50 + i)), vout: i, value, tapTree: hex.encode(houseTree.encode()) }))
 
   const covenant = {
     creatorPubkey: hex.encode(housePub), playerPubkey: hex.encode(playerPub), serverPubkey: hex.encode(serverPub),
@@ -93,11 +94,13 @@ async function buildState(opts: BuildOpts = {}) {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function cofundDeps(state: any, house: any, opts: { status?: string; dust?: bigint } = {}) {
+function cofundDeps(state: any, house: any, opts: { status?: string; dust?: bigint } = {}): any {
   return {
     repos: { games: {
-      get: async () => ({ house_vtxos_json: JSON.stringify(state), status: opts.status ?? 'pending' }),
+      get: async () => ({ state_json: JSON.stringify(state), status: opts.status ?? 'pending' }),
       update: async () => {},
+      beginCofundSubmission: async () => true,
+      rejectCofundSubmission: async () => {},
     } },
     identity: house,
     arkInfo: { dust: opts.dust ?? DUST },
@@ -132,7 +135,7 @@ function buildCofund(state: any, over: CofundOver = {}) {
 
   const playerCps = Array.from({ length: k }, (_, i) => mkCheckpoint(hex.encode(h(0x90 + i)), i))
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const houseCps = over.houseCps ?? state.houseInputs.map((hi: any) => mkCheckpoint(hi.txid, hi.vout))
+  const houseCps = over.houseCps ?? state.houseInputs.map((hi: any) => mkCheckpoint(hi.txid, hi.vout, 0, hi.value, VtxoScript.decode(hex.decode(hi.tapTree)).pkScript))
   return { arkTx, checkpoints: [...playerCps, ...houseCps] }
 }
 
@@ -171,6 +174,44 @@ describe('handleV4Cofund Guard 0 — house checkpoints must spend the reserved h
 })
 
 // ── Positive control: a fully-valid co-fund clears every guard ──
+describe('co-fund signing metadata', () => {
+  it('rejects a non-default sighash before asking the house to sign', async () => {
+    const { state, house } = await buildState()
+    const request = buildCofund(state)
+    const transaction = Transaction.fromPSBT(base64.decode(request.arkTx))
+    transaction.updateInput(0, { sighashType: 1 })
+    request.arkTx = base64.encode(transaction.toPSBT())
+    const deps = cofundDeps(state, house)
+    deps.identity = { sign: jest.fn() }
+    await expect(server.handleV4Cofund('g', request, deps)).rejects.toThrow(/sighash/i)
+    expect(deps.identity.sign).not.toHaveBeenCalled()
+  })
+
+  it.each(['value', 'script'])('rejects a forged reserved house input %s before signing', async (field) => {
+    const { state, house } = await buildState()
+    const request = buildCofund(state)
+    const checkpoint = Transaction.fromPSBT(base64.decode(request.checkpoints[1]))
+    const utxo = checkpoint.getInput(0).witnessUtxo!
+    checkpoint.updateInput(0, { witnessUtxo: {
+      amount: field === 'value' ? utxo.amount + 1n : utxo.amount,
+      script: field === 'script' ? IN_SCRIPT : utxo.script,
+    } })
+    request.checkpoints[1] = base64.encode(checkpoint.toPSBT())
+    const deps = cofundDeps(state, house)
+    deps.identity = { sign: jest.fn() }
+    await expect(server.handleV4Cofund('g', request, deps)).rejects.toThrow(/witness (value|script) does not match/)
+    expect(deps.identity.sign).not.toHaveBeenCalled()
+  })
+
+  it('rejects a submit response bound to a different transaction', async () => {
+    const { state, house } = await buildState()
+    const deps = cofundDeps(state, house)
+    deps.identity = { sign: async (transaction: Transaction) => transaction }
+    deps.wallet.arkProvider.submitTx = async () => ({ arkTxid: '00'.repeat(32), signedCheckpointTxs: [] })
+    await expect(server.handleV4Cofund('g', buildCofund(state), deps)).rejects.toThrow(/txid|submit|transaction/i)
+  })
+})
+
 describe('handleV4Cofund — positive control (all guards pass on a correct co-fund)', () => {
   it('a correct co-fund PASSES Guards 0/1/2 and fails only downstream (sign/submit)', async () => {
     // Default fixture: houseStake 1000, Hsum 1000 → contribution == houseStake (in range);
@@ -205,15 +246,34 @@ describe('handleV4Cofund Guard 1 — output 0 must match the agreed pot', () => 
   })
 })
 
-// ── Guard 2: house contribution must be within [houseStake, houseStake+dust] ──
-describe('handleV4Cofund Guard 2 — house contribution bounded to [houseStake, houseStake+dust]', () => {
-  it('REJECTS an OVERDRAW: house coins 1600, no change returned → contribution 1600 > 1546', async () => {
+// ── Guard 2: house contribution must be exactly the committed house stake ──
+describe('handleV4Cofund Guard 2 — house contribution equals the committed house stake', () => {
+  it('REJECTS an OVERDRAW: house coins 1600, no change returned → contribution 1600 > 1000', async () => {
     // Passes Guard 0 (correct house checkpoint) + Guard 1 (output 0 = pot). The malicious
     // co-fund omits the 600-sat house change → the house would over-contribute.
     const { state, house } = await buildState({ playerStake: 1000, houseStake: 1000, houseInputVals: [1600] })
     const bad = buildCofund(state) // output 0 = pot, no house-change output
     await expect(server.handleV4Cofund('g2-over', bad, cofundDeps(state, house)))
-      .rejects.toThrow(/house contribution 1600 outside \[1000, 1546\]/)
+      .rejects.toThrow(/house contribution 1600 does not match the committed stake 1000/)
+  })
+
+  it('rejects a balanced co-fund diverting 300 sats of house change into player change', async () => {
+    const { state, house } = await buildState({ playerStake: 1000, houseStake: 1000, houseInputVals: [5000] })
+    const request = buildCofund(state, { extraOutputs: [
+      { script: hex.decode(state.covenant.housePayoutPkScript), amount: 3700n },
+      { script: hex.decode(state.covenant.playerPayoutPkScript), amount: 1300n },
+    ] })
+    const transaction = Transaction.fromPSBT(base64.decode(request.arkTx))
+    transaction.updateInput(0, { witnessUtxo: { script: IN_SCRIPT, amount: 2000n } })
+    transaction.updateInput(1, { witnessUtxo: { script: IN_SCRIPT, amount: 5000n } })
+    request.arkTx = base64.encode(transaction.toPSBT())
+    const inputs = Array.from({ length: transaction.inputsLength }, (_, index) => transaction.getInput(index).witnessUtxo!.amount)
+    const outputs = Array.from({ length: transaction.outputsLength }, (_, index) => transaction.getOutput(index).amount!)
+    expect(inputs.reduce((sum, value) => sum + value, 0n)).toBe(outputs.reduce((sum, value) => sum + value, 0n))
+    const deps = cofundDeps(state, house)
+    deps.identity = { sign: jest.fn() }
+    await expect(server.handleV4Cofund('g2-dust-theft', request, deps)).rejects.toThrow(/house contribution 1300 does not match the committed stake 1000/)
+    expect(deps.identity.sign).not.toHaveBeenCalled()
   })
 
   it('REJECTS an UNDER-contribution: house coins 1000, 600 returned as change → contribution 400 < 1000', async () => {
@@ -221,7 +281,7 @@ describe('handleV4Cofund Guard 2 — house contribution bounded to [houseStake, 
     const houseChange = { script: hex.decode(state.covenant.housePayoutPkScript), amount: 600n }
     const bad = buildCofund(state, { extraOutputs: [houseChange] })
     await expect(server.handleV4Cofund('g2-under', bad, cofundDeps(state, house)))
-      .rejects.toThrow(/house contribution 400 outside \[1000, 1546\]/)
+      .rejects.toThrow(/house contribution 400 does not match the committed stake 1000/)
   })
 })
 
@@ -252,5 +312,130 @@ describe('handleV4Play — stakeTopUp must be an integer in (0, dust]', () => {
   })
   it('REJECTS a NON-INTEGER stakeTopUp', async () => {
     await expect(server.handleV4Play(playReq(2.5), playDeps())).rejects.toThrow(/Invalid stakeTopUp/)
+  })
+})
+
+
+describe('co-fund broadcast permission and expiry', () => {
+  const { createRequire } = require('module')
+  const Database = createRequire(require.resolve('arkade-coinflip-server/package.json'))('better-sqlite3')
+  const { SQLiteGameRepository } = require('arkade-coinflip-server/dist/repositories/gameRepository')
+  const { reservations, rebuildReservations } = require('arkade-coinflip-server/dist/vtxo-pool')
+
+  function persistedGame(state: any) {
+    const db = new Database(':memory:')
+    db.exec(`CREATE TABLE games (
+      id TEXT PRIMARY KEY, state_json TEXT NOT NULL, status TEXT NOT NULL,
+      created_at TEXT NOT NULL, resolved_at TEXT
+    )`)
+    db.prepare("INSERT INTO games VALUES ('race', ?, 'pending', datetime('now', '-20 minutes'), NULL)")
+      .run(JSON.stringify(state))
+    const repository = new SQLiteGameRepository({
+      get: async (sql: string, params: any[] = []) => db.prepare(sql).get(...params),
+      all: async (sql: string, params: any[] = []) => db.prepare(sql).all(...params),
+      run: async (sql: string, params: any[] = []) => { db.prepare(sql).run(...params) },
+    })
+    return { db, repository }
+  }
+
+  afterEach(() => {
+    for (const entry of reservations.snapshot()) reservations.release(entry.gameId)
+  })
+
+  it('persists the intent before broadcast, survives expiry and restores exact holds after an ambiguous failure', async () => {
+    const { state, house } = await buildState()
+    const { db, repository } = persistedGame(state)
+    const deps = cofundDeps(state, house)
+    deps.repos.games = repository
+    deps.identity = { sign: async (transaction: Transaction) => transaction }
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let rejectSubmit!: (reason: Error) => void
+    deps.wallet.arkProvider.submitTx = () => {
+      entered()
+      return new Promise((_resolve, reject) => { rejectSubmit = reject })
+    }
+    const key = `${state.houseInputs[0].txid}:${state.houseInputs[0].vout}`
+    reservations.reserve('race', [key], state.houseStake)
+    const running = server.handleV4Cofund('race', buildCofund(state), deps)
+    await started
+    expect((await repository.expirePending(5)).expired).toBe(0)
+    const stored = JSON.parse((await repository.get('race')).state_json)
+    expect(stored.cofundSubmission.txid).toMatch(/^[0-9a-f]{64}$/)
+    expect(stored.cofundArkTxid).toBeUndefined()
+    expect(reservations.isReserved(key)).toBe(true)
+    rejectSubmit(new Error('network timeout after possible broadcast'))
+    await expect(running).rejects.toThrow('network timeout')
+    reservations.release('race')
+    expect(await rebuildReservations({ repos: { games: repository } })).toBe(1)
+    expect(reservations.isReserved(key)).toBe(true)
+    expect((await repository.expirePending(5)).expired).toBe(0)
+    db.close()
+  })
+
+  it('clears a first-attempt structured rejection so ordinary expiry can release the game', async () => {
+    const { state, house } = await buildState()
+    const { db, repository } = persistedGame(state)
+    const deps = cofundDeps(state, house)
+    deps.repos.games = repository
+    deps.identity = { sign: async (transaction: Transaction) => transaction }
+    deps.wallet.arkProvider.submitTx = async () => { throw new ArkError(18, 'invalid owner signature', 'INVALID_SIGNATURE') }
+    await expect(server.handleV4Cofund('race', buildCofund(state), deps)).rejects.toThrow('invalid owner signature')
+    expect(JSON.parse((await repository.get('race')).state_json).cofundSubmission).toBeUndefined()
+    expect((await repository.expirePending(5)).expired).toBe(1)
+    db.close()
+  })
+
+  it('keeps an older ambiguous intent even when a retry receives a validation rejection', async () => {
+    const { state, house } = await buildState()
+    const request = buildCofund(state)
+    const submission = { txid: Transaction.fromPSBT(base64.decode(request.arkTx)).id, startedAt: 1 }
+    const { db, repository } = persistedGame({ ...state, cofundSubmission: submission })
+    const deps = cofundDeps(state, house)
+    deps.repos.games = repository
+    deps.identity = { sign: async (transaction: Transaction) => transaction }
+    deps.wallet.arkProvider.submitTx = async () => { throw new ArkError(18, 'retry refused', 'INVALID_SIGNATURE') }
+    await expect(server.handleV4Cofund('race', request, deps)).rejects.toThrow('retry refused')
+    expect(JSON.parse((await repository.get('race')).state_json).cofundSubmission.txid).toBe(submission.txid)
+    expect((await repository.expirePending(5)).expired).toBe(0)
+    db.close()
+  })
+
+  it('does not let an old rejection clear a different or already-accepted submission', async () => {
+    const { state } = await buildState()
+    const { db, repository } = persistedGame(state)
+    await repository.beginCofundSubmission('race', { txid: 'current', startedAt: 1 })
+    await repository.rejectCofundSubmission('race', 'old')
+    expect(JSON.parse((await repository.get('race')).state_json).cofundSubmission.txid).toBe('current')
+    await repository.update('race', { stateJson: JSON.stringify({ ...state, cofundSubmission: { txid: 'current', startedAt: 1 }, cofundArkTxid: 'accepted' }) })
+    await repository.rejectCofundSubmission('race', 'current')
+    expect(JSON.parse((await repository.get('race')).state_json).cofundSubmission.txid).toBe('current')
+    db.close()
+  })
+
+  it('does not broadcast when expiry wins while house signing is paused', async () => {
+    const { state, house } = await buildState()
+    const { db, repository } = persistedGame(state)
+    const deps = cofundDeps(state, house)
+    deps.repos.games = repository
+    let signing!: () => void
+    const started = new Promise<void>((resolve) => { signing = resolve })
+    let finishSign!: (transaction: Transaction) => void
+    let transaction!: Transaction
+    deps.identity = { sign: async (input: Transaction) => {
+      transaction = input
+      signing()
+      return new Promise<Transaction>((resolve) => { finishSign = resolve })
+    } }
+    const submit = jest.fn()
+    deps.wallet.arkProvider.submitTx = submit
+    const running = server.handleV4Cofund('race', buildCofund(state), deps)
+    await started
+    expect((await repository.expirePending(5)).expired).toBe(1)
+    finishSign(transaction)
+    await expect(running).rejects.toThrow('not pending')
+    expect(submit).not.toHaveBeenCalled()
+    expect(JSON.parse((await repository.get('race')).state_json).cofundSubmission).toBeUndefined()
+    db.close()
   })
 })

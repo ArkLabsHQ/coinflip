@@ -4,7 +4,7 @@
     "module": "esnext",
     "strict": true,
     "jsx": "preserve",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "experimentalDecorators": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -14,15 +14,15 @@
     "sourceMap": true,
     "baseUrl": ".",
     "types": [
-      "webpack-env",
+      "vite/client",
       "node"
     ],
     "paths": {
       "@/*": [
         "src/*"
       ],
-      "@arkade-os/sdk/adapters/indexedDB": [
-        "node_modules/@arkade-os/sdk/dist/adapters/indexedDB.d.ts"
+      "vuex": [
+        "node_modules/vuex/types/index.d.ts"
       ]
     },
     "lib": [
@@ -42,4 +42,4 @@
   "exclude": [
     "node_modules"
   ]
-} 
+}

@@ -26,6 +26,80 @@ export function computeHouseStake(
   return Math.floor((playerStake * (n - win) * (10000 - edgeBps)) / (win * 10000))
 }
 
+export interface ExactRatio {
+  numerator: string
+  denominator: string
+}
+
+export interface CommittedGameTerms {
+  playerStake: number
+  houseStake: number
+  oddsN: number
+  oddsTarget: number
+  oddsLo: number
+  configuredHouseStakeDiscountBps?: number
+}
+
+export interface CommittedGameEconomics {
+  playerStake: number
+  houseStake: number
+  pot: number
+  rakeAmount: 0
+  winProbability: ExactRatio
+  expectedHouseProfitSats: ExactRatio
+  effectiveHouseEdgeBps: ExactRatio
+  configuredHouseStakeDiscountBps: number | null
+  basis: 'committed-stakes-before-network-costs'
+}
+
+function exactRatio(numerator: bigint, denominator: bigint): ExactRatio {
+  let a = numerator < 0n ? -numerator : numerator
+  let b = denominator
+  while (b !== 0n) {
+    const remainder = a % b
+    a = b
+    b = remainder
+  }
+  return { numerator: String(numerator / a), denominator: String(denominator / a) }
+}
+
+// Use actual committed stakes: denomination change folding can alter the effective edge.
+export function quoteCommittedEconomics(terms: CommittedGameTerms): CommittedGameEconomics {
+  const { playerStake, houseStake, oddsN, oddsTarget, oddsLo, configuredHouseStakeDiscountBps } = terms
+  if (!Number.isSafeInteger(playerStake) || playerStake <= 0 ||
+      !Number.isSafeInteger(houseStake) || houseStake < 0 || !Number.isSafeInteger(playerStake + houseStake)) {
+    throw new Error('Committed stakes and their pot must be safe whole sats; player stake must be positive')
+  }
+  if (!Number.isSafeInteger(oddsN) || oddsN < 2 || oddsN > 128 ||
+      !Number.isSafeInteger(oddsLo) || !Number.isSafeInteger(oddsTarget) ||
+      oddsLo < 0 || oddsLo >= oddsTarget || oddsTarget > oddsN) {
+    throw new Error('Committed odds must satisfy 2 <= n <= 128 and 0 <= lo < target <= n')
+  }
+  if (configuredHouseStakeDiscountBps !== undefined &&
+      (!Number.isSafeInteger(configuredHouseStakeDiscountBps) || configuredHouseStakeDiscountBps < 0 || configuredHouseStakeDiscountBps > 10000)) {
+    throw new Error('Configured house stake discount must be whole basis points in [0, 10000]')
+  }
+  const n = BigInt(oddsN), win = BigInt(oddsTarget - oddsLo)
+  const player = BigInt(playerStake), house = BigInt(houseStake)
+  const expectedProfit = (n - win) * player - win * house
+  return {
+    playerStake, houseStake, pot: playerStake + houseStake, rakeAmount: 0,
+    winProbability: exactRatio(win, n),
+    expectedHouseProfitSats: exactRatio(expectedProfit, n),
+    effectiveHouseEdgeBps: exactRatio(expectedProfit * 10000n, n * player),
+    configuredHouseStakeDiscountBps: configuredHouseStakeDiscountBps ?? null,
+    basis: 'committed-stakes-before-network-costs',
+  }
+}
+
+export function quotePoolEconomics(terms: CommittedGameTerms): CommittedGameEconomics {
+  const quote = quoteCommittedEconomics(terms)
+  if (BigInt(quote.expectedHouseProfitSats.numerator) < 0n) {
+    throw new Error('Pool wager has negative expected house profit for its committed stakes')
+  }
+  return quote
+}
+
 /**
  * The static bet rails from the configured tiers. `tiers` is no longer a
  * whitelist — only its extremes matter, and the floor is pushed strictly above

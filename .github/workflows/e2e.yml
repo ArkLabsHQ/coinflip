@@ -2,12 +2,7 @@ name: E2E Tests
 
 on:
   push:
-    branches: [master, refactor/extract-coinflip-library]
-    # Docs/skills/markdown don't affect the e2e — skip the ~15min run when a push
-    # touches ONLY these paths. Any code file in the same push still triggers the
-    # full suite (paths-ignore skips only when EVERY changed file matches).
-    # Push-only on purpose: PRs still run it, so a skipped-but-required check can't
-    # block a docs PR's merge.
+    branches: [master]
     paths-ignore:
       - '**.md'
       - '.claude/**'
@@ -15,210 +10,163 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+
 jobs:
   client-unit-tests:
     name: Client Unit Tests (Vitest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-
-      - name: Install client dependencies
-        run: npm install --include=dev
-
-      - name: Run client unit tests (jsdom, no regtest)
-        # Vitest covers the browser-context client helpers that the node
-        # packages/e2e jest can't reach: esplora-URL migration, stash
-        # eviction (pruneOnLoad), and the clipboard secure-context fallback.
-        run: npm run test:unit
+          cache: npm
+      - run: npm ci --include=dev
+      - run: npm run lint
+      - run: npm run test:unit
+      - run: npm run build
 
   unit-tests:
     name: Unit & Script Tests
     runs-on: ubuntu-latest
+    outputs:
+      integration: ${{ steps.suites.outputs.integration }}
+      frontend_live: ${{ steps.suites.outputs.frontend_live }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-
-      - name: Install & build contract-workflows-prototype
-        working-directory: packages/contract-workflows-prototype
-        # lib depends on this package via file: (symlinked) and consumes its
-        # types from dist/, which is gitignored — so a clean checkout has no
-        # dist. tsc/build of lib resolves the symlink target, so cwp must be
-        # built first or `tsc --noEmit` fails with "Cannot find module".
-        run: npm install --include=dev && npm run build
-
-      - name: Install lib dependencies
-        working-directory: packages/lib
-        run: npm install --include=dev
-
-      - name: Type-check lib
-        working-directory: packages/lib
-        run: npx tsc --noEmit
-
-      - name: Build lib
-        working-directory: packages/lib
-        run: npm run build
-
-      - name: Install server dependencies
-        working-directory: packages/server
-        run: npm install --include=dev
-
-      - name: Type-check server
-        working-directory: packages/server
-        run: npx tsc --noEmit
-
-      - name: Build server
-        working-directory: packages/server
-        # The *.unit.test.ts files import the built server (dist/game-engine.js,
-        # dist/vtxo-pool.js) directly, so this job must emit dist — type-check
-        # alone (--noEmit) doesn't.
-        run: npm run build
-
-      - name: Install E2E test dependencies
-        working-directory: packages/e2e
-        run: npm install --include=dev
-
-      - name: Run *.unit.test.ts (pure, no regtest)
-        working-directory: packages/e2e
-        # Every `*.unit.test.ts` is deterministic and stack-free (mocked deps /
-        # built dist). Run the whole set in the fast lane so a unit-level
-        # regression is caught without spinning up arkd+emulator. Previously
-        # these only ran in the slow e2e-tests job — slow feedback for a pure
-        # logic break.
-        run: npx jest --runInBand --forceExit --testTimeout=30000 --testPathPattern="\\.unit\\.test\\.ts$"
-
-  e2e-tests:
-    name: E2E Integration Tests
-    runs-on: ubuntu-latest
-    needs: unit-tests
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Start regtest environment
-        env:
-          # Pin arkd/arkd-wallet to the last-good DIGEST. The .env.defaults tag
-          # `:v0.9.9-rc.1` is mutable and was re-pushed upstream with a regression
-          # that rejects the co-fund checkpoint signatures (INVALID_SIGNATURE) — the
-          # local cache + the prior green CI run use sha c150be36, but ghcr now serves
-          # a different digest for the same tag. Pinning the digest makes the existing
-          # version-pin immutable; the step env wins over .env.defaults (see
-          # arkade-regtest/lib/env.mjs). Remove once the upstream rc tag is fixed.
-          ARKD_IMAGE: ghcr.io/arkade-os/arkd@sha256:c150be36424b6b81581f6f5e6d974d88a2bd4d97f918f9c5b1e9ed6360a80ac0
-          ARKD_WALLET_IMAGE: ghcr.io/arkade-os/arkd-wallet@sha256:52391b4a9b56ec9a9b2c64dc61907f74d052340b0f63fa91448a23e474433656
-        run: node arkade-regtest/regtest.mjs start
-        timeout-minutes: 15
-
-      - name: Diagnostic - dump regtest env state
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci --include=dev
+      - run: npm run contracts:check
+      - run: npm run build:server
+      - run: npm run test:packages:unit
+      - name: Discover every integration and frontend live file
+        id: suites
+        shell: bash
         run: |
-          echo "=== arkd info ==="
-          curl -s http://localhost:7070/v1/info | head -50 || true
-          echo "=== docker ps ==="
-          docker ps --format "table {{.Names}}\t{{.Status}}" || true
+          node <<'NODE'
+          const fs = require('node:fs');
+          const files = fs.readdirSync('packages/e2e/src', { recursive: true })
+            .filter(file => file.endsWith('.test.ts') && !file.endsWith('.unit.test.ts'))
+            .sort();
+          if (!files.length) throw new Error('No integration tests found');
+          const include = files.map(file => ({
+            file: 'src/' + file.replaceAll('\\', '/'),
+            name: file.replace(/\.test\.ts$/, ''),
+          }));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'integration=' + JSON.stringify({ include }) + '\n');
+          const liveFiles = fs.readdirSync('src', { recursive: true })
+            .filter(file => file.endsWith('.live.spec.ts'))
+            .sort();
+          if (!liveFiles.length) throw new Error('No frontend live tests found');
+          const live = liveFiles.map(file => ({
+            file: 'src/' + file.replaceAll('\\', '/'),
+            name: file.replace(/\.live\.spec\.ts$/, ''),
+          }));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'frontend_live=' + JSON.stringify({ include: live }) + '\n');
+          NODE
 
-      - name: Install & build contract-workflows-prototype
-        working-directory: packages/contract-workflows-prototype
-        # lib depends on this package via file: (symlinked) and consumes its
-        # types from dist/, which is gitignored — so a clean checkout has no
-        # dist. tsc/build of lib resolves the symlink target, so cwp must be
-        # built first or `tsc --noEmit` fails with "Cannot find module".
-        run: npm install --include=dev && npm run build
-
-      - name: Install lib dependencies
-        working-directory: packages/lib
-        run: npm install --include=dev
-
-      - name: Build lib
-        working-directory: packages/lib
-        run: npm run build
-
-      - name: Install server dependencies
-        working-directory: packages/server
-        run: npm install --include=dev
-
-      - name: Build server
-        working-directory: packages/server
-        run: npm run build
-
-      - name: Install E2E test dependencies
-        working-directory: packages/e2e
-        run: npm install --include=dev
-
-      - name: Run E2E tests
-        working-directory: packages/e2e
-        env:
-          ARK_SERVER_URL: http://localhost:7070
-          # denigiri stack serves Esplora REST under the mempool /api prefix;
-          # the bare :3000 root is the mempool web UI (HTML).
-          ESPLORA_URL: http://localhost:3000/api
-          # The arkade-regtest stack starts the emulator by default at :7073
-          # (confirmed in the start logs). The v4 co-fund + settle covenant
-          # paths REQUIRE it — tell the in-process test server where it is, or
-          # handleV4Play throws "Emulator not configured".
-          EMULATOR_URL: http://localhost:7073
-          EMULATOR_PUBLIC_URL: http://localhost:7073
-        # The v4-staged-forfeit probe is clock-sensitive (spends fresh VTXOs), and the
-        # setChainTime tests in this pass advance the regtest MTP ~1h irreversibly — so
-        # the probe runs ISOLATED on a fresh stack below (issue #40). Exclude it here.
-        run: npx jest --runInBand --forceExit --testTimeout=300000 --ci --testPathIgnorePatterns "/node_modules/" "v4-staged-forfeit-probe" "v4-cooperative-exit-probe"
-
-      - name: Concurrent load test (100 v4 joint-pot games / 5 wallets)
-        working-directory: packages/e2e
-        # The v4 successor to the retired v2/v3 load test. Proves the joint-pot
-        # flow sustains real concurrent play at scale: distinct house-VTXO
-        # reservations under contention, covenant co-fund + settle, emulator
-        # cosigning, and per-phase throughput — none of which a unit test covers.
-        # v4-scale also runs at its small default (3×2) in the main e2e pass
-        # above; this step drives it at 100 games. Scale via LOAD_WALLETS /
-        # LOAD_GAMES / LOAD_CONC.
-        env:
-          LOAD_WALLETS: '5'
-          LOAD_GAMES: '20'
-          LOAD_CONC: '6'
-          ARK_SERVER_URL: http://localhost:7070
-          ESPLORA_URL: http://localhost:3000/api
-          EMULATOR_URL: http://localhost:7073
-          EMULATOR_PUBLIC_URL: http://localhost:7073
-        run: npx jest --runInBand --forceExit --testTimeout=600000 src/v4-scale.test.ts
-
-      - name: Restart regtest before the clock-sensitive staged-forfeit probe
-        # The setChainTime tests above advance the regtest MTP ~1h to mature CLTV
-        # timelocks; the MTP can't be walked back (block timestamps must increase),
-        # so the probe (which spends fresh VTXOs) would inherit a future clock that
-        # expires them. A fresh stack resets the clock. See issue #40.
-        env:
-          ARKD_IMAGE: ghcr.io/arkade-os/arkd@sha256:c150be36424b6b81581f6f5e6d974d88a2bd4d97f918f9c5b1e9ed6360a80ac0
-          ARKD_WALLET_IMAGE: ghcr.io/arkade-os/arkd-wallet@sha256:52391b4a9b56ec9a9b2c64dc61907f74d052340b0f63fa91448a23e474433656
-        run: node arkade-regtest/regtest.mjs clean && node arkade-regtest/regtest.mjs start
-        timeout-minutes: 15
-
-      - name: Run staged-forfeit probe (fresh clock)
-        working-directory: packages/e2e
-        env:
-          ARK_SERVER_URL: http://localhost:7070
-          ESPLORA_URL: http://localhost:3000/api
-          EMULATOR_URL: http://localhost:7073
-          EMULATOR_PUBLIC_URL: http://localhost:7073
-        run: npx jest --runInBand --forceExit --testTimeout=300000 --ci src/v4-staged-forfeit-probe.test.ts
-
-      - name: Capture logs on failure
+  frontend-live-tests:
+    name: Frontend Live Tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    needs: [client-unit-tests, unit-tests]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.unit-tests.outputs.frontend_live) }}
+    env:
+      ARK_SERVER_URL: http://localhost:7070
+      ESPLORA_URL: http://localhost:3000/api
+      EMULATOR_URL: http://localhost:7073
+      REGTEST_ENV: ${{ github.workspace }}/.env.regtest
+      REGTEST_PROJECT: arkade-regtest
+      REGTEST_CONTAINER_PREFIX: ''
+      TEST_FILE: ${{ matrix.file }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --include=dev
+      - run: npm run build:server
+      - name: Start a fresh frontend test stack
+        run: npm run regtest -- start --profile ark --profile emulator
+      - name: Run the complete frontend live file
+        run: npm run test:live -- --run "$TEST_FILE" --dangerouslyIgnoreUnhandledErrors=false
+      - name: Capture service logs
         if: failure()
         run: |
-          docker logs arkd 2>&1 | tail -200 || true
-          docker logs ark-wallet 2>&1 | tail -200 || true
-          docker logs boltz 2>&1 | tail -100 || true
-
-      - name: Cleanup
+          docker ps -a
+          docker logs arkd --tail 200 || true
+          docker logs emulator --tail 200 || true
+      - name: Remove this test stack
         if: always()
-        run: node arkade-regtest/regtest.mjs clean || true
+        run: npm run regtest -- clean
+
+  e2e-tests:
+    name: E2E Integration Tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    needs: [client-unit-tests, unit-tests]
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.unit-tests.outputs.integration) }}
+    env:
+      ARK_SERVER_URL: http://localhost:7070
+      ESPLORA_URL: http://localhost:3000/api
+      EMULATOR_URL: http://localhost:7073
+      EMULATOR_PUBLIC_URL: http://localhost:7073
+      EXIT_PROBE: '1'
+      LOAD_WALLETS: '5'
+      LOAD_GAMES: '20'
+      LOAD_CONC: '6'
+      TEST_FILE: ${{ matrix.file }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --include=dev
+      - run: npm run build:server
+      - name: Start a fresh stack for this file
+        shell: bash
+        run: |
+          if [[ "$TEST_FILE" == 'src/v4-cooperative-exit-probe.test.ts' ]]; then
+            export ARKD_VTXO_TREE_EXPIRY=180
+            export ARKD_UNILATERAL_EXIT_DELAY=5
+            export ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=5
+            export ARKD_BOARDING_EXIT_DELAY=180
+            export ARKD_CHECKPOINT_EXIT_DELAY=5
+          fi
+          # The rescue window opens minTTL (6000s) before batch expiry; a shorter tree reaches it in about 11 minutes.
+          if [[ "$TEST_FILE" == 'src/pool-rescue.test.ts' ]]; then
+            export ARKD_VTXO_TREE_EXPIRY=6656
+          fi
+          if [[ "$TEST_FILE" == 'src/lightning.test.ts' ]]; then
+            npm run regtest -- start --profile intent-solver
+            node scripts/regtest-relay.mjs
+          else
+            npm run regtest -- start --profile ark --profile emulator
+          fi
+      - name: Run the complete file
+        working-directory: packages/e2e
+        run: npx jest --runInBand --forceExit --testTimeout=600000 --ci --runTestsByPath "$TEST_FILE"
+      - name: Capture service logs
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs arkd --tail 200 || true
+          docker logs emulator --tail 200 || true
+          docker logs intent-solver --tail 100 || true
+      - name: Remove this test stack
+        if: always()
+        run: npm run regtest -- clean

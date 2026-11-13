@@ -7,8 +7,8 @@
       <header class="drawer-header">
         <div>
           <div class="balance-eyebrow">YOUR BALANCE</div>
-          <div class="balance-amount mono">
-            {{ store.getters['ark/formattedBalance'] || '0' }}
+          <div class="balance-amount mono" :title="balanceLabel" :aria-label="balanceLabel" aria-live="polite">
+            {{ headerBalance }}
             <span class="balance-unit">sats</span>
           </div>
         </div>
@@ -39,11 +39,12 @@
         <span class="text-muted">&mdash; settling into Ark</span>
       </div>
 
-      <div class="drawer-tabs">
-        <button :class="['tab', { active: tab === 'receive' }]" @click="tab = 'receive'">Receive</button>
-        <button :class="['tab', { active: tab === 'send' }]" @click="tab = 'send'">Send</button>
-        <button :class="['tab', { active: tab === 'activity' }]" @click="tab = 'activity'">Activity</button>
-        <button :class="['tab', { active: tab === 'settings' }]" @click="tab = 'settings'">Settings</button>
+      <div class="drawer-tabs" role="group" aria-label="Wallet sections">
+        <button :class="['tab', { active: tab === 'receive' }]" :aria-pressed="tab === 'receive'" @click="tab = 'receive'">Receive</button>
+        <button :class="['tab', { active: tab === 'send' }]" :aria-pressed="tab === 'send'" @click="tab = 'send'">Send</button>
+        <button :class="['tab', { active: tab === 'activity' }]" :aria-pressed="tab === 'activity'" @click="tab = 'activity'">Activity</button>
+        <button :class="['tab', { active: tab === 'bankroll' }]" :aria-pressed="tab === 'bankroll'" @click="tab = 'bankroll'">Bankroll</button>
+        <button :class="['tab', { active: tab === 'settings' }]" :aria-pressed="tab === 'settings'" @click="tab = 'settings'">Settings</button>
       </div>
 
       <div class="drawer-body" ref="bodyEl">
@@ -99,24 +100,18 @@
               </button>
             </div>
 
-            <!-- Amount form: only for fixed-amount BOLT11 via Boltz reverse
+            <!-- Amount form: only for fixed-amount BOLT11 via a solver
                  swap. Amountless LN receive is handled by the LNURL session
                  above. -->
             <div v-if="showAmountForm && !depositInvoice" class="amt-form">
               <div class="input-row">
                 <input class="input" type="number" v-model.number="depositAmount" placeholder="Amount in sats"
-                       :min="limits?.min" :max="limits?.max" :disabled="!ready" />
+                       :min="1" :step="1" :disabled="!ready" />
                 <button class="btn-primary btn-sm" :disabled="!depositAmount || depositLoading || !ready" @click="createLnDeposit">
                   {{ depositLoading ? 'Creating…' : 'Invoice' }}
                 </button>
               </div>
-              <div class="hint" v-if="depositAmount && fees">
-                You receive &asymp; <strong>{{ calcReceive(depositAmount).toLocaleString() }}</strong> sats after fees
-              </div>
-              <div class="hint" v-else-if="fees && limits">
-                {{ limits.min.toLocaleString() }} &ndash; {{ limits.max.toLocaleString() }} sats
-                &middot; {{ fees.reverse.percentage }}% + {{ (fees.reverse.minerFees.lockup + fees.reverse.minerFees.claim).toLocaleString() }} fee
-              </div>
+              <div class="hint">Enter the whole sats you want to receive. The invoice includes the solver's fee.</div>
             </div>
             <div v-if="depositInvoice" class="amt-form">
               <div class="status-badge" :class="depositStatus">{{ depositStatusText }}</div>
@@ -268,7 +263,7 @@
                   <a
                     v-if="explorerUrlFor(txidOf(t))"
                     class="tx-explorer"
-                    :href="explorerUrlFor(txidOf(t))"
+                    :href="explorerUrlFor(txidOf(t)) || undefined"
                     target="_blank"
                     rel="noopener noreferrer"
                     title="Open in the Arkade explorer"
@@ -278,6 +273,8 @@
             </div>
           </div>
         </section>
+
+        <BankrollWalletSummary v-if="tab === 'bankroll'" @open-bankroll="openBankroll" />
 
         <!-- ── Settings ───────────────────────────────────────────── -->
         <section v-if="tab === 'settings'" class="settings-section">
@@ -381,16 +378,8 @@ import { defineComponent, computed, ref, watch, nextTick, onUnmounted } from 'vu
 import { useStore } from 'vuex'
 import { useRouter } from 'vue-router'
 import { isValidArkAddress, type ArkTransaction } from '@arkade-os/sdk'
-import {
-  getSwaps,
-  createLnDeposit as doLnDeposit,
-  createLnWithdraw as doLnWithdraw,
-  invoiceSats,
-  getFees,
-  getLimits,
-  type FeesResponse,
-  type LimitsResponse,
-} from '@/services/boltz'
+import { createLnDeposit as doLnDeposit, waitForDeposit, sendPayment, invoiceSats } from '@/services/swaps'
+import { getSDKWallet } from '@/store/modules/ark/walletRuntime'
 import { copyToClipboard } from '@/utils/clipboard'
 import { isCredentialBackupSupported, saveWalletToBrowser } from '@/utils/credentialBackup'
 import type { GameSummary } from '@/services/api'
@@ -402,6 +391,7 @@ import { logDiag, formatDiagnostics } from '@/utils/diagnosticsLog'
 import { isPayoutPending } from '@/store/modules/ark/gameActivityResolver'
 import { openLnurlSession, lnurlServerForNetwork, type LnurlSession } from '@/services/lnurlSession'
 import QrCode from '@/components/QrCode.vue'
+import BankrollWalletSummary from '@/components/BankrollWalletSummary.vue'
 
 type SendKind = 'empty' | 'lightning' | 'lnurl' | 'ark' | 'onchain' | 'unknown'
 interface SendTarget { kind: SendKind; amountSats: number; address: string }
@@ -454,7 +444,7 @@ function detectSend(raw: string): SendTarget {
 
 export default defineComponent({
   name: 'WalletDrawer',
-  components: { QrCode },
+  components: { QrCode, BankrollWalletSummary },
   props: {
     open: { type: Boolean, default: false },
     // When false (e.g. zero balance), the drawer can't be dismissed — the close
@@ -470,6 +460,10 @@ export default defineComponent({
     // Connection state
     const arkStatus = computed(() => store.state.ark.status as string)
     const ready = computed(() => arkStatus.value === 'connected')
+    const balanceKnown = computed(() => ready.value && store.state.ark.balanceSynced === true &&
+      store.getters['ark/formattedBalance'] !== undefined && store.getters['ark/formattedBalance'] !== null)
+    const headerBalance = computed(() => balanceKnown.value ? String(store.getters['ark/formattedBalance']) : '—')
+    const balanceLabel = computed(() => balanceKnown.value ? `${headerBalance.value} sats available` : 'Wallet balance unknown until connected and synchronized')
     const connText = computed(() => {
       switch (arkStatus.value) {
         case 'connecting': return 'Connecting to Ark server…'
@@ -492,6 +486,7 @@ export default defineComponent({
         // it on next focus. Keeps the long-poll connection from racking up
         // on the server when the user isn't actively receiving.
         closeLnurlSession()
+        resetDeposit()
         return
       }
       if (arkStatus.value !== 'connected' && arkStatus.value !== 'connecting') {
@@ -508,18 +503,6 @@ export default defineComponent({
       // panel still work — the QR just won't have a `lightning=` leg.
       ensureLnurlSession()
     })
-
-    // Re-fetch fees once swap service comes online
-    const fees = ref<FeesResponse | null>(null)
-    const limits = ref<LimitsResponse | null>(null)
-    async function loadFeesLimits() {
-      try {
-        const [f, l] = await Promise.all([getFees(), getLimits()])
-        fees.value = f
-        limits.value = l
-      } catch { /* swap service offline */ }
-    }
-    watch(ready, (isReady) => { if (isReady && !fees.value) loadFeesLimits() })
 
     // Computed bindings to store
     const arkAddress = computed(() => store.getters['ark/address'])
@@ -597,34 +580,44 @@ export default defineComponent({
     const lnurlString = computed(() => lnurlSession.value?.lnurl ?? '')
     const lnurlStatus = ref<'idle' | 'opening' | 'open' | 'error' | 'disabled'>('idle')
     const lnurlError = ref<string | null>(null)
+    let lnurlOpening: AbortController | null = null
     async function ensureLnurlSession() {
       if (lnurlSession.value || lnurlStatus.value === 'opening') return
-      const pk = store.state.wallet?.privateKey
+      const wallet = getSDKWallet()
       const server = lnurlServerUrl.value
-      if (!pk || !server) {
+      if (!wallet || !server) {
         lnurlStatus.value = 'disabled'
         return
       }
       lnurlStatus.value = 'opening'
       lnurlError.value = null
+      const opening = new AbortController()
+      lnurlOpening = opening
       try {
-        lnurlSession.value = await openLnurlSession({
-          serverUrl: server,
-          privateKeyHex: pk,
-          onPaymentReceived: () => store.dispatch('ark/refreshBalance').catch(() => { /* transient */ }),
-          onError: (err) => { lnurlError.value = err.message; lnurlStatus.value = 'error' },
-        })
+        const session = await openLnurlSession({ serverUrl: server, wallet, signal: opening.signal })
+        if (opening.signal.aborted) { session.close(); return }
+        lnurlSession.value = session
         lnurlStatus.value = 'open'
       } catch (e) {
+        if (opening.signal.aborted) return
         lnurlError.value = getErrorMessage(e)
         lnurlStatus.value = 'error'
+      } finally {
+        if (lnurlOpening === opening) lnurlOpening = null
       }
     }
     function closeLnurlSession() {
-      try { lnurlSession.value?.close() } catch { /* ignore */ }
+      lnurlOpening?.abort()
+      lnurlOpening = null
+      lnurlSession.value?.close()
       lnurlSession.value = null
       lnurlStatus.value = 'idle'
     }
+
+    watch([ready, networkName], () => {
+      closeLnurlSession()
+      if (ready.value && props.open) ensureLnurlSession()
+    })
 
     // ── Unified BIP-21 receive URI ────────────────────────────────────
     // Lightning leg: when the user has set a fixed amount we hand it to
@@ -644,7 +637,7 @@ export default defineComponent({
       })
     })
     const copySheetOpen = ref(false)
-    // Reveal the fixed-amount BOLT11 form (Boltz reverse swap). Amountless
+    // Reveal the fixed-amount BOLT11 form (solver swap). Amountless
     // Lightning receive is always on via the LNURL session, so this stays
     // collapsed by default.
     const showAmountForm = ref(false)
@@ -687,7 +680,7 @@ export default defineComponent({
       return new Date(ts).toLocaleDateString()
     }
 
-    const tab = ref<'receive' | 'send' | 'activity' | 'settings'>('receive')
+    const tab = ref<'receive' | 'send' | 'activity' | 'bankroll' | 'settings'>('receive')
 
     // The Activity tab's history is heavy (the SDK re-derives it from chain —
     // an esplora /outspends per boarding tx), so load it lazily, only when that
@@ -718,58 +711,42 @@ export default defineComponent({
     const depositStatus = ref<'pending' | 'success' | 'expired' | 'error'>('pending')
     const depositStatusText = ref('Waiting for payment…')
     let depositCleanup: (() => void) | null = null
-
-    function calcReceive(amount: number): number {
-      if (!fees.value) return 0
-      const { percentage, minerFees } = fees.value.reverse
-      const boltzFee = Math.ceil((amount * percentage) / 100)
-      return amount - boltzFee - minerFees.lockup - minerFees.claim
-    }
+    let depositGeneration = 0
 
     async function createLnDeposit() {
       if (!depositAmount.value) return
       depositLoading.value = true
+      const generation = ++depositGeneration
       try {
         const result = await doLnDeposit(depositAmount.value)
+        if (generation !== depositGeneration) return
         depositInvoice.value = result.invoice
         depositStatus.value = 'pending'
         depositStatusText.value = 'Waiting for payment…'
 
-        const arkadeSwaps = getSwaps()
-        if (arkadeSwaps) {
-          arkadeSwaps.waitAndClaim(result.pendingSwap).then(({ txid }) => {
-            depositStatus.value = 'success'
-            depositStatusText.value = `Claimed! TX: ${txid.slice(0, 12)}…`
-            showToast('Lightning deposit complete!')
-            store.dispatch('ark/refreshBalance')
-          }).catch((err) => {
-            if (depositStatus.value !== 'success') {
-              depositStatus.value = 'error'
-              depositStatusText.value = err instanceof Error ? err.message : 'Claim failed'
-            }
-          })
-          const manager = arkadeSwaps.getSwapManager()
-          if (manager) {
-            manager.subscribeToSwapUpdates(result.pendingSwap.id, (swap) => {
-              if (swap.status === 'transaction.mempool' || swap.status === 'transaction.confirmed') {
-                depositStatus.value = 'pending'
-                depositStatusText.value = 'Payment received, claiming…'
-              } else if (swap.status === 'invoice.expired' || swap.status === 'swap.expired') {
-                depositStatus.value = 'expired'
-                depositStatusText.value = 'Invoice expired'
-              }
-            }).then((unsub) => { depositCleanup = unsub })
-              .catch((err) => console.warn('LN swap subscription failed:', err))
-          }
-        }
+        depositCleanup?.()
+        const waiting = new AbortController()
+        depositCleanup = () => waiting.abort()
+        waitForDeposit(result.swap, waiting.signal).then(() => {
+          depositStatus.value = 'success'
+          depositStatusText.value = 'Payment claimed into your wallet'
+          showToast('Lightning deposit complete!')
+          store.dispatch('ark/refreshBalance')
+        }).catch((err) => {
+          if (waiting.signal.aborted) return
+          depositStatus.value = 'error'
+          depositStatusText.value = getErrorMessage(err)
+        })
       } catch (err) {
-        showToast(err instanceof Error ? err.message : 'Failed to create swap', 'error')
+        if (generation === depositGeneration) showToast(err instanceof Error ? err.message : 'Failed to create swap', 'error')
       } finally {
-        depositLoading.value = false
+        if (generation === depositGeneration) depositLoading.value = false
       }
     }
 
     function resetDeposit() {
+      depositGeneration++
+      depositLoading.value = false
       depositInvoice.value = ''
       depositAmount.value = null
       depositStatus.value = 'pending'
@@ -810,7 +787,7 @@ export default defineComponent({
       if (!ready.value || sendLoading.value) return false
       const d = sendDetected.value
       if (d.kind === 'lightning') return d.amountSats > 0
-      if (d.kind === 'ark' || d.kind === 'onchain' || d.kind === 'lnurl') return !!sendAmount.value && sendAmount.value > 0
+      if (d.kind === 'ark' || d.kind === 'onchain' || d.kind === 'lnurl') return Number.isSafeInteger(sendAmount.value) && (sendAmount.value ?? 0) > 0
       return false
     })
 
@@ -831,18 +808,21 @@ export default defineComponent({
       try {
         if (d.kind === 'lnurl') {
           // LNURL-pay: hit the recipient's endpoint, get a BOLT11 for the
-          // amount we want, then send via the same Boltz Ark→LN swap as a
+          // amount we want, then send via the same Arkade-to-Lightning swap as a
           // pasted invoice. The "Resolving…" → "Paying…" transition gives
           // the user feedback during the extra HTTP roundtrip.
           const input = detectLnurlInput(d.address)
           if (!input) throw new Error('Could not parse Lightning address')
           const { invoice } = await resolveLnurlToInvoice(input, sendAmount.value as number)
           sendStatusText.value = 'Paying via Lightning…'
-          const result = await doLnWithdraw(invoice)
-          sendStatusText.value = `Paid! Preimage ${result.preimage.slice(0, 16)}…`
+          await sendPayment(invoice)
+          sendStatusText.value = 'Lightning payment settled'
         } else if (d.kind === 'lightning') {
-          const result = await doLnWithdraw(d.address)
-          sendStatusText.value = `Paid! Preimage ${result.preimage.slice(0, 16)}…`
+          await sendPayment(d.address)
+          sendStatusText.value = 'Lightning payment settled'
+        } else if (d.kind === 'onchain') {
+          await sendPayment(d.address, sendAmount.value as number)
+          sendStatusText.value = 'On-chain payment settled'
         } else {
           const txid = await store.dispatch('ark/sendBitcoin', {
             address: d.address, amount: sendAmount.value,
@@ -1034,6 +1014,10 @@ export default defineComponent({
     }
 
     function close() { if (props.dismissible) emit('update:open', false) }
+    async function openBankroll() {
+      await router.push('/bankroll')
+      emit('update:open', false)
+    }
 
     /**
      * Target of the header's "Add funds to play" button, shown when the drawer
@@ -1055,8 +1039,8 @@ export default defineComponent({
     })
 
     return {
-      store, close, reconnect,
-      arkStatus, ready, connText, arkServer, info,
+      store, close, reconnect, openBankroll,
+      arkStatus, ready, connText, arkServer, info, headerBalance, balanceLabel,
       arkAddress, privateKey, phraseWords, boardingAddress, boardingBalance, boardingUtxos,
       hasUnsettledFunds, settleReasonLabel,
       hasUnconfirmedBoarding, unconfirmedBoardingAmount,
@@ -1072,7 +1056,6 @@ export default defineComponent({
       sendDetected, sendNeedsAmount, sendKindLabel, sendButtonLabel, canSend,
       sendSetMax, doSend, resetSend,
       settleLoading,
-      fees, limits, calcReceive,
       createLnDeposit, resetDeposit, settleFunds,
       showKey, showDeleteConfirm, deleteConfirmText, deleteWallet, requestFaucet,
       credentialBackupSupported, savedToBrowser, saveToBrowser,
@@ -1194,17 +1177,18 @@ export default defineComponent({
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
 .drawer-tabs {
-  display: flex; gap: 4px;
-  padding: 16px 16px 0;
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px;
+  padding: 16px 12px 0;
 }
 .drawer-tabs .tab {
-  flex: 1;
+  min-width: 0; white-space: nowrap;
   background: transparent; border: 1px solid var(--border-light);
   color: var(--text-muted);
-  padding: 10px 12px; font-size: 0.85rem; font-weight: 600;
+  padding: 10px 4px; font-size: 0.75rem; font-weight: 600;
   border-radius: 10px; cursor: pointer;
   transition: all 0.18s;
   &:hover { color: var(--text); border-color: var(--blue); }
+  &:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   &.active { background: rgba(56, 189, 248, 0.12); border-color: var(--blue); color: var(--blue); }
 }
 

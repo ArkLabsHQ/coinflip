@@ -34,22 +34,16 @@ export function rebuildCovenant(cv: V4CovenantParams): CoinflipJointPotScript {
 export async function loadV4Game(deps: AppDeps, gameId: string): Promise<{ state: V4State; status: string }> {
   const game = await deps.repos.games.get(gameId)
   if (!game) throw new Error('Game not found')
-  const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
+  const state = JSON.parse(game.state_json || '{}') as V4State
   if (state.protocolVersion !== 'v4') throw new Error('Not a v4 game')
   return { state, status: game.status }
 }
 
-/**
- * All co-funded v4 games still awaiting resolution. Scans 'pending' AND 'expired':
- * post-fix a co-funded game never becomes 'expired' (isCofundedGame guards
- * expirePending), but this recovers any that were stranded in 'expired' by the old
- * expiry dead-zone — the reconcilers must still refund/settle their live pots, else a
- * stalling player could sweep the whole pot via playerTakeAll.
- */
+/** Return pending games whose co-fund was submitted or finalized. */
 export async function listUnresolvedCofundedV4(deps: AppDeps) {
-  const [pending, expired] = await Promise.all([
-    deps.repos.games.list({ status: 'pending', limit: 500 }),
-    deps.repos.games.list({ status: 'expired', limit: 500 }),
-  ])
-  return [...pending, ...expired].filter((g) => g.player_choice === 'trustless-v4' && g.house_vtxos_json)
+  const pending = await deps.repos.games.listPending()
+  return pending.filter((game) => {
+    const state = JSON.parse(game.state_json) as V4State
+    return Boolean(state.cofundArkTxid || state.cofundTxid)
+  })
 }

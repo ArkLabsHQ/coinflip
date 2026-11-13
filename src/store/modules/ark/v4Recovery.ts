@@ -1,14 +1,3 @@
-/**
- * v0.4 joint-pot forfeit-stash recovery glue.
- *
- * The network/storage wrappers that persist a v4 pot's recovery stash after a
- * co-fund (`stashV4ForfeitRecovery`) and re-arm no-secret self-refund stashes
- * from a server reclaim hint (`rearmV4ReclaimHints`). Relocated verbatim from
- * `ark.ts`: both are best-effort, idempotent, and touch only the stash stores +
- * the pure decision helpers (`resolveV4ForfeitStash` / `rearmV4ReclaimHint`) —
- * never the module-scoped `sdkWallet` — so they belong beside the other v4
- * stash modules rather than in the Vuex shell.
- */
 import { getErrorMessage } from '@/utils/errors'
 import { getNetwork, type V4CovenantParams, type GameSummary, type V4ReclaimHint } from '@/services/api'
 import { resolveV4ForfeitStash, type V4PotOutpoint } from './v4ForfeitStash'
@@ -16,18 +5,7 @@ import { putV4Forfeit, loadV4Forfeits } from './v4ForfeitStashStore'
 import { pickV4ClaimPath, rearmV4ReclaimHint } from './v4SelfRefund'
 import { addressToPkScriptHex } from './arkHelpers'
 
-/**
- * After the joint pot is co-funded,
- * persist everything the client needs to reclaim it via the `playerForfeit`
- * leaf should the server never settle. The claim is CLIENT-built from the
- * covenant params, so all we need is the pot outpoint + covenant + the emulator
- * URL — captured by the caller BEFORE the co-fund (playV4Game aborts pre-funding
- * when it's absent). Crucially this does NOT re-fetch /api/network: that
- * redundant fetch could fail transiently and, for v4 where the stash is the
- * ONLY recovery (no v3-style self-refund), silently drop recovery for an
- * already-funded pot. So a skip/write failure here is logged LOUDLY — but we
- * still proceed to reveal, which on success makes the stash moot anyway.
- */
+/** Persist recovery before submitting funding; refusing storage must refuse the bet. */
 export async function stashV4ForfeitRecovery(args: {
   gameId: string
   tier: number
@@ -44,20 +22,13 @@ export async function stashV4ForfeitRecovery(args: {
     expectedPayoutPkScriptHex: args.expectedPayoutPkScriptHex,
     playerSecretHex: args.playerSecretHex,
   })
-  if (decision.kind === 'stash') {
-    try {
-      await putV4Forfeit({
-        ...decision.patch,
-        gameId: args.gameId,
-        tier: args.tier,
-        createdAt: Date.now(), // ms, matches the listStalledBets grace cutoff
-      })
-    } catch (e) {
-      console.error('[v4] CRITICAL: pot is funded but the recovery stash could not be written:', getErrorMessage(e))
-    }
-  } else {
-    console.error(`[v4] CRITICAL: forfeit not stashed for a funded pot (${decision.reason})`)
-  }
+  if (decision.kind !== 'stash') throw new Error(`Recovery refused: ${decision.reason}`)
+  await putV4Forfeit({
+    ...decision.patch,
+    gameId: args.gameId,
+    tier: args.tier,
+    createdAt: Date.now(),
+  })
 }
 
 /**

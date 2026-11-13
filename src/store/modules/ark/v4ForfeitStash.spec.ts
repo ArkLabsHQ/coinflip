@@ -8,8 +8,7 @@ import {
 import type { V4CovenantParams } from '@/services/api'
 
 // Deterministic fixtures — no SDK/network. The v4 forfeit decision is a pure
-// guard chain (emulator reachable + covenant pays us), mirroring v3's
-// resolveForfeitStash but for the client-built joint-pot claim.
+// guard chain (emulator configured + covenant pays us).
 
 const PAYOUT = '5120' + 'ab'.repeat(32)
 

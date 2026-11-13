@@ -32,7 +32,7 @@ const coin = (txid: string, vout: number, value: number) => ({
   txid,
   vout,
   value,
-  virtualStatus: { state: 'settled', batchExpiry: FUTURE_EXPIRY },
+  isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (FUTURE_EXPIRY) === undefined ? undefined : new Date(FUTURE_EXPIRY),
   status: { confirmed: false },
   createdAt: new Date(Date.now() - 60_000),
 })
@@ -53,7 +53,7 @@ function chainingSplitDeps(start: any[], failOn: Map<number, Error>) {
     wallet: {
       getVtxos: async () => vtxos,
       getAddress: async () => HOUSE_ADDRESS,
-      sendBitcoin: async (params: any) => {
+      send: async (params: any) => {
         seq++
         attempts.push(params.selectedVtxos.map((v: any) => `${v.txid}:${v.vout}`))
         const boom = failOn.get(seq)
@@ -62,8 +62,8 @@ function chainingSplitDeps(start: any[], failOn: Map<number, Error>) {
         const inSum = params.selectedVtxos.reduce((s: number, v: any) => s + v.value, 0)
         const txid = String(seq).padStart(2, '0').repeat(32).slice(0, 64)
         vtxos = vtxos.filter((v) => !spent.has(`${v.txid}:${v.vout}`))
-        vtxos.push(coin(txid, 0, params.amount))
-        if (inSum - params.amount > 0) vtxos.push(coin(txid, 1, inSum - params.amount))
+        vtxos.push(coin(txid, 0, params.recipients[0].amount))
+        if (inSum - params.recipients[0].amount > 0) vtxos.push(coin(txid, 1, inSum - params.recipients[0].amount))
         return txid
       },
     },

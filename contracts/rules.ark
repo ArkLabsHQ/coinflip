@@ -1,0 +1,35 @@
+pragma arkade ^0.1.0;
+
+library CoinflipRules {
+  function pot(int playerStake, int houseStake) int {
+    require(playerStake >= 330 && playerStake <= 2100000000000000, "player stake");
+    require(houseStake >= 330 && houseStake <= 2100000000000000, "house stake");
+    int amount = playerStake + houseStake;
+    require(amount <= 2100000000000000, "pot limit");
+    require(this.activeInputIndex == 0, "pot must be input zero");
+    require(tx.input.current.value == amount, "pot value");
+    return amount;
+  }
+
+  function playerWins(bytes32 houseHash, bytes32 playerHash, int n, int lo, int target) bool {
+    require(n >= 2 && n <= 128, "odds denominator");
+    require(lo >= 0 && lo < target && target <= n, "odds interval");
+    bytes playerReveal = tx.packet(16);
+    bytes houseReveal = tx.packet(17);
+    require(size(playerReveal) >= 17 && size(houseReveal) >= 17, "reveal length");
+    require(sha256(playerReveal) == playerHash, "player commitment");
+    require(sha256(houseReveal) == houseHash, "house commitment");
+    // A zero sign byte makes all 256 possible digit bytes unsigned.
+    int houseDigit = bin2num(cat(substr(houseReveal, 0, 1), 0x00));
+    int playerDigit = bin2num(cat(substr(playerReveal, 0, 1), 0x00));
+    if (houseDigit >= n) { return true; }
+    if (playerDigit >= n) { return false; }
+    int roll = (houseDigit + playerDigit) % n;
+    return roll >= lo && roll < target;
+  }
+
+  function pay(ScriptPubKey destination, int amount) {
+    require(tx.outputs[0].script == destination, "payout destination");
+    require(tx.outputs[0].value == amount, "payout amount");
+  }
+}

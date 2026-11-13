@@ -5,6 +5,7 @@ import { loadEmulatorConfig } from './emulator.js'
 import { newGameProtocolVersion, computeGameRoll, getMaxBetFractionBps, type V4State } from './trustless-game-v4.js'
 import { issueChallenge, verifyChallenge } from './restore-auth.js'
 import { RateLimiter } from './rate-limit.js'
+import { ARK_SERVER_URL } from './house-wallet.js'
 import { freeStakeTotal, spendableTotal, houseVtxoCache } from './vtxo-pool.js'
 
 // ── Restore-endpoint plumbing ────────────────────────────────────────────────
@@ -76,6 +77,8 @@ export function createPublicRoutes(deps: AppDeps): Router {
     const emu = await loadEmulatorConfig()
     res.json({
       network: deps.arkInfo.network,
+      operatorUrl: process.env.ARK_SERVER_PUBLIC_URL || ARK_SERVER_URL,
+      esploraUrl: process.env.ESPLORA_PUBLIC_URL || process.env.ESPLORA_URL || null,
       emulator: emu
         ? { url: emu.publicUrl, signerPubkey: emu.signerPubkeyHex, version: emu.version }
         : null,
@@ -105,11 +108,6 @@ export function createPublicRoutes(deps: AppDeps): Router {
       const available = spendableTotal(pool)
 
       const maxAvailable = tiers.reduce((max, t) => (t <= available ? Math.max(max, t) : max), 0)
-
-      // Publish the rake policy so the trustless client can verify the rake
-      // output on the winner-claim it co-signs.
-      const rakeType = (await deps.repos.config.get('rake_type')) || 'percentage'
-      const rakeValue = parseInt((await deps.repos.config.get('rake_value')) || '2', 10)
 
       const dust = Number(deps.arkInfo.dust ?? 546n)
       // Same clamped parse /play enforces against (fail CLOSED on a malformed
@@ -150,8 +148,6 @@ export function createPublicRoutes(deps: AppDeps): Router {
         // Ready means a bet is actually placeable — not merely that the wallet
         // holds a balance whose coins are all reserved.
         houseReady: capacity >= dust && available >= minBalance,
-        rakeType,
-        rakeValue,
       })
     } catch (err) {
       console.error('Tiers error:', err)
@@ -166,14 +162,11 @@ export function createPublicRoutes(deps: AppDeps): Router {
       res.status(404).json({ error: 'Game not found' })
       return
     }
-    const isResolved = game.status === 'resolved'
     res.json({
       id: game.id,
       tier: game.tier,
-      // Only reveal player choice after resolution to prevent information leakage
-      playerChoice: isResolved ? game.player_choice : undefined,
       winner: game.winner,
-      rakeAmount: game.rake_amount,
+      rakeAmount: 0,
       payoutAmount: game.payout_amount,
       status: game.status,
       createdAt: game.created_at,
@@ -189,7 +182,7 @@ export function createPublicRoutes(deps: AppDeps): Router {
   // mid-flight (matters even though the owning player POSTed it — a leaked
   // /commit response could otherwise be replayed against the in-flight hash).
   // The on-chain reveal makes both secrets public knowledge at terminal time
-  // anyway (condition witness on v2, reveal packets on v3).
+  // anyway once the covenant settles.
   router.get('/api/game/:id/details', async (req: Request, res: Response) => {
     const game = await deps.repos.games.get(String(req.params.id))
     if (!game) {
@@ -210,50 +203,34 @@ export function createPublicRoutes(deps: AppDeps): Router {
       return
     }
     const terminal = game.status === 'resolved' || game.status === 'expired'
-    // Parse the trustless state JSON for txids / contract params / odds.
-    let state: Record<string, unknown> = {}
-    try { state = JSON.parse(game.house_vtxos_json || '{}') } catch { /* malformed → empty */ }
-    const houseEscrow = (state.houseEscrow as { txid?: string; vout?: number; value?: number } | undefined) ?? undefined
-    const playerEscrow = (state.playerEscrow as { txid?: string; vout?: number; value?: number } | undefined) ?? undefined
-    const arkadeForfeit = (state.arkadeForfeit as { houseStake?: number; playerStake?: number; emulatorPubkeyHex?: string; exitDelay?: number } | undefined) ?? undefined
-    const contractVersion = (state.contractVersion as string | undefined) ?? 'v2'
-    // Fair roll (v3/v4 reveal format), terminal-only — both secrets are public
-    // knowledge on-chain by then. Null for the cheat-penalty path and for v2
-    // (which length-encoded the digit rather than storing it in byte 0).
-    const roll = terminal && (contractVersion === 'v3' || contractVersion === 'v4')
-      ? computeGameRoll(game.house_secret_hex, game.player_secret_hex, (state.oddsN as number | undefined) ?? null)
-      : null
+    const state = JSON.parse(game.state_json) as V4State
+    const covenant = state.covenant
     res.json({
       id: game.id,
       tier: game.tier,
       status: game.status,
       winner: game.winner,
       payoutAmount: game.payout_amount,
-      rakeAmount: game.rake_amount,
+      rakeAmount: 0,
       createdAt: game.created_at,
       resolvedAt: game.resolved_at,
-      roll,
-      // Contract parameters
-      contractVersion,
+      contractVersion: 'v4',
+      covenant,
       playerHash: game.player_hash,
-      playerChoice: terminal ? game.player_choice : undefined,
-      finalExpiration: state.finalExpiration ?? null,
-      setupExpiration: state.setupExpiration ?? null,
-      // Variable odds (undefined for the 50/50 coin)
-      oddsN: state.oddsN ?? null,
-      oddsTarget: state.oddsTarget ?? null,
-      oddsLo: state.oddsLo ?? null,
-      // Arkade-script forfeit pin (stakes, emu pubkey, exit delay)
-      houseStake: arkadeForfeit?.houseStake ?? null,
-      playerStake: arkadeForfeit?.playerStake ?? null,
-      emulatorPubkey: arkadeForfeit?.emulatorPubkeyHex ?? null,
-      exitDelay: arkadeForfeit?.exitDelay ?? null,
-      // Outpoints (escrows, sweep, refund)
-      houseEscrow: houseEscrow && houseEscrow.txid ? houseEscrow : null,
-      playerEscrow: playerEscrow && playerEscrow.txid ? playerEscrow : null,
-      resolveTxid: (state.resolveTxid as string | undefined) ?? null,
-      houseRefundTxid: (state.houseRefundTxid as string | undefined) ?? null,
-      // Preimages (terminal state only — both are public knowledge on-chain by then).
+      houseHash: covenant.creatorHash,
+      roll: terminal ? computeGameRoll(game.house_secret_hex, game.player_secret_hex, covenant.oddsN) : null,
+      finalExpiration: covenant.finalExpiration,
+      setupExpiration: state.setupExpiration,
+      oddsN: covenant.oddsN,
+      oddsTarget: covenant.oddsTarget,
+      oddsLo: covenant.oddsLo,
+      playerStake: covenant.playerStake,
+      houseStake: covenant.houseStake,
+      emulatorPubkey: covenant.emulatorPubkey,
+      exitDelay: covenant.exitDelay,
+      potOutpoint: state.cofundTxid ? { txid: state.cofundTxid, vout: 0, value: state.pot } : null,
+      settleTxid: state.settleTxid ?? null,
+      refundTxid: state.refundTxid ?? null,
       houseSecret: terminal ? game.house_secret_hex : null,
       playerSecret: terminal ? game.player_secret_hex : null,
     })
@@ -323,27 +300,22 @@ export function createPublicRoutes(deps: AppDeps): Router {
     const reclaimHints: V4ReclaimHint[] = []
     for (const game of rows) {
       let state: Record<string, unknown> = {}
-      try { state = JSON.parse(game.house_vtxos_json || '{}') } catch { /* malformed → empty */ }
-      const protocolVersion =
-        (state.protocolVersion as string | undefined) ??
-        (state.contractVersion as string | undefined) ??
-        'v2'
+      try { state = JSON.parse(game.state_json || '{}') } catch { /* malformed → empty */ }
+      const protocolVersion = 'v4'
       games.push({
         gameId: game.id,
         tier: game.tier,
         status: game.status,
         winner: game.winner,
         payoutAmount: game.payout_amount,
-        rakeAmount: game.rake_amount,
+        rakeAmount: 0,
         createdAt: game.created_at,
         resolvedAt: game.resolved_at,
         protocolVersion,
       })
 
-      // Reclaim hint: PENDING v4 games only. v3/v2 are history-only — the server
-      // doesn't hold the client-funded escrow outpoint needed to build a refund,
-      // and a terminal game needs no reclaim. NEVER includes the player secret.
-      if (game.status === 'pending' && protocolVersion === 'v4') {
+      // A pending game's restore hint can refund its stake, never reveal a player secret.
+      if (game.status === 'pending') {
         const v4 = state as unknown as V4State
         const covenant = v4.covenant ?? null
         reclaimHints.push({

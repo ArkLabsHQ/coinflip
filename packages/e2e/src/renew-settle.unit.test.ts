@@ -41,7 +41,7 @@ const FREE_COIN = {
   txid: 'ab'.repeat(32),
   vout: 0,
   value: 40_000,
-  virtualStatus: { state: 'settled', batchExpiry: Date.now() + 24 * 3600_000 },
+  isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (Date.now() + 24 * 3600_000) === undefined ? undefined : new Date(Date.now() + 24 * 3600_000),
   status: { confirmed: false },
   createdAt: new Date(),
 }
@@ -134,7 +134,7 @@ describe('renewSettle narrows to coins that need renewal (SDK renewVtxos semanti
     txid: 'cd'.repeat(32),
     vout: 0,
     value: 90_000,
-    virtualStatus: { state: 'settled', batchExpiry: Date.now() + RENEWAL_EXPIRY_BUFFER_MS + 7 * 24 * 3600_000 },
+    isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (Date.now() + RENEWAL_EXPIRY_BUFFER_MS + 7 * 24 * 3600_000) === undefined ? undefined : new Date(Date.now() + RENEWAL_EXPIRY_BUFFER_MS + 7 * 24 * 3600_000),
     status: { confirmed: false },
     createdAt: new Date(),
   }
@@ -144,7 +144,7 @@ describe('renewSettle narrows to coins that need renewal (SDK renewVtxos semanti
     txid: 'ef'.repeat(32),
     vout: 1,
     value: 25_000,
-    virtualStatus: { state: 'swept', batchExpiry: Date.now() - 3600_000 },
+    isSpent: false, isSwept: true, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: (Date.now() - 3600_000) === undefined ? undefined : new Date(Date.now() - 3600_000),
     status: { confirmed: false },
     createdAt: new Date(),
   }
@@ -194,6 +194,17 @@ describe('renewSettle narrows to coins that need renewal (SDK renewVtxos semanti
     const deps = depsWithVtxos([FAR_COIN, FREE_COIN], [])
     const params = await buildReservationSafeSettleParams(deps)
     expect(params.inputs.map((v: any) => v.txid).sort()).toEqual([FAR_COIN.txid, FREE_COIN.txid].sort())
+  })
+
+  it('keeps founder shares out of plain-BTC renewal and admin settlement outputs', async () => {
+    const shareCoin = { ...FREE_COIN, txid: '12'.repeat(32), assets: [{ assetId: `${'13'.repeat(32)}:0`, amount: 1000n }] }
+    const calls: any[][] = []
+    const deps = depsWithVtxos([shareCoin, FREE_COIN], calls)
+    const params = await buildReservationSafeSettleParams(deps)
+    expect(params.inputs.map((coin: any) => coin.txid)).toEqual([FREE_COIN.txid])
+    expect(params.outputs[0].amount).toBe(BigInt(FREE_COIN.value))
+    await renewSettle(deps)
+    expect(calls[0][0].inputs.map((coin: any) => coin.txid)).toEqual([FREE_COIN.txid])
   })
 })
 

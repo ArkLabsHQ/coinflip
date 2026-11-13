@@ -19,7 +19,7 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
-import { ArkAddress, CSVMultisigTapscript } from '@arkade-os/sdk'
+import { ArkAddress, CSVMultisigTapscript, SettlementEventType } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 const {
   shouldRenew,
@@ -38,7 +38,7 @@ const vtxo = (txid: string, batchExpiry: number | undefined, state = 'settled', 
   txid,
   vout: 0,
   value,
-  virtualStatus: { state, batchExpiry },
+  isSpent: state === 'spent', isSwept: state === 'swept', isUnrolled: state === 'unrolled', isPreconfirmed: state === 'preconfirmed', spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: batchExpiry === undefined ? undefined : new Date(batchExpiry),
   status: { confirmed: false },
   createdAt: new Date(),
 })
@@ -170,6 +170,63 @@ describe('runRenewalTick (gate → settle chain, wedge-proofing, visibility)', (
     // sats every tick, so silence itself becomes diagnosable.
     expect(logged()).toMatch(/pool status: 1 vtxo\(s\), nearest batch expiry ~\d+h/)
     expect(logged()).toContain('0 recoverable sat(s)')
+  })
+
+  it('does not repeatedly consolidate fresh 8192-second house denominations', async () => {
+    let pool = ['11', '22', '33'].map(id => vtxo(id.repeat(32), Date.now() + 8192_000))
+    const settle = jest.fn(async () => {
+      pool = [vtxo('44'.repeat(32), Date.now() + 8192_000, 'settled', 150_000)]
+      return 'renewed'
+    })
+    const deps = { arkInfo: { vtxoTreeExpiry: 8192n }, wallet: tickWallet({ getVtxos: async () => pool, settle }) } as any
+    await runRenewalTick(deps)
+    await runRenewalTick(deps)
+    expect(settle).not.toHaveBeenCalled()
+    expect(pool).toHaveLength(3)
+  })
+
+  it('renews only due or expired coins on short batches and leaves fresh coins and shares untouched', async () => {
+    const fresh = vtxo('12'.repeat(32), Date.now() + 8192_000)
+    const due = vtxo('34'.repeat(32), Date.now() + 3000_000)
+    const expired = vtxo('56'.repeat(32), Date.now() - HOUR)
+    const swept = vtxo('78'.repeat(32), Date.now() - HOUR, 'swept')
+    const shares = { ...fresh, txid: '90'.repeat(32), assets: [{ assetId: '91'.repeat(32) + ':0', amount: 1000n }] }
+    let pool = [fresh, due, expired, swept, shares]
+    const settle = jest.fn(async (params: any) => {
+      const consumed = new Set(params.inputs.map((coin: any) => coin.txid))
+      pool = [...pool.filter(coin => !consumed.has(coin.txid)), vtxo('ab'.repeat(32), Date.now() + 8192_000)]
+      return 'renewed'
+    })
+    const deps = { arkInfo: { vtxoTreeExpiry: 8192n }, wallet: tickWallet({ getVtxos: async () => pool, settle }) } as any
+    await runRenewalTick(deps)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(settle.mock.calls[0][0].inputs.map((coin: any) => coin.txid).sort()).toEqual([due.txid, expired.txid, swept.txid].sort())
+    await runRenewalTick(deps)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(pool).toEqual(expect.arrayContaining([fresh, shares]))
+  })
+
+  it('retains coins and makes no wallet call for an unsupported advertised lifetime', async () => {
+    const wallet = tickWallet({ getVtxos: jest.fn(), settle: jest.fn() })
+    await expect(runRenewalTick({ arkInfo: { vtxoTreeExpiry: 1024n }, wallet } as any)).rejects.toThrow(/too short/)
+    expect(wallet.getVtxos).not.toHaveBeenCalled()
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
+  it('learns a completed native batch lifetime when the operator does not advertise it', async () => {
+    let pool = [vtxo('ac'.repeat(32), Date.now() - HOUR)]
+    const txid = 'ad'.repeat(32)
+    const settle = jest.fn(async (_params: any, callback: any) => {
+      callback({ type: SettlementEventType.BatchStarted, id: 'accepted', batchExpiry: 8192n, intentIdHashes: [] })
+      callback({ type: SettlementEventType.BatchFinalized, id: 'accepted', commitmentTxid: txid })
+      pool = [vtxo('ae'.repeat(32), Date.now() + 8192_000)]
+      return txid
+    })
+    const deps = { wallet: tickWallet({ getVtxos: async () => pool, settle }) } as any
+    await runRenewalTick(deps)
+    await runRenewalTick(deps)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(logged()).toContain('buffer 68m')
   })
 
   it('surfaces recoverable sats in the status line', async () => {

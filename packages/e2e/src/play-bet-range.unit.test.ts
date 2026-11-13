@@ -78,7 +78,7 @@ const PLAYER_PAYOUT_ADDRESS = new ArkAddress(new Uint8Array(32).fill(0x55), new 
 function houseCoin(txid: string, vout: number, value: number) {
   return {
     txid, vout, value,
-    virtualStatus: { state: 'settled' as const },
+    isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120',
     forfeitTapLeafScript: [
       { version: 0xc0, internalKey: xonlyOf(0x99), merklePath: [] as Uint8Array[] },
       new Uint8Array([...HOUSE_XONLY, 0xc0]),

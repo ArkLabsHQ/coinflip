@@ -1,0 +1,37 @@
+pragma arkade ^0.1.0;
+
+import "./rules.ark";
+
+contract CoinflipContest(
+  pubkey player,
+  bytes32 playerHash, bytes32 houseHash,
+  ScriptPubKey playerPayout, ScriptPubKey housePayout,
+  int playerStake, int houseStake,
+  int oddsN, int oddsLo, int oddsTarget,
+  int finalExpiration
+) {
+  @allow(unsigned-spend-path, "both committed reveals determine the winner and the payout is pinned")
+  function playerWin() {
+    int amount = CoinflipRules.pot(playerStake, houseStake);
+    require(CoinflipRules.playerWins(houseHash, playerHash, oddsN, oddsLo, oddsTarget), "player did not win");
+    CoinflipRules.pay(playerPayout, amount);
+  }
+
+  @allow(unsigned-spend-path, "both committed reveals determine the winner and the payout is pinned")
+  function creatorWin() {
+    int amount = CoinflipRules.pot(playerStake, houseStake);
+    require(!CoinflipRules.playerWins(houseHash, playerHash, oddsN, oddsLo, oddsTarget), "house did not win");
+    CoinflipRules.pay(housePayout, amount);
+  }
+
+  @allow(unsigned-spend-path, "the matching player-signed CLTV leaf gates the pinned timeout payout")
+  function playerTakeAll() {
+    int amount = CoinflipRules.pot(playerStake, houseStake);
+    CoinflipRules.pay(playerPayout, amount);
+  }
+
+  function playerTakeAll(signature playerSig, signature serverSig, signature emulatorSig) tapscript {
+    require(after(finalExpiration));
+    require(checkMultisig([player, server, emulator], [playerSig, serverSig, emulatorSig], 3));
+  }
+}

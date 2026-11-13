@@ -22,7 +22,7 @@
  *   arkd enforces the `cooperativeSpend` CLTV (`cancelDelay`) against the chain's
  *   median-time-past; the split-back cannot confirm before it. `finalExpiration`
  *   (> cancelDelay) gates the take-all leaf, NOT this one. The caller gates on
- *   chain-time ≥ cancelDelay (mirroring the server reconcile + the v3 refund gate).
+ *   chain-time ≥ cancelDelay.
  *
  * WHY A SEPARATE, MOSTLY-PURE MODULE (mirrors v4ForfeitStash.ts):
  *   The tx construction + the secret/no-secret branch are the security-critical,
@@ -34,9 +34,9 @@
 import { hex } from '@scure/base'
 import { CSVMultisigTapscript } from '@arkade-os/sdk'
 // Subpath imports (not the package root) so the browser bundle doesn't pull in the
-// v2 transactions module, which imports Node's `crypto` — same reasoning as ark.ts.
-import { buildJointPotRefundTx, type BuiltJointPotTx } from 'arkade-coinflip/dist/joint-pot-tx'
-import { CoinflipJointPotScript } from 'arkade-coinflip/dist/joint-pot'
+// browser helpers, without importing server-only code.
+import { buildJointPotRefundTx, type BuiltJointPotTx } from 'arkade-coinflip/dist/joint-pot-tx.js'
+import { CoinflipJointPotScript } from 'arkade-coinflip/dist/joint-pot.js'
 import type { V4CovenantParams, V4ReclaimHint } from '@/services/api'
 import type { StashedV4Forfeit, V4PotOutpoint } from './v4ForfeitStash'
 
@@ -68,19 +68,7 @@ export function rebuildJointPot(cv: V4CovenantParams): CoinflipJointPotScript {
   })
 }
 
-/**
- * Does this emulator/arkd rejection mean the pot is ALREADY SPENT — i.e. the game
- * was already refunded/settled, so our self-refund is a no-op? Used ONLY by the
- * self-refund path to fail SAFE: a restored game the server's refund timer already
- * split back must be treated as success (clear the stash), never retried into a
- * `/v1/tx` spam loop. The split-back pays the player's OWN payout script, so "spent"
- * here means our stake is already home.
- *
- * Deliberately NARROW — only spent/missing-input signals, NOT a generic error — so a
- * transient emulator/arkd hiccup keeps the stash for a retry instead of dropping a
- * still-live recovery. Distinct from the v3 `cooperativeSpend` CLTV-lock messages
- * ("locked"/"too early"), which mean "not yet" and must keep retrying.
- */
+/** A spend-conflict hint triggers an authoritative lookup; it never permits deleting recovery data. */
 export function isAlreadySpentError(msg: string): boolean {
   return /already spent|VTXO_ALREADY_SPENT|not found|VTXO_NOT_FOUND|already been spent|missing input|input not found|unknown input|spent vtxo/i.test(
     msg,
@@ -97,11 +85,10 @@ export function isAlreadySpentError(msg: string): boolean {
  * Anything else (the emulator hard-rejecting a built split) will recur every tick, so
  * it is treated as permanent and backed off — never spam `/v1/tx`.
  *
- * NOTE: the "already spent" case is handled BEFORE this — that path clears the stash
- * as success, so it never reaches the back-off counter.
+ * A missing input or ambiguous broadcast stays retryable until an authoritative spend is observed.
  */
 export function isTransientSelfRefundError(msg: string): boolean {
-  return /not reclaimable yet|locked|too early|cltv|locktime|timeout|timed out|network|failed to fetch|fetch failed|ECONN|socket|503|502|504|temporar/i.test(
+  return /waiting for the operator|not found|VTXO_NOT_FOUND|missing input|not reclaimable yet|locked|too early|cltv|locktime|timeout|timed out|network|failed to fetch|fetch failed|ECONN|socket|503|502|504|temporar/i.test(
     msg,
   )
 }

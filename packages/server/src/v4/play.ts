@@ -8,16 +8,15 @@
  */
 
 import { hex } from '@scure/base'
-import { ArkAddress, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { ArkAddress, canSpendOffchain, type NormalizedExtendedVirtualCoin } from '@arkade-os/sdk'
 import {
   CoinflipJointPotScript, commitDigit, randomUniformInt, computeRollV3,
   serializeTapLeaf, tapLeafHasKey, tapLeafXOnlyKeys, foldSubDustStake, betRails,
   type SerializedHouseInput,
 } from 'arkade-coinflip'
-import { packets } from '@arklabshq/contract-workflows-prototype'
 import { v4 as uuidv4 } from 'uuid'
-import { hashSecret, networkHrpFromArkInfo } from '../house-wallet.js'
-import { reservations, selectionMutex, outpointKey, houseVtxoCache, freeStakeTotal, HouseBusyError, BetExceedsCapacityError, spentOutpoints } from '../vtxo-pool.js'
+import { hashSecret, networkHrpFromOperatorInfo } from '../house-wallet.js'
+import { reservations, selectionMutex, outpointKey, houseVtxoCache, freeStakeTotal, HouseBusyError, BetExceedsCapacityError, spentOutpoints, isPlainHouseVtxo } from '../vtxo-pool.js'
 import { startPhaseTimer } from '../phase-timer.js'
 import { loadEmulatorConfig } from '../emulator.js'
 import { computeHouseStake } from '../house-economics.js'
@@ -28,15 +27,7 @@ import type { V4PlayRequest, V4PlayResult, V4CovenantParams, V4State } from './t
 /** The coin (no client odds) maps to n=2,target=1,lo=0 — player wins iff roll==0. */
 const COIN_ODDS = { oddsN: 2, oddsTarget: 1, oddsLo: 0 } as const
 
-/**
- * The display roll for a terminal v3/v4 game — `(digitHouse + digitPlayer) mod n`,
- * or null when a secret is missing/malformed/out-of-range (a cheat-penalty
- * decided the winner, not a fair roll). Reveals are `[digit] || salt`
- * (packets.encodeReveal), so byte 0 is the digit; the coin (no client odds)
- * maps to n=2. v2 encoded the digit in the reveal LENGTH — no roll here. This
- * mirrors the reveal-time computation in handleV4Reveal so /details can echo
- * the same value from the persisted secrets.
- */
+/** Decode the two committed digits and return their sum modulo the odds denominator. */
 export function computeGameRoll(
   houseSecretHex: string | null,
   playerSecretHex: string | null,
@@ -56,14 +47,9 @@ export function computeGameRoll(
   }
 }
 
-/**
- * Which protocol NEW games use — 'v4' (joint pot, the default) or 'v3'
- * (per-party escrow). v0.4 is the default; set PROTOCOL_VERSION=v3 to fall back
- * to the per-party-escrow flow. The client reads the result from /api/network
- * and routes to /api/v4 (or the v3 commit flow) accordingly.
- */
-export function newGameProtocolVersion(): 'v3' | 'v4' {
-  return (process.env.PROTOCOL_VERSION ?? 'v4').trim().toLowerCase() === 'v3' ? 'v3' : 'v4'
+/** Only the current joint-pot protocol is available. */
+export function newGameProtocolVersion(): 'v4' {
+  return 'v4'
 }
 
 async function getTiers(deps: AppDeps): Promise<number[]> {
@@ -81,8 +67,8 @@ export async function getMaxBetFractionBps(deps: AppDeps): Promise<number> {
   return Number.isInteger(n) && n > 0 && n <= 10000 ? n : 2500
 }
 
-const settledOrPre = (v: ExtendedVirtualCoin): boolean =>
-  v.virtualStatus.state === 'settled' || v.virtualStatus.state === 'preconfirmed'
+const settledOrPre = (v: NormalizedExtendedVirtualCoin): boolean =>
+  isPlainHouseVtxo(v) && canSpendOffchain(v, { timestamp: new Date(), height: houseVtxoCache.chainHeight })
 
 /**
  * POST /api/v4/play — reserve a house stake VTXO, derive the joint-pot covenant,
@@ -122,8 +108,8 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   let odds: { oddsN: number; oddsTarget: number; oddsLo: number } = { ...COIN_ODDS }
   if (isVariable) {
     const n = req.oddsN as number, target = req.oddsTarget as number, lo = req.oddsLo ?? 0
-    if (!Number.isInteger(n) || n < 2 || !Number.isInteger(target) || !Number.isInteger(lo) || lo < 0 || target <= lo || target > n) {
-      throw new Error(`Invalid odds: need oddsN>=2 and 0<=oddsLo<oddsTarget<=oddsN (got n=${n}, target=${target}, lo=${lo})`)
+    if (!Number.isSafeInteger(n) || n < 2 || n > 128 || !Number.isInteger(target) || !Number.isInteger(lo) || lo < 0 || target <= lo || target > n) {
+      throw new Error(`Invalid odds: need 2<=oddsN<=128 and 0<=oddsLo<oddsTarget<=oddsN (got n=${n}, target=${target}, lo=${lo})`)
     }
     const edgeBps = await timer.step('cfg:edge', () => getOddsEdgeBps(deps))
     houseStake = computeHouseStake(playerStake, n, target, lo, edgeBps)
@@ -136,7 +122,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   // House reveal — same `[digit] || salt` shape as v3 so hashSecret yields the
   // on-chain creatorHash unchanged.
   const c = commitDigit(randomUniformInt(odds.oddsN), odds.oddsN)
-  const houseSecret = packets.encodeReveal(c.digit, c.salt)
+  const houseSecret = new Uint8Array([c.digit, ...c.salt])
   const houseHash = hashSecret(houseSecret) // hex string
   const houseHashBytes = hex.decode(houseHash)
 
@@ -208,11 +194,12 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
   //   - spentOutpoints denies anything arkd rejects, so a coin spent by
   //     something we cannot observe costs one game, not every game.
   const maxBetFractionBps = await timer.step('cfg:maxBet', () => getMaxBetFractionBps(deps))
+  try {
   await timer.step('select+reserve', () => selectionMutex.runExclusive(async () => {
     // Read AFTER acquiring the lock, so a split that finished while we queued is
     // reflected instead of being selected against.
     const vtxos = await timer.step('wallet:getVtxos', () => houseVtxoCache.get(deps))
-    const choose = (vtxos: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] | null => {
+    const choose = (vtxos: NormalizedExtendedVirtualCoin[]): NormalizedExtendedVirtualCoin[] | null => {
       // `spentOutpoints` excludes coins arkd has already refused to spend. A
       // fresh getVtxos() still LISTS a coin stranded in a settle intent that
       // failed to delete, so without this the same dead coin is re-picked and
@@ -244,7 +231,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
           `(stuck funds, needs recovery). currentHouseKey=${hex.encode(housePubkey)} :: ${detail}`,
         )
       }
-      const picked: ExtendedVirtualCoin[] = []
+      const picked: NormalizedExtendedVirtualCoin[] = []
       let sum = 0
       for (const v of signable) {
         if (sum >= houseStake) break
@@ -276,6 +263,9 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     // over-stakes ≤ dust sat. MUST precede the pot/covenant build below.
     const Hsum = picked.reduce((s, v) => s + v.value, 0)
     houseStake = foldSubDustStake(houseStake, Hsum, dust)
+    if (houseStake > capacity) {
+      throw new BetExceedsCapacityError(`Bet exceeds house capacity after change folding: needs ${houseStake} sat, per-bet cap is ${capacity} sat.`)
+    }
     houseInputs = picked.map((v) => ({
       txid: v.txid, vout: v.vout, value: v.value,
       leaf: serializeTapLeaf(v.forfeitTapLeafScript), tapTree: hex.encode(v.tapTree),
@@ -297,7 +287,7 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     playerPayoutPkScript, housePayoutPkScript,
     playerStake: BigInt(playerStake), houseStake: BigInt(houseStake),
   })
-  const networkHrp = networkHrpFromArkInfo(deps.arkInfo)
+  const networkHrp = networkHrpFromOperatorInfo(deps.arkInfo)
   const potAddress = covenantScript.address(networkHrp, serverPubkey).encode()
 
   const covenant: V4CovenantParams = {
@@ -323,11 +313,10 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
       id: gameId,
       tier: req.tier,
       playerPubkey: req.playerPubkey,
-      playerChoice: 'trustless-v4',
       playerHash: req.playerHash,
       playerChangeAddress: req.playerChangeAddress,
       houseSecretHex: Buffer.from(houseSecret).toString('hex'),
-      houseVtxosJson: JSON.stringify(state),
+      stateJson: JSON.stringify(state),
     }))
   } catch (err) {
     reservations.release(gameId)
@@ -349,5 +338,10 @@ export async function handleV4Play(req: V4PlayRequest, deps: AppDeps): Promise<V
     serverPubkey: hex.encode(serverPubkey), emulatorPubkey: hex.encode(emulator.signerPubkey),
     finalExpiration, oddsN: odds.oddsN, oddsTarget: odds.oddsTarget, oddsLo: odds.oddsLo,
     covenant,
+  }
+  } catch (error) {
+    reservations.release(gameId)
+    timer.done(true)
+    throw error
   }
 }

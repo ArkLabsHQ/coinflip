@@ -1,7 +1,7 @@
 {
-  "name": "CoinFlip — Trustless Bitcoin Casino",
+  "name": "CoinFlip — Bitcoin Games and Bankroll",
   "short_name": "CoinFlip",
-  "description": "A trustless, non-custodial Bitcoin casino powered by Arkade.",
+  "description": "Bitcoin games and a community bankroll powered by Arkade.",
   "icons": [
     {
       "src": "/android-chrome-192x192.png",

@@ -1,30 +1,18 @@
-# All-in-one coinflip: ONE image serving both sides on two ports.
-#   - user  → :3000  (game UI + /api, same origin)
-#   - admin → :3002  (dashboard + admin API)
-#
-#   docker compose -f docker-compose.bundle.yml up --build
-#
-# No secrets committed here — override via the environment or a local .env
-# (gitignored). Defaults point at public mutinynet.
+# One image serves the game/API on 3000 and the admin UI on loopback 3002.
 services:
   coinflip:
-    # Pull the published image by default (works without a local checkout).
-    # Override with `COINFLIP_IMAGE_TAG=v0.3.0` to pin a specific release, or
-    # build locally with `docker compose -f docker-compose.bundle.yml build`
-    # (the build: section below is the source of truth for the published image).
     image: ghcr.io/arklabshq/coinflip-bundle:${COINFLIP_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile.bundle
     ports:
-      - "3000:3000" # USER side: game UI + /api
-      - "3002:3002" # ADMIN side: dashboard + admin API — keep this firewalled / behind an auth proxy
+      - "3000:3000"
+      - "127.0.0.1:3002:3002"
     environment:
       ARK_SERVER_URL: ${ARK_SERVER_URL:-https://mutinynet.arkade.sh}
-      # Set these to enable the trustless (arkade-script) settlement path:
-      EMULATOR_URL: ${EMULATOR_URL:-}
-      EMULATOR_PUBLIC_URL: ${EMULATOR_PUBLIC_URL:-}
-      # ESPLORA_URL: ${ESPLORA_URL:-}  # optional; SDK auto-defaults per network
+      EMULATOR_URL: ${EMULATOR_URL:-https://emulator.mutinynet.arkade.sh}
+      EMULATOR_PUBLIC_URL: ${EMULATOR_PUBLIC_URL:-https://emulator.mutinynet.arkade.sh}
+      ESPLORA_URL: ${ESPLORA_URL:-https://mempool.mutinynet.arkade.sh/api}
     volumes:
       - coinflip-data:/app/data
     restart: unless-stopped

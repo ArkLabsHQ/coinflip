@@ -1,49 +1,55 @@
 <template>
   <div class="splash-page">
-    <!-- Hero — value-prop and big tagline. Replaces the previous bare
-         "Arkade Coinflip" + Create/Restore wall. -->
     <div v-if="!mode" class="splash-hero">
       <div class="splash-badge">
         <span class="badge-dot"></span>
         <span class="badge-text">POWERED&nbsp;BY&nbsp;ARKADE</span>
       </div>
       <h1 class="splash-title">
-        The trustless<br />
-        <span class="title-accent">Bitcoin casino.</span>
+        Your wallet.<br />
+        <span class="title-accent">{{ isBankrollSetup ? 'Your pool shares.' : 'Bitcoin casino.' }}</span>
       </h1>
-      <p class="splash-tagline">
-        Non-custodial. No accounts. No KYC. Every flip is settled by Bitcoin
-        script + an Arkade-script covenant — the operator can&rsquo;t cheat you,
-        can&rsquo;t hold your funds, and can&rsquo;t stall you out.
+      <p v-if="isFundedSetup" class="splash-tagline">
+        Join the community bankroll, manage your shares, or play against the
+        pool. Your wallet holds the keys and signs each contribution or wager.
+      </p>
+      <p v-else-if="isBankrollSetup" class="splash-tagline">
+        Create or restore a wallet to watch an existing bankroll and see the
+        shares you own. You can explore the practice pool without a wallet.
+      </p>
+      <p v-else class="splash-tagline">
+        Non-custodial. No accounts. Your wallet stays in your browser. Game
+        contracts verify the result and agreed payout, with recovery paths
+        for games that stop progressing.
       </p>
 
       <ul class="splash-points">
         <li>
           <span class="point-icon">&#x26A1;</span>
           <span>
-            <strong>Lightning-fast offchain play.</strong>
-            Funds live on Ark — flips settle in seconds without touching the chain.
+            <strong>{{ isFundedSetup ? 'Share the house results.' : isBankrollSetup ? 'Watch your pool position.' : 'Lightning-fast offchain play.' }}</strong>
+            {{ isFundedSetup ? 'Pool shares participate in profits and losses. Preview contributions and redemptions before signing.' : isBankrollSetup ? 'See verified vault equity and the shares held by your wallet.' : 'Funds live on Ark — flips settle offchain without waiting for a Bitcoin block.' }}
           </span>
         </li>
         <li>
           <span class="point-icon">&#x1F512;</span>
           <span>
             <strong>You hold the keys.</strong>
-            Your wallet stays in your browser. The house never sees your secret.
+            Your wallet stays in your browser. Keep its recovery phrase backed up.
           </span>
         </li>
         <li>
           <span class="point-icon">&#x1F3B2;</span>
           <span>
-            <strong>Provably fair on-chain.</strong>
-            The win is decided by a covenant arkd & the emulator both verify — no trust required.
+            <strong>{{ isBankrollSetup ? 'Practice first.' : 'Check the result yourself.' }}</strong>
+            {{ isBankrollSetup ? 'Explore shared profits, losses and redemptions using practice sats.' : 'The contract checks the committed outcome and payout. Recovery rules cover games that do not finish.' }}
           </span>
         </li>
       </ul>
 
       <div class="splash-cta">
         <button class="btn-gold btn-lg" @click="mode = 'create'">
-          Create wallet to play
+          {{ isFundedSetup ? 'Create wallet for bankroll' : isBankrollSetup ? 'Create wallet to watch a bankroll' : 'Create wallet to play' }}
         </button>
         <button class="btn-text" @click="mode = 'restore'">
           I already have a key
@@ -51,6 +57,7 @@
       </div>
 
       <div class="splash-footer">
+        <router-link :to="isBankrollSetup ? '/bankroll?view=practice' : '/bankroll'" class="link-muted">{{ isBankrollSetup ? 'Practice without a wallet' : 'Explore bankroll pools' }}</router-link>
         <router-link to="/how-it-works" class="link-muted">How it works</router-link>
         <span class="dot">&middot;</span>
         <a href="https://github.com/ArkLabsHQ/coinflip" target="_blank" rel="noopener" class="link-muted">Open source</a>
@@ -136,7 +143,8 @@
 <script lang="ts">
 import { defineComponent, ref, computed } from 'vue'
 import { useStore } from 'vuex'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { setupDestination, setupReturnTo } from '@/router/guard'
 import { copyToClipboard } from '@/utils/clipboard'
 import {
   isCredentialBackupSupported,
@@ -149,6 +157,11 @@ export default defineComponent({
   setup() {
     const store = useStore()
     const router = useRouter()
+    const route = useRoute()
+    const returnTo = computed(() => setupReturnTo(route.query.returnTo))
+    const isBankrollSetup = computed(() => returnTo.value === '/bankroll')
+    const isFundedSetup = computed(() => isBankrollSetup.value && route.query.poolView === 'pool')
+    const destination = computed(() => setupDestination(route.query.returnTo, route.query.poolView))
     const mode = ref('')
     const privateKey = ref('')
     const error = ref('')
@@ -173,7 +186,7 @@ export default defineComponent({
     async function restoreWallet() {
       try {
         await store.dispatch('restoreWallet', privateKey.value)
-        router.push('/')
+        router.push(destination.value)
       } catch {
         error.value = 'Invalid recovery phrase or key'
       }
@@ -186,7 +199,7 @@ export default defineComponent({
     function onConfirm() {
       if (hasBackedUp.value) {
         showPrivateKey.value = false
-        router.push('/')
+        router.push(destination.value)
       }
     }
 
@@ -219,6 +232,7 @@ export default defineComponent({
 
     return {
       mode, privateKey, error,
+      isBankrollSetup, isFundedSetup,
       showPrivateKey, newPrivateKey, hasBackedUp, phraseWords,
       credentialBackupSupported, savedToBrowser,
       createWallet, restoreWallet, copyKey, onConfirm,

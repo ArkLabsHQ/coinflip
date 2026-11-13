@@ -1,102 +1,146 @@
 # CoinFlip
 
-A trustless, provably-fair Bitcoin coin-flip game built on [Arkade](https://arkadeos.com). Players flip against the house; the outcome is decided by a two-party commit–reveal scheme, and the stakes are escrowed on-chain in an **Arkade Script covenant** so neither side can cheat, withhold, or walk off with the pot.
+Bitcoin games on [Arkade](https://arkadeos.com), with two-party commit–reveal and payouts checked by compiled Arkade Script contracts. Coin, dice, slot, roulette and rocket are different presentations of the same joint-pot game.
 
-> Want the full picture? The running app has an in-app **How It Works** page (`/how-it-works`) that walks through Arkade, Arkade Script, commit–reveal, and every escrow leaf down to its opcodes.
+**Play** uses the casino's normal house bankroll. **Bankroll**, beside it at `/bankroll`, supports shared capital, issued shares, pool-backed wagers, loss carryforward, operator fees and redemptions through a separate compiled vault. Exact previews cover share issuance/burns and any additional transaction needed to return spendable wallet change. The wallet keeps pool equity separate from spendable Bitcoin. Practice and read-only capital-vault inspection remain separate tabs.
 
-## How it works
+New pool contributions and wagers are closed by default while fairness assumptions are unresolved. Commit–reveal does not protect shareholders against an operator colluding with a bettor; explicitly selecting `honest-operator` enables that trust model, not independent randomness. Existing usable shares can be redeemed and accrued fees collected without enabling new admission. There is no unilateral shareholder Bitcoin exit if the Arkade operator disappears. See [docs/BANKROLL.md](docs/BANKROLL.md) for accounting, cash release, recovery and the remaining trust limits.
 
-Each round has two participants — the **house** (the server) and the **player**. Both **commit** to `SHA256(secret)` up front, then **reveal**; the two secrets together decide the winner. Every secret is drawn from a CSPRNG, and the committed hash binds each side to its choice before anyone reveals — so neither party learns the other's secret before committing, and neither can change their mind after.
+## Game flow
 
-The secret's **byte length encodes the call**:
+1. The player and house commit to `SHA256(digit || salt)` before revealing either secret. The odds, stakes and payout scripts are fixed in the contract.
+2. Both parties sign one cofund transaction that puts their stakes into a single pot. Each signs its own inputs and checkpoints.
+3. The revealed digits determine `(houseDigit + playerDigit) mod n`. The player wins when the result is in `[lo, target)`; the compiled covenant pays the complete pot to the committed winner destination.
+4. An unrevealed pot can return the original stakes after its refund deadline. A player can instead publish a reveal into the contest contract, where the house must settle the actual result or the player can claim after the contest deadline.
 
-- **Coin (50/50):** 15 bytes = heads, 16 bytes = tails. Same length → **player wins**, different length → **house wins**.
-- **Variable odds (slot / dice / roulette / rocket):** the secret also carries a digit; the roll is `(digit_house + digit_player) mod n`, and the player wins iff it lands in the chosen band `[lo, target)`. The win rate — and, for rocket, the multiplier — is simply how wide that band is.
+The game house, Arkade operator and emulator have distinct roles. The house supplies bankroll and its committed secret. The Arkade operator cosigns collaborative transactions; the emulator checks covenant rules. Offchain recovery needs those services. Onchain exits require unrolling, waiting for CSV maturity and satisfying the chosen leaf: winner exits retain an emulator signature, while the emulator-free cooperative exit requires both player and house signatures. This is not an unconditional unilateral refund if every counterparty disappears.
 
-Because each side picks independently at random, the flip is provably fair.
+See [the protocol](docs/PROTOCOL.md) for exact paths and [the demo](DEMO.md) for local operation.
 
-### Settlement — the Arkade Script covenant
+## Source layout
 
-Funds live on **Arkade**, a programmable Bitcoin execution layer where coins are held off-chain as self-custodial VTXOs that can be locked with any valid Tapscript and unilaterally exited to the chain.
+| Path | Responsibility |
+| --- | --- |
+| `contracts/` | Normal pot/contest, community pool and capital-only contracts in `.ark` |
+| `packages/lib/` | Generated artifacts, SDK program adapters, transaction builders, shared game types and pool accounting |
+| `packages/server/` | House wallet, public game API, admin UI, SQLite state and denomination planning |
+| `src/` | Vue client, SDK wallet, swaps, LNURL, funded community pool, practice and read-only vault observation |
+| `packages/e2e/` | Package unit tests and live game/payment integration tests |
+| `spec/tla/` | Bounded funding and community-bankroll coordination models and guard mutations |
 
-Settlement is **per-party**: the house funds the house escrow and the player funds the player escrow, both into the same contract, so neither side can abort and steal the other's stake. Each escrow is a Taproot output with **eight tapscript leaves** — four **collaborative covenant** paths (win / forfeit / refund, settled by the operator together with the emulator co-signer) and four **unilateral-exit** mirrors (the same outcomes, claimable on-chain with no operator involved).
+The app uses `@arkade-os/sdk` 0.5.4, `@arkade-os/swap` 0.1.4 and `@arkade-os/lnurl-client` 0.9.2. SDK VTXO holds protect game funding from concurrent wallet sends and renewal. The application retains its denomination planner and game-liability accounting, and reconstructs unresolved holds from durable games on startup. Before broadcast, an atomic database claim records the cofund transaction identity; an ambiguous response preserves its holds and expiry protection. The client can retry that same transaction. There is no automatic worker that resolves every ambiguous submission, so capacity can remain held pending client or operator recovery.
 
-A covenant leaf is an ordinary multisig whose emulator pubkey is *tweaked* by a tagged hash of an Arkade Script. The emulator produces that tweaked signature **only after running the script** and checking the spend does exactly what the covenant says (e.g. "pay the whole pot to the winner") — so the signature itself is the proof the covenant held. The winner sweeps both stakes through their win leaf.
+Community-pool inputs use an authenticated staging covenant and recovery margins derived from the operator's time-based CSV delay. Pool renewal requires the pool operator, Arkade operator and emulator together. Bounded event replay cannot recover every interrupted signing session; missing registration or aggregate data can retain funds and holds pending operator recovery. See [BANKROLL.md](docs/BANKROLL.md) for the renewal proofs and outage limits.
 
-- **Collaborative path** — once both secrets are revealed, the operator and the emulator settle the winner immediately. Fast and cheap.
-- **Unilateral fallback** — if the operator or the counterparty disappears, the affected party still claims, forfeits, or refunds on-chain through the exit leaves. This is what makes the game non-custodial.
+## Install and build
 
-### v0.4 — the joint pot (opt-in)
+Use Node 22.12 or newer. Install once from the repository root; npm workspaces and one root lockfile cover the client, library, server and tests.
 
-v0.4 collapses the two per-party escrows into a **single joint-pot VTXO** funded by one **atomic two-party co-fund**, then settled by paying the whole pot to the winner — **two on-chain transactions** (co-fund + settle) instead of v0.3's three, with the same commit–reveal fairness and emulator covenant.
-
-- **One co-fund tx** spends both the player's and the house's stake VTXOs into one joint pot, via a 2-round signing handshake the API orchestrates (each party signs only its own input + checkpoint).
-- **One settle tx** pays the whole pot to the winner through their win-covenant leaf + the emulator, off a single player reveal.
-- The pot is an 8-leaf taptree (win / forfeit / cooperative-refund + CSV exit mirrors); win leaves use `payTo(winner, pot)` on the one VTXO instead of v0.3's two-escrow `atomicSweep`.
-
-The protocol library and house server are **complete and proven on regtest** — the full game settles end-to-end through `/api/v4/play`, `/api/v4/game/:id/cofund`, `/api/v4/game/:id/cofund-finalize`, and `/api/v4/game/:id/reveal`, and a concurrency harness runs hundreds of games (~90 ms co-fund / ~70 ms settle each). The web client is wired for it too, **strictly opt-in**: set `PROTOCOL_VERSION=v4` on the server and it advertises the joint pot via `/api/network`, and the client routes to the `/api/v4` flow; otherwise v0.3 stays the default. (Client-side stake-recovery — the cooperative-refund + unilateral-exit leaves — isn't wired yet, so only the happy path is.) The in-app **How It Works → Design evolution** has the full walk-through.
-
-## Repository layout
-
-This is a monorepo:
-
-| Path | Package | What it is |
-|------|---------|------------|
-| `packages/lib` | `arkade-coinflip` | Transport-agnostic protocol library: game state machine, commit–reveal, Arkade-Script/Taproot escrow construction, and transaction building. |
-| `packages/contract-workflows-prototype` | `@arklabshq/contract-workflows-prototype` | Incubator for the arkade-script contract primitives the escrow is built from — covenants, predicates, and the emulator handoff (tweaked-key + `EmulatorPacket` helpers). |
-| `packages/server` | `arkade-coinflip-server` | House-mode server. Public game API (`/api/play`, `/api/game/:id/commit`, `/api/game/:id/refund`, `/api/game/:id/forfeit`, `/api/tiers`, `/api/network`) + an admin dashboard. Holds the house wallet, drives the emulator covenant settlement, manages VTXO concurrency/liability, and persists state to SQLite (`better-sqlite3`, WAL). |
-| `src/` (root) | web client | Vue 3 single-page app: an Arkade wallet (`@arkade-os/sdk`), Lightning / on-chain / Arkade cash-in & cash-out via Boltz swaps (`@arkade-os/boltz-swap`), pluggable UI **skins** (coin / slot / dice / roulette / rocket — all variable-odds), and a wallet drawer. The client follows whatever network the server reports. |
-| `packages/e2e` | tests | Jest unit + integration/e2e tests (protocol units, server HTTP API, full game lifecycles, covenant settlement with forfeit/refund recovery, and Lightning rails). |
-
-## Running locally
-
-The full stack runs against a local Arkade regtest, vendored as the **`arkade-regtest`** git submodule (a Node-orchestrated Docker Compose stack — no `nigiri`/WSL dependency). Initialise submodules, bring the regtest (and its bundled arkade-script emulator) up, then start the app:
-
-```bash
-git submodule update --init --recursive
-node arkade-regtest/regtest.mjs start   # local Arkade regtest + emulator
-docker compose up --build               # server + client join the regtest network
+```sh
+npm ci --include=dev
+npm run build
 ```
 
-- client → http://localhost:8080
-- admin dashboard → http://localhost:3002
+The frontend build first builds the library and server, including the server types used by the retained live fixtures. Use `npm run build:server` for a server-only build.
 
-`docker-compose.yml` already wires the server to the regtest's emulator (`EMULATOR_URL`), so trustless play works out of the box locally. Tear the regtest down with `node arkade-regtest/regtest.mjs clean`.
+This rewrite assumes a fresh installation. The new SQLite schema and compiled contract addresses are not a migration path for existing databases, funded games or browser recovery records. Use a new `DATA_DIR` and keep any old installation available until its funds and games are resolved.
 
-To work on just the web client against an existing API:
+The client uses Vite. For development, run the API on port 3001 and the client in a second terminal:
 
-```bash
-npm install
-npm run serve   # http://localhost:8080
+```sh
+npm run start -w arkade-coinflip-server
+npm run serve
 ```
 
-### All-in-one bundle
+The client runs at `http://localhost:8080`; Vite proxies `/api` to `http://localhost:3001`. The house and player wallets need funds before normal play.
 
-`Dockerfile.bundle` / `docker-compose.bundle.yml` build a single image that serves the built client **and** the public API on one port, with the admin dashboard on another — no separate client container:
+## Local regtest
 
-```bash
-docker compose -f docker-compose.bundle.yml up --build
-# user (client + /api) → http://localhost:3000
-# admin dashboard      → http://localhost:3002
+Docker is required. The wrapper checks out a pinned `ArkLabsHQ/arkade-regtest` revision under ignored `.research/regtest`; it does not use or change the older `arkade-regtest/` submodule.
+
+```sh
+npm run regtest -- start --profile ark --profile emulator
+
+docker compose up --build
 ```
+
+The container client is at `http://localhost:8080`; the admin UI is at `http://localhost:3002`. The admin port is bound to host loopback by default. `docker-compose.yml` joins the regtest network; `REGTEST_NETWORK` can override its name.
+
+`.env.regtest` pins the test operator/emulator and uses consistent time-based locktimes. Its zero-fee operator is for exact-payout integration fixtures, not production fee behavior. `REGTEST_ENV` selects an alternative env file, including separate project names and ports for isolated stacks.
+
+Lightning integration needs a solver and its Lightning/relay dependencies:
+
+```sh
+npm run regtest -- start --profile intent-solver
+node scripts/regtest-relay.mjs
+```
+
+The relay helper recreates only that test project's solver in Nostr relay mode, preserving its funded wallet volume. The stack's default HTTP `serve` mode does not listen for Nostr RFQs. The browser uses the swap package's solver discovery; a running local solver is not automatically a public discovery entry, so local payment tests supply its live signed card. LNURL receiving additionally requires a compatible LNURL service.
+
+Stop containers while preserving data with `npm run regtest -- stop`. `npm run regtest -- clean` removes that test project's volumes.
+
+## Contract artifacts
+
+The checked-in JSON files are compiler output, loaded with the SDK's `programFromArtifact`. The generation script pins compiler commit `5ff97f8f04a77163e21426db59259a80e3ae400a`. Rust and Git are needed only to regenerate or check the artifacts:
+
+```sh
+npm run contracts:build
+npm run contracts:check
+```
+
+Change `.ark` sources, regenerate their artifacts, and review the resulting programs together. Hand editing artifact JSON is not supported. The source bundle in each artifact preserves its imported `.ark` files.
+
+## Validation
+
+```sh
+npm run lint
+npm run test:unit
+npm run test:packages:unit
+npm run build:server
+npm run build
+npm run contracts:check
+```
+
+Package integration tests require the services above. Clock-sensitive recovery tests must run on their own fresh regtest stack because advancing Bitcoin median time cannot be undone by resetting mocktime. CI discovers every retained integration file and gives it a separate stack; the cooperative onchain exit runs with `EXIT_PROBE=1`.
+
+CI also discovers every `src/**/*.live.spec.ts` frontend integration and runs each on its own fresh stack with unhandled errors treated as failures. For one local frontend file after starting regtest and building the server:
+
+```sh
+npm run test:live -- --run src/services/fundedPoolRuntime.live.spec.ts
+```
+
+`REGTEST_ENV`, `ARK_SERVER_URL`, `ESPLORA_URL` and `EMULATOR_URL` select a local stack. The funded runtime test checks the Compose project and regtest network before creating isolated test wallets and data.
+
+Local pinned-regtest validation on 2026-11-12 passed canonical-pool renewal, wallet-input renewal, the funded HTTP lifecycle and the strict frontend-runtime lifecycle. Both renewal paths resumed with a recreated wallet after persisted aggregate-nonce state, preserving shares and verifying a new commitment with longer expiry. These are tested recovery points, not public-readiness or indefinite-outage guarantees.
+
+Only the cooperative-exit job uses a 180-block tree and five-block operator exit delays, allowing actual unroll maturity to be mined within the test. It separately advances chain time to prove the pot's 86,528-second CSV. The exact isolated settings are in `.github/workflows/e2e.yml`.
 
 ## Configuration
 
-The network is the **server's** choice (set once via env), and the client asks the server for it via `/api/network` — there is no client-side network switch.
+| Variable | Purpose |
+| --- | --- |
+| `ARK_SERVER_URL` | Operator URL; defaults to Mutinynet |
+| `ARK_SERVER_PUBLIC_URL` | Operator URL advertised to the browser when the server uses an internal hostname |
+| `ESPLORA_URL` | Optional onchain provider override |
+| `ESPLORA_PUBLIC_URL` | Browser-reachable onchain provider URL when the backend URL is internal |
+| `EMULATOR_URL` | Emulator reached by the server; required to create games |
+| `EMULATOR_PUBLIC_URL` | Emulator URL reached by the browser; defaults to `EMULATOR_URL` |
+| `PUBLIC_PORT` | Public API port, default 3001 |
+| `ADMIN_PORT` / `ADMIN_HOST` | Admin listener, default `127.0.0.1:3002` |
+| `DATA_DIR` | Fresh SQLite/wallet data directory |
+| `CLIENT_DIR` | Built client directory served by the API, used by the bundle image |
+| `VUE_APP_API_URL` | Optional client API origin at build time |
+| `VUE_APP_LNURL_SERVER_URL` | Optional client LNURL service at build time |
+| `VUE_APP_EMULATOR_PUBKEY` | Trusted emulator signing-key override at build time; otherwise the SDK's network pin is used |
+| `VUE_APP_COOPERATIVE_EXIT_ENABLED` | Enables the client cooperative exit integration; requires both parties' signatures |
 
-Key server env vars:
+The bundled image serves the client and API on port 3000:
 
-| Var | Default | Notes |
-|-----|---------|-------|
-| `ARK_SERVER_URL` | `https://mutinynet.arkade.sh` | Arkade server to connect to. The detected network (regtest / mutinynet / …) flows from here. |
-| `ESPLORA_URL` | *(unset → SDK auto-default)* | Optional. Leave unset to let the SDK pick the network's default esplora; set it for regtest/docker where the host differs. |
-| `EMULATOR_URL` | *(unset)* | The arkade-script emulator the server uses to co-sign covenant settlements. Required for trustless play — without it `/api/play` returns an error. |
-| `EMULATOR_PUBLIC_URL` | *(= `EMULATOR_URL`)* | Emulator URL advertised to the browser via `/api/network` (set this when the server reaches the emulator under a different host than the browser does). |
-| `PUBLIC_PORT` | `3001` | Player-facing game API — also serves the client when `CLIENT_DIR` is set. |
-| `ADMIN_PORT` | `3002` | Admin dashboard + config API. |
-| `ADMIN_HOST` | `127.0.0.1` | Set `0.0.0.0` to expose the admin port behind a reverse proxy. |
-| `CLIENT_DIR` | *(unset)* | Point at a built client to have the server serve it on `PUBLIC_PORT` (used by the all-in-one bundle). |
-| `DATA_DIR` | `./data` | Where the SQLite DB (house wallet + games) lives. |
+```sh
+docker compose -f docker-compose.bundle.yml up --build
+```
+
+The image includes both modes. Pool setup and its explicit fairness policy remain separate admin actions; deployment alone does not open community admission.
 
 ## License
 

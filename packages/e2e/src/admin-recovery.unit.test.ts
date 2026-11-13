@@ -46,7 +46,7 @@ function makeDeps() {
         txid: 'ab'.repeat(32),
         vout: 0,
         value: 500_000,
-        virtualStatus: { state: 'settled', batchExpiry: '2026-07-30T00:00:00Z' },
+        isSpent: false, isSwept: false, isUnrolled: false, isPreconfirmed: false, spentBy: '', commitmentTxIds: [], script: '5120', expiresAt: ('2026-07-30T00:00:00Z') === undefined ? undefined : new Date('2026-07-30T00:00:00Z'),
       },
     ],
     // Mutating counterparts — must never be invoked by a diagnostic.
@@ -107,7 +107,7 @@ describe('admin GET /api/recovery', () => {
     expect(res.body.expiringSoon[0]).toMatchObject({
       vout: 0,
       value: 500_000,
-      batchExpiry: '2026-07-30T00:00:00Z',
+      batchExpiry: new Date('2026-07-30T00:00:00Z').getTime(),
     })
   })
 

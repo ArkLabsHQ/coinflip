@@ -1,13 +1,7 @@
-/**
- * Unit tests for the cwp `packets` module: encodeReveal + addRevealPacket
- * round-trip via the SDK's Extension parser.
- */
-
-/* eslint-disable @typescript-eslint/no-require-imports */
 const {
   packets: { encodeReveal, addRevealPacket, REVEAL_PLAYER_PACKET_TYPE, REVEAL_CREATOR_PACKET_TYPE, MIN_SALT_LEN },
-} = require('@arklabshq/contract-workflows-prototype')
-const { Extension, Transaction } = require('@arkade-os/sdk')
+} = require('arkade-coinflip')
+const { Extension, P2A, Transaction } = require('@arkade-os/sdk')
 
 function emptyTx(): InstanceType<typeof Transaction> {
   return new Transaction()
@@ -83,8 +77,6 @@ describe('addRevealPacket', () => {
     const c = ext!.getPacketByType(REVEAL_CREATOR_PACKET_TYPE)
     expect(p).not.toBeNull()
     expect(c).not.toBeNull()
-    // SDK's UnknownPacket exposes `data` and `serialize()` — both should
-    // return our payload bytes verbatim.
     expect(Array.from((p as { data: Uint8Array }).data)).toEqual(Array.from(playerData))
     expect(Array.from((c as { data: Uint8Array }).data)).toEqual(Array.from(creatorData))
     expect(Array.from((p as { serialize(): Uint8Array }).serialize())).toEqual(Array.from(playerData))
@@ -104,4 +96,24 @@ describe('addRevealPacket', () => {
     }
     expect(extCount).toBe(1)
   })
+
+  it('rejects a duplicate reveal packet type rather than silently replacing a commitment', () => {
+    const tx = emptyTx()
+    addRevealPacket(tx, REVEAL_PLAYER_PACKET_TYPE, encodeReveal(1, new Uint8Array(16).fill(1)))
+    expect(() => addRevealPacket(tx, REVEAL_PLAYER_PACKET_TYPE, encodeReveal(2, new Uint8Array(16).fill(2))))
+      .toThrow(/Duplicate extension packet/)
+  })
+
+  it('keeps the fee anchor last when adding reveal packets', () => {
+    const tx = emptyTx()
+    tx.addOutput({ script: P2A.script, amount: 330n })
+    addRevealPacket(tx, REVEAL_PLAYER_PACKET_TYPE, encodeReveal(1, new Uint8Array(16).fill(1)))
+    addRevealPacket(tx, REVEAL_CREATOR_PACKET_TYPE, encodeReveal(2, new Uint8Array(16).fill(2)))
+    expect(tx.outputsLength).toBe(2)
+    expect(Extension.isExtension(tx.getOutput(0).script)).toBe(true)
+    expect(tx.getOutput(1).script).toEqual(P2A.script)
+    expect(tx.getOutput(1).amount).toBe(330n)
+  })
 })
+
+export {}

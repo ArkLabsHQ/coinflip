@@ -12,7 +12,7 @@ import { base64, hex } from '@scure/base'
 import { Transaction, decodeTapscript, CSVMultisigTapscript } from '@arkade-os/sdk'
 import {
   determineWinnerV3, computeRollV3, buildJointPotSettleTx,
-  buildCooperativeSpendExitTx, encodeSettleForEmulator,
+  buildCooperativeSpendExitTx, prepareSettleForEmulator,
 } from 'arkade-coinflip'
 import { hashSecret } from '../house-wallet.js'
 import { reservations } from '../vtxo-pool.js'
@@ -86,7 +86,7 @@ export async function handleV4CooperativeExit(
 ): Promise<V4CooperativeExitResult> {
   const game = await deps.repos.games.get(gameId)
   if (!game) throw new Error('Game not found')
-  const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
+  const state = JSON.parse(game.state_json || '{}') as V4State
   if (state.protocolVersion !== 'v4' || !state.cofundTxid) {
     throw new Error('Not a co-funded v4 game — nothing to cooperatively exit')
   }
@@ -135,7 +135,7 @@ export async function handleV4Reveal(gameId: string, req: V4RevealRequest, deps:
 async function handleV4RevealInner(gameId: string, req: V4RevealRequest, deps: AppDeps, timer: PhaseTimer): Promise<V4RevealResult> {
   const game = await timer.step('db:get', () => deps.repos.games.get(gameId))
   if (!game) throw new Error('Game not found')
-  const state = JSON.parse(game.house_vtxos_json || '{}') as V4State
+  const state = JSON.parse(game.state_json || '{}') as V4State
   if (state.protocolVersion !== 'v4') throw new Error('Not a v4 game')
   if (!state.cofundTxid) throw new Error('Pot not co-funded yet (finalize the co-fund first)')
   if (game.status === 'resolved') throw new Error('Game already resolved')
@@ -163,7 +163,7 @@ async function handleV4RevealInner(gameId: string, req: V4RevealRequest, deps: A
 
   const cfg = await loadEmulatorConfig()
   if (!cfg) throw new Error('Emulator not configured')
-  const body = JSON.stringify(encodeSettleForEmulator(settle))
+  const body = JSON.stringify(await prepareSettleForEmulator(settle, deps.wallet.indexerProvider, deps.wallet.onchainProvider))
   // The emulator forwards the finalized settle to arkd, so each POST is an arkd
   // submit — serialize it (backoff outside the lock), retry transient lag.
   const postOnce = async (): Promise<{ ok: true; txid: string } | { ok: false; status: number; text: string }> => {
@@ -187,6 +187,7 @@ async function handleV4RevealInner(gameId: string, req: V4RevealRequest, deps: A
     winner,
     payoutAmount: state.pot,
     playerSecretHex: req.playerSecretHex,
+    stateJson: JSON.stringify({ ...state, settleTxid }),
   }))
   timer.done()
 

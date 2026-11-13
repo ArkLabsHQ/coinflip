@@ -5,8 +5,9 @@
  * Send-via-Lightning-Address feel instant in the WalletDrawer.
  */
 
-import { describe, it, expect } from 'vitest'
-import { detectLnurlInput } from './lnurl'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import { bech32, hex } from '@scure/base'
+import { detectLnurlInput, resolveLnurlToInvoice } from './lnurl'
 
 describe('detectLnurlInput', () => {
   it('returns null for empty / whitespace input', () => {
@@ -76,5 +77,49 @@ describe('detectLnurlInput', () => {
 
   it('rejects an Ark address (which contains @-less data)', () => {
     expect(detectLnurlInput('tark1q1234567890abcdef')).toBeNull()
+  })
+})
+
+/** Structurally valid BOLT11 fixture: decoder validation, not a payable invoice. */
+function invoice(amount: number): string {
+  const words = [0, 0, 0, 0, 0, 0, 0]
+  const description = bech32.toWords(new TextEncoder().encode('test'))
+  words.push(13, description.length >> 5, description.length & 31, ...description)
+  words.push(1, 1, 20, ...bech32.toWords(hex.decode('11'.repeat(32))))
+  words.push(...Array(104).fill(0))
+  return bech32.encode(`lnbc${amount * 10}n`, words, 2000)
+}
+
+describe('LNURL payment boundary through the real client', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function endpoint(amount: number) {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const callback = String(url).includes('/callback')
+      return new Response(JSON.stringify(callback ? { pr: invoice(amount), routes: [] } : {
+        tag: 'payRequest', callback: 'https://example.com/callback',
+        minSendable: 1000, maxSendable: 10_000_000, metadata: '[["text/plain","test"]]',
+      }), { headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetch)
+    return fetch
+  }
+
+  it('asks for exact millisats and returns an invoice bound to that amount', async () => {
+    const fetch = endpoint(1000)
+    const result = await resolveLnurlToInvoice({ kind: 'lnaddr', raw: 'user@example.com' }, 1000)
+    expect(result.invoice).toBe(invoice(1000))
+    expect(String(fetch.mock.calls[1][0])).toContain('amount=1000000')
+  })
+
+  it('refuses a recipient invoice for a different amount', async () => {
+    endpoint(2000)
+    await expect(resolveLnurlToInvoice({ kind: 'lnaddr', raw: 'user@example.com' }, 1000)).rejects.toThrow(/requested/i)
+  })
+
+  it('rejects fractional sats before contacting the recipient', async () => {
+    const fetch = endpoint(1000)
+    await expect(resolveLnurlToInvoice({ kind: 'lnaddr', raw: 'user@example.com' }, 1.5)).rejects.toThrow('whole number')
+    expect(fetch).not.toHaveBeenCalled()
   })
 })

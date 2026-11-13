@@ -35,6 +35,7 @@ function mount(rows: any[]) {
     arkInfo: { network: 'regtest' },
     repos: {
       games: {
+        get: async (id: string) => rows.find((row) => row.id === id),
         listForPlayer: async (pk: string, opts: any = {}) => {
           calls.push({ pk, opts })
           return rows
@@ -54,18 +55,18 @@ const V4_PENDING = (pk: string) => ({
   player_hash: 'hh', house_secret_hex: 'HOUSE_SECRET', player_secret_hex: null,
   winner: null, rake_amount: 0, payout_amount: null, status: 'pending',
   created_at: '2026-01-02T00:00:00Z', resolved_at: null,
-  house_vtxos_json: JSON.stringify({
+  state_json: JSON.stringify({
     protocolVersion: 'v4', pot: 2000, cofundTxid: 'COFUND_TXID',
     covenant: { finalExpiration: 1893456000, playerStake: 1000, houseStake: 1000 },
   }),
 })
 
-const V3_RESOLVED = (pk: string) => ({
-  id: 'v3r', tier: 1000, player_pubkey: pk, player_choice: 'trustless',
+const V4_RESOLVED = (pk: string) => ({
+  id: 'v4r', tier: 1000, player_pubkey: pk, player_choice: 'trustless',
   player_hash: 'hh', house_secret_hex: 'HOUSE_SECRET', player_secret_hex: 'PLAYER_SECRET',
   winner: 'player', rake_amount: 20, payout_amount: 1980, status: 'resolved',
   created_at: '2026-01-01T00:00:00Z', resolved_at: '2026-01-01T01:00:00Z',
-  house_vtxos_json: JSON.stringify({ contractVersion: 'v3', finalExpiration: 1893456000 }),
+  state_json: JSON.stringify({ protocolVersion: 'v4', finalExpiration: 1893456000 }),
 })
 
 describe('GET /api/games/challenge', () => {
@@ -101,9 +102,9 @@ describe('GET /api/games', () => {
     expect((await request(app).get('/api/games').query({ nonce: 'x', sig: 'y' })).status).toBe(400)
   })
 
-  it('returns summaries + a v4 reclaim hint on a valid signed request; v3 is history-only', async () => {
+  it('returns summaries + a v4 reclaim hint on a valid signed request; resolved games are history-only', async () => {
     const { sk, xonly } = keypair(0x21)
-    const { app } = mount([V4_PENDING(xonly), V3_RESOLVED(xonly)])
+    const { app } = mount([V4_PENDING(xonly), V4_RESOLVED(xonly)])
 
     const ch = await request(app).get('/api/games/challenge').query({ playerPubkey: xonly })
     const nonce = ch.body.nonce
@@ -113,11 +114,11 @@ describe('GET /api/games', () => {
     expect(res.status).toBe(200)
     // Two summaries, both protocol-versioned.
     const byId = Object.fromEntries(res.body.games.map((g: any) => [g.gameId, g]))
-    expect(Object.keys(byId).sort()).toEqual(['v3r', 'v4p'])
+    expect(Object.keys(byId).sort()).toEqual(['v4p', 'v4r'])
     expect(byId.v4p.protocolVersion).toBe('v4')
-    expect(byId.v3r.protocolVersion).toBe('v3')
-    expect(byId.v3r.winner).toBe('player')
-    expect(byId.v3r.payoutAmount).toBe(1980)
+    expect(byId.v4r.protocolVersion).toBe('v4')
+    expect(byId.v4r.winner).toBe('player')
+    expect(byId.v4r.payoutAmount).toBe(1980)
 
     // Summaries NEVER carry preimages.
     const blob = JSON.stringify(res.body.games)
@@ -158,3 +159,52 @@ describe('GET /api/games', () => {
 })
 
 export {}
+
+
+describe('latest game details', () => {
+  const covenant = {
+    creatorHash: 'house-commitment', playerHash: 'player-commitment',
+    oddsN: 6, oddsLo: 1, oddsTarget: 3, playerStake: 1000, houseStake: 1800,
+    emulatorPubkey: 'emulator', exitDelay: 86400, finalExpiration: 1900000000,
+  }
+  const state = {
+    protocolVersion: 'v4', covenant, pot: 2800, houseStake: 1800,
+    setupExpiration: 1899999000, cofundTxid: 'funded-pot',
+    settleTxid: 'settled-pot', refundTxid: 'refunded-pot',
+  }
+  const row = (pk: string) => ({
+    ...V4_PENDING(pk), status: 'resolved', winner: 'player', payout_amount: 2800,
+    house_secret_hex: Buffer.from([3, ...new Uint8Array(32).fill(1)]).toString('hex'),
+    player_secret_hex: Buffer.from([4, ...new Uint8Array(32).fill(2)]).toString('hex'),
+    state_json: JSON.stringify(state),
+  })
+
+  it('returns current terms, funded pot, actual stakes, roll and settlement ids', async () => {
+    const { xonly } = keypair(0x51)
+    const game = row(xonly)
+    const { app } = mount([game])
+    const response = await request(app).get('/api/game/v4p/details').query({ playerPubkey: xonly })
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      contractVersion: 'v4', covenant,
+      houseHash: covenant.creatorHash, playerStake: 1000, houseStake: 1800,
+      oddsN: 6, oddsLo: 1, oddsTarget: 3, roll: 1,
+      potOutpoint: { txid: 'funded-pot', vout: 0, value: 2800 },
+      settleTxid: 'settled-pot', refundTxid: 'refunded-pot',
+      houseSecret: game.house_secret_hex, playerSecret: game.player_secret_hex,
+    })
+    expect(response.body.houseEscrow).toBeUndefined()
+    expect(response.body.playerEscrow).toBeUndefined()
+  })
+
+  it('hides reveals and roll while pending and refuses a different player', async () => {
+    const { xonly } = keypair(0x52)
+    const { app } = mount([{ ...row(xonly), status: 'pending' }])
+    const response = await request(app).get('/api/game/v4p/details').query({ playerPubkey: xonly })
+    expect(response.status).toBe(200)
+    expect(response.body.houseSecret).toBeNull()
+    expect(response.body.playerSecret).toBeNull()
+    expect(response.body.roll).toBeNull()
+    expect((await request(app).get('/api/game/v4p/details').query({ playerPubkey: keypair(0x53).xonly })).status).toBe(404)
+  })
+})

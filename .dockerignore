@@ -7,3 +7,10 @@ arkade-regtest
 screenshots
 docs
 *.md
+
+.research
+.attachments
+.claude
+.dev-*
+.env*
+*.log

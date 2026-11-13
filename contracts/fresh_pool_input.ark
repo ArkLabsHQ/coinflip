@@ -1,0 +1,74 @@
+pragma arkade ^0.1.0;
+
+contract FreshPoolInput(bytes32 controlTxid, int controlGidx, bytes32 shareTxid, int shareGidx, int recoveryMargin) {
+  private function ownerPayout(pubkey owner, int inputIndex, int validUntil) ScriptPubKey {
+    require(controlGidx >= 0 && controlGidx <= 65535 && shareGidx >= 0 && shareGidx <= 65535, "asset indices");
+    require(controlTxid != shareTxid || controlGidx != shareGidx, "distinct assets");
+    require(recoveryMargin >= 2400 && recoveryMargin <= 33553920, "recovery margin");
+    bytes recorded = tx.inputs[inputIndex].packet(42);
+    bytes payout = tx.inputs[inputIndex].packet(43);
+    require(size(recorded) == 32 && recorded == owner, "recorded owner");
+    require(size(payout) == 33 && substr(payout, 0, 1) == 0x01, "recorded payout");
+    require(validUntil >= 500000000 && validUntil <= 4294967295 && !checkTime(validUntil), "authorization deadline");
+    require(checkTime(validUntil - 86400), "authorization horizon");
+    require(!tx.packet.has(42) && !tx.packet.has(43), "no staged metadata");
+    ScriptPubKey result = { version: 1, program: substr(payout, 1, 32) };
+    return result;
+  }
+
+  @allow(unsigned-spend-path, "the authenticated owner signs the complete witness-masked transaction and authorization bounds")
+  @allow(output-script-unchecked, "the unchecked tail outputs carry zero value and every output is covered by the owner signature")
+  function authorize(pubkey owner, signature ownerSig, int validUntil, int minTTL) {
+    require(this.activeInputIndex == 1 && tx.numInputs == 2 && tx.numOutputs == 4, "paired pool funding");
+    let payout = ownerPayout(owner, 1, validUntil);
+    require(payout != tx.inputs[0].script && payout != tx.inputs[1].script, "owner payout differs");
+    require(tx.inputs[0].assets.length == 1 && tx.inputs[0].assets.lookup(controlTxid, controlGidx) == 1, "canonical pool control");
+    let control = tx.assetGroups.find(controlTxid, controlGidx);
+    require(!control.isFresh && !control.hasControl && control.numInputs == 1 && control.sumInputs == 1, "existing pool control");
+    require(control.inputs[0].type == 1 && control.inputs[0].index == 0, "local pool input");
+    require(this.expiry >= 500000000 && this.expiry <= 4294967295, "timestamp expiry");
+    int minimumTTL = recoveryMargin + 3600;
+    if (minimumTTL < 6000) { minimumTTL = 6000; }
+    require(minTTL >= minimumTTL && minTTL <= 33557520 && !checkTime(this.expiry - minTTL), "fresh member input");
+    if (tx.packet.has(35)) {
+      bytes phase = tx.packet(35);
+      require(size(phase) == 1 && (phase == 0x00 || phase == 0x01), "pool transition phase");
+      require(control.numOutputs == 1 && control.sumOutputs == 1 && control.outputs[0].index == 0, "pool continuation");
+      if (phase == 0x01) {
+        bytes deadlines = tx.packet(40);
+        require(size(deadlines) == 10, "game deadlines");
+        int finalAt = bin2num(substr(deadlines, 5, 5));
+      require(finalAt >= 500000000 && finalAt <= 4294967295 - recoveryMargin && this.expiry >= finalAt + recoveryMargin, "game recovery lifetime");
+      }
+    } else {
+      require(control.numOutputs == 0 && control.sumOutputs == 0, "retired control");
+      require(!tx.packet.has(32) && !tx.packet.has(33) && !tx.packet.has(34), "retired accounting");
+      require(!tx.packet.has(36) && !tx.packet.has(37) && !tx.packet.has(38) && !tx.packet.has(39) && !tx.packet.has(40), "retired game");
+    }
+    require(tx.outputs[2].value == 0 && tx.outputs[3].value == 0, "zero-value tail");
+    bytes32 message = sha256(cat("coinflip/fresh-input/authorize/v1", cat(sighash(1), cat(num2bin(validUntil, 5), num2bin(minTTL, 4)))));
+    require(checkSigFromStack(ownerSig, owner, message), "owner authorization");
+  }
+
+  @allow(unsigned-spend-path, "the authenticated owner signs the complete witness-masked refund transaction and deadline")
+  @allow(output-script-unchecked, "the unchecked tail outputs carry zero value")
+  function refund(pubkey owner, signature ownerSig, int validUntil) {
+    require(this.activeInputIndex == 0 && tx.numInputs == 1 && tx.numOutputs == 3, "single staged refund");
+    let payout = ownerPayout(owner, 0, validUntil);
+    require(tx.outputs[0].script == payout && tx.outputs[0].value == tx.inputs[0].value, "complete owner refund");
+    require(tx.inputs[0].value >= 330 && tx.outputs[1].value == 0 && tx.outputs[2].value == 0, "refund carrier and tail");
+    if (!tx.inputs[0].packet.has(0)) {
+      require(!tx.packet.has(0), "plain refund");
+    } else {
+      require(tx.inputs[0].assets.length == 1 && tx.outputs[0].assets.length == 1 && tx.assetGroups.length == 1, "share refund shape");
+      int held = tx.inputs[0].assets.lookup(shareTxid, shareGidx);
+      require(held > 0 && held <= 1000000000000 && tx.outputs[0].assets.lookup(shareTxid, shareGidx) == held, "all staged shares");
+      let shares = tx.assetGroups.find(shareTxid, shareGidx);
+      require(!shares.isFresh && !shares.hasControl && shares.numInputs == 1 && shares.numOutputs == 1, "existing share transfer");
+      require(shares.sumInputs == held && shares.sumOutputs == held, "share conservation");
+      require(shares.inputs[0].type == 1 && shares.inputs[0].index == 0 && shares.outputs[0].index == 0, "refund asset destination");
+    }
+    bytes32 message = sha256(cat("coinflip/fresh-input/refund/v1", cat(sighash(1), num2bin(validUntil, 5))));
+    require(checkSigFromStack(ownerSig, owner, message), "owner refund authorization");
+  }
+}

@@ -1,3 +1,5 @@
+import { signCheckpointsByOutpoint } from './test-helpers/checkpoint-signers'
+import { createTestWallet } from './helpers'
 /**
  * v4 SCALE HARNESS — many clients, hundreds of games, per-phase timing.
  *
@@ -12,14 +14,14 @@ import { base64, hex } from '@scure/base'
 import { createHash } from 'crypto'
 import {
   CoinflipJointPotScript, determineWinnerV3,
-  buildJointPotCofundTx, buildJointPotSettleTx, jointPotCofundOutputs, encodeSettleForEmulator,
+  buildJointPotCofundTx, buildJointPotSettleTx, jointPotCofundOutputs, prepareSettleForEmulator,
 } from 'arkade-coinflip'
 import {
-  Wallet, SingleKey, RestArkProvider, RestIndexerProvider, InMemoryWalletRepository,
+  Wallet, SingleKey, RestOperatorProvider, RestIndexerProvider, InMemoryWalletRepository,
   InMemoryContractRepository, decodeTapscript, buildOffchainTx, CSVMultisigTapscript,
-  Transaction, ArkAddress, type ArkInfo, type ArkProvider, type ArkTxInput, type Identity,
+  Transaction, ArkAddress, type OperatorInfo, type OperatorProvider, type ArkTxInput, type Identity,
 } from '@arkade-os/sdk'
-import { packets } from '@arklabshq/contract-workflows-prototype'
+import { packets } from 'arkade-coinflip'
 import { faucet, waitVtxos } from './helpers'
 
 const ARK = process.env.ARK_SERVER_URL || 'http://localhost:7070'
@@ -59,27 +61,27 @@ jest.retryTimes(2, { logErrorsBeforeRetry: true })
 
 describe('v4 scale: many concurrent joint-pot games', () => {
   let ok = false
-  let ark: ArkProvider
+  let ark: OperatorProvider
   let indexer: RestIndexerProvider
-  let info: ArkInfo
+  let info: OperatorInfo
   let unroll: CSVMultisigTapscript.Type
   let emuPub: Uint8Array
   let serverPub: Uint8Array
 
   beforeAll(async () => {
     try {
-      ark = new RestArkProvider(ARK); indexer = new RestIndexerProvider(ARK)
+      ark = new RestOperatorProvider(ARK); indexer = new RestIndexerProvider(ARK)
       info = await ark.getInfo()
       unroll = decodeTapscript(hex.decode(info.checkpointTapscript)) as CSVMultisigTapscript.Type
-      emuPub = hex.decode((await (await fetch(`${EMU}/v1/info`)).json() as { signerPubkey: string }).signerPubkey)
+      emuPub = toXOnly(hex.decode((await (await fetch(`${EMU}/v1/info`)).json() as { signerPubkey: string }).signerPubkey))
       serverPub = toXOnly(hex.decode(info.signerPubkey))
       ok = !!info?.signerPubkey
     } catch { ok = false }
+    if (!ok) throw new Error('Required regtest services are unavailable')
   }, 25_000)
 
   async function makeWallet(id: SingleKey): Promise<Wallet> {
-    return Wallet.create({
-      identity: id, arkServerUrl: ARK, esploraUrl: ESPLORA,
+    return createTestWallet(id, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -107,14 +109,13 @@ describe('v4 scale: many concurrent joint-pot games', () => {
     let s = arkTx
     for (const sg of signers) s = await sg.id.sign(s, [sg.vin])
     const { arkTxid, signedCheckpointTxs } = await ark.submitTx(base64.encode(s.toPSBT()), checkpoints.map((c) => base64.encode(c.toPSBT())))
-    const finals: string[] = []
-    for (let i = 0; i < signedCheckpointTxs.length; i++) {
-      const tx = Transaction.fromPSBT(base64.decode(signedCheckpointTxs[i]))
-      const owner = signers.find((sg) => sg.vin === i)?.id ?? signers[0].id
-      let f = tx
-      try { f = await owner.sign(tx, Array.from({ length: tx.inputsLength }, (_, k) => k)) } catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
-      finals.push(base64.encode(f.toPSBT()))
-    }
+    const finals = await signCheckpointsByOutpoint(signedCheckpointTxs,
+      checkpoints.map((checkpoint, vin) => {
+        const identity = signers.find((signer) => signer.vin === vin)?.id
+        if (!identity) throw new Error(`Missing checkpoint owner for input ${vin}`)
+        return { checkpoint, identity }
+      }),
+    )
     await ark.finalizeTx(arkTxid, finals)
     return arkTxid
   }
@@ -191,7 +192,7 @@ describe('v4 scale: many concurrent joint-pot games', () => {
       winner, winnerPayoutPkScript: winPk, potAmount: BigInt(2 * BET),
       playerRevealBytes: pReveal, creatorRevealBytes: cReveal, serverUnroll: unroll,
     })
-    const body = JSON.stringify(encodeSettleForEmulator(settle))
+    const body = JSON.stringify(await prepareSettleForEmulator(settle, new RestIndexerProvider(ARK)))
     // The emulator forwards the settle to arkd, so each POST is an arkd submit —
     // serialize it under the same lock (backoff happens outside the lock).
     const postOnce = async (): Promise<{ ok: true; txid: string } | { ok: false; status: number; text: string }> => {
@@ -212,7 +213,7 @@ describe('v4 scale: many concurrent joint-pot games', () => {
   }
 
   it(`runs ${TOTAL} games (${WALLETS} clients × ${GAMES_PER_WALLET}, conc ${CONC}) and reports per-phase timing`, async () => {
-    if (!ok) { console.warn('ark/emu unavailable — skipped'); return }
+    if (!ok) throw new Error('Required regtest services are unavailable')
     // Provision with retry headroom: a fraction of co-funds hit a transient
     // INVALID_SIGNATURE that consumes the input, so a game may burn >1 stake VTXO.
     const HEADROOM = 1.7

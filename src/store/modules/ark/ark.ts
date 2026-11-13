@@ -16,16 +16,8 @@ import { rearmV4ReclaimHints } from './v4Recovery'
 // wrapper actions below delegate there with the live ActionContext.
 import * as walletRuntime from './walletRuntime'
 import type {
-  StashedRefund, ArkServerInfo, ArkVTXO, BoardingUtxo, ClaimMode, ClaimingInfo, ArkState,
+  ArkServerInfo, ArkVTXO, BoardingUtxo, ClaimMode, ClaimingInfo, ArkState,
 } from './arkTypes'
-
-// Stash backend moved to IndexedDB via @/utils/stashStore. The shape and
-// reducer semantics are unchanged from the prior localStorage version;
-// these thin re-exports keep the call-site names familiar.
-import {
-  loadStashes as loadRefunds,
-  saveStashes as saveAllRefunds,
-} from '@/utils/stashStore'
 
 const getCachedServerInfo = (): ArkServerInfo | null => {
   const cached = localStorage.getItem('ark_server_info')
@@ -157,7 +149,13 @@ const ark: Module<ArkState, RootState> = {
      * silently no-ops in a production build.
      * (First-class SDK reset API requested upstream: arkade-os/ts-sdk#522.)
      */
-    async purgeLocalData() {
+    async purgeLocalData({ commit }) {
+      await walletRuntime.disconnect()
+      commit('SET_STATUS', 'disconnected')
+      commit('SET_WALLET_BALANCE', null)
+      commit('SET_BALANCE_SYNCED', false)
+      commit('SET_ARK_ADDRESS', null)
+      commit('SET_BOARDING_ADDRESS', null)
       localStorage.removeItem('ark_last_sync_ctx')
       localStorage.removeItem('ark_server_info')
       // The SDK's default IndexedDB store name (no `storage` is passed to
@@ -184,25 +182,10 @@ const ark: Module<ArkState, RootState> = {
       }
     },
 
-    /**
-     * Wipe ALL local stalled-bet stashes — v3 refunds/forfeits + v4 joint-pot
-     * forfeits — from the `coinflip-stashes` IndexedDB (separate from the SDK's
-     * store that purgeLocalData clears). Used by the deliberate "Clear wallet"
-     * (wallet/clearWallet), NOT by resyncWallet: a resync keeps the key, so its
-     * recovery stashes must survive. clearWallet also drops the wallet key that
-     * the reclaim path needs to sign, so these stashes are orphaned regardless —
-     * leaving them only strands dead "Reclaim stalled bets" rows (which otherwise
-     * survive the clear AND a page reload, since they reload from this DB).
-     */
+    /** Deliberate wallet removal also discards its local recovery records. */
     async purgeStashes() {
-      // Best-effort per store: clear BOTH stash stores even if one rejects, and
-      // never throw — clearWallet must not be blocked from dropping the wallet key
-      // by a single stash-store write failing. Log a rejection so a persistent
-      // failure stays visible.
-      const results = await Promise.allSettled([saveAllRefunds([]), saveV4Forfeits([])])
-      for (const r of results) {
-        if (r.status === 'rejected') console.warn('[purgeStashes] a stash store failed to clear:', r.reason)
-      }
+      try { await saveV4Forfeits([]) }
+      catch (error) { console.warn('[purgeStashes] recovery records could not be cleared:', error) }
     },
 
     /**
@@ -238,7 +221,7 @@ const ark: Module<ArkState, RootState> = {
     },
 
     /** Play one v0.4 joint-pot game end-to-end — impl in walletRuntime.ts. */
-    playV4Game(ctx, payload: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number; emulatorUrl?: string }) {
+    playV4Game(ctx, payload: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number; oddsEdgeBps?: number; emulatorUrl?: string }) {
       return walletRuntime.playV4Game(ctx, payload)
     },
 
@@ -249,7 +232,7 @@ const ark: Module<ArkState, RootState> = {
      */
     async placeTrustlessBet(
       { dispatch, commit },
-      payload: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number },
+      payload: { tier: number; side?: 'heads' | 'tails'; oddsN?: number; oddsTarget?: number; oddsLo?: number; oddsEdgeBps?: number },
     ) {
       // The stage is cleared HERE rather than inside playV4Game so that any
       // throw — a rejected bet, a stalled leg, a timeout — leaves no stale
@@ -262,25 +245,7 @@ const ark: Module<ArkState, RootState> = {
       }
     },
 
-    /** Locally-stashed stalled bets (escrows reclaimable if the server stalled). */
-    async listStalledBets(): Promise<StashedRefund[]> {
-      // Hide stashes < 90 s old: a fresh stash exists from /play through /commit
-      // (~1-2 s on the happy path) as the trustless backstop. Before this
-      // filter, between updateRefundStash({revealed:true}) and clearRefund()
-      // the StalledBets card flashed up as a "claim full pot" prompt for the
-      // duration of the /commit round-trip. 90 s comfortably covers worst-
-      // case /commit + arkd settlement on mutinynet without delaying the
-      // recovery UI for genuinely stalled games (finalExpiration is 30 min).
-      const RECENT_GRACE_MS = 90_000
-      const cutoff = Date.now() - RECENT_GRACE_MS
-      return (await loadRefunds()).filter((b) => b.createdAt <= cutoff)
-    },
-
-    /**
-     * v0.4 joint-pot forfeits eligible for the recovery UI. Same 90 s grace as
-     * listStalledBets — on the happy path the stash exists only briefly (≈100 ms
-     * between co-fund and settle), so anything older is a genuine stall.
-     */
+    /** Stalled joint-pot games, after a short grace for normal settlement. */
     async listV4StalledBets(): Promise<StashedV4Forfeit[]> {
       const cutoff = Date.now() - 90_000
       return (await loadV4Forfeits()).filter((b) => b.createdAt <= cutoff)
@@ -293,16 +258,6 @@ const ark: Module<ArkState, RootState> = {
      */
     async getChainTipTime(): Promise<number | null> {
       return walletRuntime.chainTipTime()
-    },
-
-    /** Reclaim a stalled bet's stashed refund — impl in walletRuntime.ts. */
-    reclaimStalledBet(ctx, payload: string | { gameId: string; mode?: ClaimMode }) {
-      return walletRuntime.reclaimStalledBet(ctx, payload)
-    },
-
-    /** Submit the stashed arkade-script forfeit claim — impl in walletRuntime.ts. */
-    claimForfeit(ctx, payload: string | { gameId: string; mode?: ClaimMode }) {
-      return walletRuntime.claimForfeit(ctx, payload)
     },
 
     /** v0.4 joint-pot recovery (staged forfeit / self-refund) — impl in walletRuntime.ts. */
@@ -410,10 +365,8 @@ const ark: Module<ArkState, RootState> = {
 
 // Re-export the previously-public types + guard so external import paths
 // (`@/store/modules/ark/ark`) keep resolving unchanged after the split.
-export type { StashedRefund, ArkServerInfo, ArkVTXO, BoardingUtxo, ClaimMode, ClaimingInfo }
+export type { ArkServerInfo, ArkVTXO, BoardingUtxo, ClaimMode, ClaimingInfo }
 export type { ClaimKind } from './arkTypes'
-export type { ForfeitClaimable } from './arkHelpers'
-export { hasStashedForfeit } from './arkHelpers'
 // The SDK-wallet accessor + network presets moved to walletRuntime.ts with the
 // connect flow that owns them; re-exported so this module's surface is unchanged.
 export { getSDKWallet, NETWORK_PRESETS } from './walletRuntime'

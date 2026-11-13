@@ -1,73 +1,102 @@
-/**
- * v4 CoinflipJointPotScript — pure unit test (no regtest).
- * Proves the joint-pot taptree derives deterministically and all 8 leaves
- * resolve. The live settle is exercised by the regtest probe separately.
- */
-import { CoinflipJointPotScript } from 'arkade-coinflip'
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { schnorr } = require('@noble/curves/secp256k1.js')
+import { arkade, decodeTapscript, scriptFromTapLeafScript } from '@arkade-os/sdk'
+import { Script } from '@scure/btc-signer'
+import { CoinflipJointPotScript, type CoinflipJointPotOptions } from 'arkade-coinflip'
+import { contractOptions, toHex } from './test-helpers/coinflip-fixture'
 
-const xonly = (seed: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(seed))
-const h = (seed: number): Uint8Array => new Uint8Array(32).fill(seed)
-// p2tr scriptPubKey: OP_1 (0x51) <32-byte push (0x20)> <key>
-const p2tr = (seed: number): Uint8Array => new Uint8Array([0x51, 0x20, ...new Uint8Array(32).fill(seed)])
+describe('compiled game spending paths', () => {
+  const options = contractOptions()
+  const pot = new CoinflipJointPotScript(options)
+  const fn = (name: string) => pot.functionByName(name)!
+  const decoded = (name: string) => decodeTapscript(fn(name).leafScript)
+  const emulatorKey = (name: string) => arkade.computeArkadeScriptPublicKey(options.emulatorPubkey, fn(name).arkadeScript!)
 
-function build(): CoinflipJointPotScript {
-  return new CoinflipJointPotScript({
-    creatorPubkey: xonly(1), playerPubkey: xonly(2), serverPubkey: xonly(3),
-    creatorHash: h(0xaa), playerHash: h(0xbb),
-    finalExpiration: 1_900_000_000n, cancelDelay: 1_800_000_000n, exitDelay: 86_528n,
-    oddsN: 2, oddsTarget: 1, oddsLo: 0,
-    emulatorPubkey: xonly(4),
-    playerPayoutPkScript: p2tr(0x10), housePayoutPkScript: p2tr(0x20),
-    playerStake: 1000n, houseStake: 1000n,
-  })
-}
-
-describe('CoinflipJointPotScript', () => {
-  it('derives a deterministic 34-byte p2tr pkScript', () => {
-    const a = build()
-    const b = build()
-    expect(a.pkScript.length).toBe(34)
-    expect(a.pkScript[0]).toBe(0x51) // OP_1
-    expect(a.pkScript[1]).toBe(0x20) // 32-byte push
-    expect(Buffer.from(a.pkScript).toString('hex')).toBe(Buffer.from(b.pkScript).toString('hex'))
+  it.each(['playerWin', 'creatorWin'])('%s requires the operator and the covenant-bound emulator', name => {
+    expect(decoded(name).type).toBe('multisig')
+    expect(decoded(name).params.pubkeys.map(toHex)).toEqual([toHex(options.serverPubkey), toHex(emulatorKey(name))])
   })
 
-  it('exposes all 8 leaves via findLeaf', () => {
-    const s = build()
+  it.each([
+    ['playerWinExit', 'playerWin', 'playerPubkey'],
+    ['creatorWinExit', 'creatorWin', 'creatorPubkey'],
+  ])('%s preserves its winner covenant after the CSV delay', (exit, winner, owner) => {
+    const leaf = decoded(exit)
+    expect(leaf.type).toBe('csv-multisig')
+    expect(leaf.params.timelock).toEqual({ type: 'seconds', value: options.exitDelay })
+    expect(leaf.params.pubkeys.map(toHex)).toEqual([
+      toHex(options[owner as 'playerPubkey' | 'creatorPubkey']), toHex(emulatorKey(winner)),
+    ])
+    expect(toHex(fn(exit).arkadeScript!)).toBe(toHex(fn(winner).arkadeScript!))
+  })
+
+  it('requires the player reveal preimage and player signature to enter the contest', () => {
+    const leaf = decoded('playerReveal')
+    expect(leaf.type).toBe('condition-multisig')
+    expect(Script.decode(leaf.params.conditionScript)).toEqual(['SHA256', options.playerHash, 'EQUAL'])
+    expect(leaf.params.pubkeys.map(toHex)).toEqual([
+      toHex(options.playerPubkey), toHex(options.serverPubkey), toHex(emulatorKey('playerReveal')),
+    ])
+  })
+
+  it('gates the split-back by its committed CLTV and split covenant', () => {
+    const leaf = decoded('cooperativeSpend')
+    expect(leaf.type).toBe('cltv-multisig')
+    expect(leaf.params.absoluteTimelock).toBe(options.cancelDelay)
+    expect(leaf.params.pubkeys.map(toHex)).toEqual([toHex(options.serverPubkey), toHex(emulatorKey('cooperativeSpend'))])
+  })
+
+  it('keeps the forfeit hashlock, player signature and covenant after unroll', () => {
+    const leaf = decoded('playerForfeitExit')
+    expect(leaf.type).toBe('condition-csv-multisig')
+    expect(leaf.params.timelock).toEqual({ type: 'seconds', value: options.exitDelay })
+    expect(Script.decode(leaf.params.conditionScript)).toEqual(['SHA256', options.playerHash, 'EQUAL'])
+    expect(leaf.params.pubkeys.map(toHex)).toEqual([toHex(options.playerPubkey), toHex(emulatorKey('playerForfeitExit'))])
+  })
+
+  it('requires both funders for the emulator-independent cooperative exit', () => {
+    const leaf = decoded('cooperativeSpendExit')
+    expect(leaf.type).toBe('csv-multisig')
+    expect(leaf.params.timelock).toEqual({ type: 'seconds', value: options.exitDelay })
+    expect(leaf.params.pubkeys.map(toHex)).toEqual([toHex(options.playerPubkey), toHex(options.creatorPubkey)])
+    expect(fn('cooperativeSpendExit').arkadeScript).toBeUndefined()
+  })
+
+  it('gates the contest timeout with the player, operator, emulator and final CLTV', () => {
+    const take = pot.stageTwo.functionByName('playerTakeAll')!
+    const leaf = decodeTapscript(take.leafScript)
+    expect(leaf.type).toBe('cltv-multisig')
+    expect(leaf.params.absoluteTimelock).toBe(options.finalExpiration)
+    expect(leaf.params.pubkeys.map(toHex)).toEqual([
+      toHex(options.playerPubkey), toHex(options.serverPubkey),
+      toHex(arkade.computeArkadeScriptPublicKey(options.emulatorPubkey, take.arkadeScript!)),
+    ])
+  })
+
+  it('separates raw script hex from SDK leaf-version transport bytes', () => {
     const leaves = [
-      s.playerWinCovenant(), s.creatorWinCovenant(), s.playerReveal(), s.cooperativeSpend(),
-      s.playerWinExit(), s.creatorWinExit(), s.playerForfeitExit(), s.cooperativeSpendExit(),
-    ]
-    for (const leaf of leaves) expect(leaf).toBeDefined()
-    // All 8 leaf script-hexes are distinct.
-    const hexes = [
-      s.playerWinCovenantScriptHex, s.creatorWinCovenantScriptHex, s.playerRevealScriptHex,
-      s.cooperativeSpendScriptHex, s.playerWinExitScriptHex, s.creatorWinExitScriptHex,
-      s.playerForfeitExitScriptHex, s.cooperativeSpendExitScriptHex,
-    ]
-    expect(new Set(hexes).size).toBe(8)
+      [pot.playerWinCovenant(), pot.playerWinCovenantScriptHex],
+      [pot.playerReveal(), pot.playerRevealScriptHex],
+      [pot.cooperativeSpendExit(), pot.cooperativeSpendExitScriptHex],
+      [pot.stageTwo.playerTakeAll(), pot.stageTwo.playerTakeAllScriptHex],
+    ] as const
+    for (const [leaf, rawHex] of leaves) {
+      expect(toHex(scriptFromTapLeafScript(leaf))).toBe(rawHex)
+      expect(leaf[1][leaf[1].length - 1]).toBe(0xc0)
+    }
   })
+})
 
-  it('player vs creator win covenants differ (predicate negation + payout)', () => {
-    const s = build()
-    expect(s.playerWinCovenantScriptHex).not.toBe(s.creatorWinCovenantScriptHex)
-    expect(Buffer.from(s.playerWinFullArkadeScript).toString('hex'))
-      .not.toBe(Buffer.from(s.creatorWinFullArkadeScript).toString('hex'))
-  })
-
-  it('changing odds changes the pot pkScript (predicate is bound into the tapkey)', () => {
-    const base = build()
-    const other = new CoinflipJointPotScript({
-      creatorPubkey: xonly(1), playerPubkey: xonly(2), serverPubkey: xonly(3),
-      creatorHash: h(0xaa), playerHash: h(0xbb),
-      finalExpiration: 1_900_000_000n, cancelDelay: 1_800_000_000n, exitDelay: 86_528n,
-      oddsN: 6, oddsTarget: 3, oddsLo: 0, // different odds
-      emulatorPubkey: xonly(4),
-      playerPayoutPkScript: p2tr(0x10), housePayoutPkScript: p2tr(0x20),
-      playerStake: 1000n, houseStake: 1000n,
-    })
-    expect(Buffer.from(base.pkScript).toString('hex')).not.toBe(Buffer.from(other.pkScript).toString('hex'))
+describe('compiled game constructor validation', () => {
+  const invalid: [string, Partial<CoinflipJointPotOptions>][] = [
+    ['unsupported odds', { oddsN: 129 }], ['fractional odds', { oddsN: 2.5 }],
+    ['empty interval', { oddsLo: 1, oddsTarget: 1 }], ['negative interval', { oddsLo: -1 }],
+    ['oversized interval', { oddsTarget: 3 }], ['dust stake', { playerStake: 329n }],
+    ['negative stake', { houseStake: -1n }], ['pot overflow', { houseStake: 2_100_000_000_000_000n }],
+    ['key length', { playerPubkey: new Uint8Array(33) }], ['hash length', { creatorHash: new Uint8Array(31) }],
+    ['payout script', { playerPayoutPkScript: new Uint8Array([0, 20, ...new Uint8Array(20)]) }],
+    ['refund order', { cancelDelay: 1_900_000_000n }], ['block timestamp', { finalExpiration: 499_999_999n }],
+    ['CSV units', { exitDelay: 86_400n }], ['CSV zero', { exitDelay: 0n }],
+  ]
+  it.each(invalid)('rejects %s before an address can be funded', (_label, change) => {
+    expect(() => new CoinflipJointPotScript(contractOptions(change))).toThrow()
   })
 })

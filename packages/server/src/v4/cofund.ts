@@ -8,7 +8,7 @@
  */
 
 import { base64, hex } from '@scure/base'
-import { ArkAddress, Transaction } from '@arkade-os/sdk'
+import { ArkAddress, Transaction, VtxoScript, isArkError, maybeArkError, assertAllowedSighashTypes, assertSubmittedArkTxid, matchServerCheckpoints } from '@arkade-os/sdk'
 import { splitCheckpointsByOutpoint } from 'arkade-coinflip'
 import { leafPubkeys } from '../checkpoint-diagnostics.js'
 import { timeoutReject, ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
@@ -18,6 +18,12 @@ import { loadV4Game, toXOnly } from './shared.js'
 import { startPhaseTimer } from '../phase-timer.js'
 import { reservations, spentOutpoints, houseVtxoCache } from '../vtxo-pool.js'
 import type { V4CofundRequest, V4CofundResult, V4CofundFinalizeRequest, V4CofundFinalizeResult } from './types.js'
+
+// arkd v0.9.25 rejects these before accepting/caching the transaction.
+const PRE_ACCEPT_REJECTIONS = new Set([
+  'INVALID_ARK_PSBT', 'INVALID_CHECKPOINT_PSBT', 'INVALID_PSBT_MISSING_INPUT',
+  'INVALID_PSBT_INPUT', 'INVALID_VTXO_SCRIPT', 'INVALID_SIGNATURE', 'ARK_TX_MISMATCH',
+])
 
 /**
  * POST /api/v4/game/:id/cofund — the client has signed the co-fund arkTx's
@@ -36,10 +42,14 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
 
   const m = state.houseInputs.length
   const arkTx = Transaction.fromPSBT(base64.decode(req.arkTx))
+  assertAllowedSighashTypes(arkTx)
   const total = arkTx.inputsLength
   const k = total - m // player inputs occupy the leading k vins, house the trailing m
   if (k < 1) throw new Error(`Co-fund must include at least one player input (got ${total} inputs for ${m} house inputs)`)
   if (req.checkpoints.length !== total) throw new Error(`Co-fund must have ${total} checkpoints (got ${req.checkpoints.length})`)
+
+  const localCheckpoints = req.checkpoints.map((checkpoint) => Transaction.fromPSBT(base64.decode(checkpoint)))
+  for (const checkpoint of localCheckpoints) assertAllowedSighashTypes(checkpoint)
 
   // Guard 0: each of the trailing m house checkpoints must spend EXACTLY the
   // reserved house outpoint, in order. The arkTx's trailing vins reference these
@@ -49,12 +59,19 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   // persisted state, not the tx, so without this a client could place other
   // inputs at the trailing positions and have the house blindly sign them.
   for (let i = 0; i < m; i++) {
-    const cp = Transaction.fromPSBT(base64.decode(req.checkpoints[k + i]))
+    const cp = localCheckpoints[k + i]
     const cpIn = cp.getInput(0)
     const expected = state.houseInputs[i]
     const cpTxid = cpIn?.txid ? hex.encode(cpIn.txid) : ''
     if (cp.inputsLength !== 1 || cpTxid !== expected.txid || cpIn?.index !== expected.vout) {
       throw new Error(`Co-fund house checkpoint ${k + i} does not spend the reserved house input ${expected.txid}:${expected.vout}`)
+    }
+    if (cpIn.witnessUtxo?.amount !== BigInt(expected.value)) {
+      throw new Error(`Co-fund house checkpoint ${k + i} witness value does not match the reserved input`)
+    }
+    if (expected.tapTree && (!cpIn.witnessUtxo?.script ||
+      hex.encode(cpIn.witnessUtxo.script) !== hex.encode(VtxoScript.decode(hex.decode(expected.tapTree)).pkScript))) {
+      throw new Error(`Co-fund house checkpoint ${k + i} witness script does not match the reserved input`)
     }
   }
 
@@ -64,11 +81,7 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   if (!potOut || potOut.amount !== BigInt(state.pot) || !potOut.script || hex.encode(potOut.script) !== hex.encode(potPkScript)) {
     throw new Error('Co-fund output 0 does not match the agreed pot (amount or script mismatch)')
   }
-  // Guard 2: the house contributes EXACTLY houseStake (no more). Its reserved
-  // inputs sum to Hsum and its change returns to housePayoutPkScript, so
-  // Hsum − houseChange must equal houseStake (±dust, since sub-dust change is
-  // dropped). Protects the house from a client-crafted co-fund that overdraws it.
-  const dust = Number(deps.arkInfo.dust ?? 546n)
+  // Subdust was folded before covenant creation, so the committed contribution is exact.
   const Hsum = state.houseInputs.reduce((s, h) => s + h.value, 0)
   let houseChange = 0
   for (let o = 1; o < arkTx.outputsLength; o++) {
@@ -76,8 +89,8 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
     if (out?.script && hex.encode(out.script) === state.covenant.housePayoutPkScript) houseChange += Number(out.amount)
   }
   const houseContribution = Hsum - houseChange
-  if (houseContribution < state.houseStake || houseContribution > state.houseStake + dust) {
-    throw new Error(`Co-fund house contribution ${houseContribution} outside [${state.houseStake}, ${state.houseStake + dust}] — refusing to sign`)
+  if (houseContribution !== state.houseStake) {
+    throw new Error(`Co-fund house contribution ${houseContribution} does not match the committed stake ${state.houseStake} — refusing to sign`)
   }
 
   // Sign the house input vins (trailing m), submit (serialized), sign the house
@@ -85,16 +98,33 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   const houseVins = Array.from({ length: m }, (_, i) => k + i)
   const timer = startPhaseTimer('v4/cofund', gameId)
   const signed = await timer.step('sign:houseVins', () => deps.identity.sign(arkTx, houseVins))
+  const firstAttempt = !state.cofundSubmission
+  const submission = { txid: signed.id, startedAt: Date.now() }
+  if (state.cofundSubmission && state.cofundSubmission.txid !== submission.txid) {
+    throw new Error('A different co-fund submission is already in progress')
+  }
+  const claimed = await deps.repos.games.beginCofundSubmission(gameId, submission)
+  if (!claimed) throw new Error('Game is not pending or another co-fund submission already exists')
+  state.cofundSubmission = submission
   let arkTxid: string
   let signedCheckpointTxs: string[]
   try {
-    ;({ arkTxid, signedCheckpointTxs } = await timer.step('arkd:submitTx', () => withArkSubmit(() =>
+    const response = await timer.step('arkd:submitTx', () => withArkSubmit(() =>
       timeoutReject(
         deps.wallet.arkProvider.submitTx(base64.encode(signed.toPSBT()), req.checkpoints),
         ARK_SUBMIT_TIMEOUT_MS, 'arkd submitTx',
       ),
-    )))
+    ))
+    assertSubmittedArkTxid(response, signed, 'coinflip co-fund')
+    arkTxid = response.arkTxid
+    signedCheckpointTxs = response.signedCheckpointTxs
+    matchServerCheckpoints(signedCheckpointTxs, localCheckpoints, 'coinflip co-fund')
   } catch (e) {
+    const rejection = isArkError(e) ? e : maybeArkError(e)
+    if (firstAttempt && rejection && PRE_ACCEPT_REJECTIONS.has(rejection.name)) {
+      await deps.repos.games.rejectCofundSubmission(gameId, submission.txid)
+    }
+    // A timeout or a retry may follow successful broadcast; retain those intents and holds.
     // arkd refused a house input as already spent. That is not the player's
     // fault and, left alone, it REPEATS: a fresh getVtxos() still lists a coin
     // stranded in a settle intent that failed to delete, so the next /play picks
@@ -139,6 +169,7 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
     // is a real bug (arkd or a mis-selected coin), so let it throw here rather than
     // surface as an opaque INVALID_SIGNATURE at finalize.
     const cp = Transaction.fromPSBT(base64.decode(b64))
+    assertAllowedSighashTypes(cp)
     const cpSigned = await deps.identity.sign(cp, Array.from({ length: cp.inputsLength }, (_, j) => j))
     houseSignedCheckpoints.push(base64.encode(cpSigned.toPSBT()))
   }
@@ -146,7 +177,7 @@ async function handleV4CofundInner(gameId: string, req: V4CofundRequest, deps: A
   state.cofundArkTxid = arkTxid
   state.houseSignedCheckpoints = houseSignedCheckpoints
   state.playerInputCount = k
-  await timer.step('db:update', () => deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) }))
+  await timer.step('db:update', () => deps.repos.games.update(gameId, { stateJson: JSON.stringify(state) }))
 
   // The co-fund has SPENT these house inputs. Drop them from the snapshot so no
   // later selection can re-pick them — the one event that mutates the house coin
@@ -228,7 +259,7 @@ export async function handleV4CofundFinalize(gameId: string, req: V4CofundFinali
     throw e
   }
   state.cofundTxid = state.cofundArkTxid
-  await ftimer.step('db:update', () => deps.repos.games.update(gameId, { houseVtxosJson: JSON.stringify(state) }))
+  await ftimer.step('db:update', () => deps.repos.games.update(gameId, { stateJson: JSON.stringify(state) }))
   ftimer.done()
 
   return { cofundTxid: state.cofundArkTxid, potOutpoint: { txid: state.cofundArkTxid, vout: 0, value: state.pot } }

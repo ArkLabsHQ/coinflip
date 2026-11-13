@@ -1,3 +1,4 @@
+import { createTestWallet } from './helpers'
 /**
  * v4 server /play e2e — boots the server deps against arkade-regtest, funds the
  * house, and exercises handleV4Play (Phase 3, endpoint 1).
@@ -19,9 +20,9 @@ import {
   SingleKey, Wallet, InMemoryWalletRepository, InMemoryContractRepository,
   decodeTapscript, CSVMultisigTapscript, RestIndexerProvider, Transaction, ArkAddress, buildOffchainTx, type ArkTxInput,
 } from '@arkade-os/sdk'
-import { CoinflipJointPotScript, buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx, determineWinnerV3 } from 'arkade-coinflip'
+import { prepareSettleForEmulator, CoinflipJointPotScript, buildCofundFromPlay, buildPlayerRevealTx, buildStageTwoTakeAllTx, determineWinnerV3 } from 'arkade-coinflip'
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { packets } = require('@arklabshq/contract-workflows-prototype')
+const { packets } = require('arkade-coinflip')
 import { faucet, settleWithRetry, setChainTime, resetChainTime } from './helpers'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -72,13 +73,10 @@ async function waitForSettled(w: Wallet, min: number, t = 90_000): Promise<void>
 let arkAvailable = false
 beforeAll(async () => {
   try { arkAvailable = (await fetch(`${ARK_SERVER_URL}/v1/info`, { signal: AbortSignal.timeout(5000) })).ok } catch { arkAvailable = false }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 }, 10_000)
 
-// Spending freshly-built PRECONFIRMED VTXOs in the co-fund hits a known ~13%
-// transient arkd race (characterized in v4-scale.test.ts; the scale harness
-// handles it with retry-fresh-inputs). Each test here uses fresh identities, so
-// a bounded retry — a fully fresh attempt — clears the transient. This is the
-// real arkd behaviour, not a logic flake: every test passes in isolation.
+// Retry with fresh identities when a local service has a transient indexing delay.
 jest.retryTimes(2, { logErrorsBeforeRetry: true })
 
 describe('v4 server: handleV4Play', () => {
@@ -90,7 +88,7 @@ describe('v4 server: handleV4Play', () => {
   let app: express.Express
 
   beforeAll(async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'coinflip-v4-test-'))
     process.env.DATA_DIR = dataDir
     process.env.ARK_SERVER_URL = ARK_SERVER_URL
@@ -124,12 +122,11 @@ describe('v4 server: handleV4Play', () => {
   })
 
   it('reserves a house VTXO + returns covenant params the client re-derives to the same pot address', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     // Player identity + addresses (no funding needed for /play).
     const playerId = SingleKey.fromRandomBytes()
-    const playerW = await Wallet.create({
-      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const playerW = await createTestWallet(playerId, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -182,10 +179,9 @@ describe('v4 server: handleV4Play', () => {
   }, 120_000)
 
   it('POST /api/v4/play via the route layer (express wiring + validation)', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const playerId = SingleKey.fromRandomBytes()
-    const playerW = await Wallet.create({
-      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const playerW = await createTestWallet(playerId, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -209,12 +205,11 @@ describe('v4 server: handleV4Play', () => {
   }, 60_000)
 
   it('co-funds via the 2-round handshake, then reveal settles the pot to the winner', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     // Fund a player (provides the player stake input).
     const playerId = SingleKey.fromRandomBytes()
-    const playerW = await Wallet.create({
-      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const playerW = await createTestWallet(playerId, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -307,12 +302,11 @@ describe('v4 server: handleV4Play', () => {
   }, 300_000)
 
   it('co-funds from MULTIPLE player inputs (no single VTXO ≥ tier) → settles', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     // Fund a player, then split into sub-tier pieces so the co-fund MUST use 2+.
     const playerId = SingleKey.fromRandomBytes()
-    const playerW = await Wallet.create({
-      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const playerW = await createTestWallet(playerId, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -394,14 +388,13 @@ describe('v4 server: handleV4Play', () => {
   }, 300_000)
 
   it('plays a FULL game over the real /api/v4 HTTP routes (play→cofund→finalize→reveal)', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     // This drives the exact HTTP calls the client's api.ts wrappers make — the
     // closest play-test to the browser flow without the Vue layer (the signing
     // uses the same SDK identity as the client).
     const playerId = SingleKey.fromRandomBytes()
-    const playerW = await Wallet.create({
-      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const playerW = await createTestWallet(playerId, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -457,12 +450,11 @@ describe('v4 server: handleV4Play', () => {
   }, 240_000)
 
   it('house RECLAIMS its stake via the covenant-only refund when the player never reveals', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     // Co-fund a pot exactly like the happy path — but the player never reveals.
     const playerId = SingleKey.fromRandomBytes()
-    const playerW = await Wallet.create({
-      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const playerW = await createTestWallet(playerId, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -549,11 +541,10 @@ describe('v4 server: handleV4Play', () => {
   }, 300_000)
 
   it('player RECOVERS the whole pot via the staged-forfeit contest when the server never settles', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     const playerId = SingleKey.fromRandomBytes()
-    const playerW = await Wallet.create({
-      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const playerW = await createTestWallet(playerId, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -623,7 +614,7 @@ describe('v4 server: handleV4Play', () => {
         catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
         return base64.encode(s.toPSBT())
       }))
-      const body = JSON.stringify({ arkTx: base64.encode(arkTxSigned.toPSBT()), checkpointTxs: cps })
+      const body = JSON.stringify(await prepareSettleForEmulator({ arkTx: arkTxSigned, checkpoints: cps.map((checkpoint) => Transaction.fromPSBT(base64.decode(checkpoint))) }, playerW.indexerProvider, playerW.onchainProvider))
       for (let a = 0; a < 12; a++) {
         const r = await fetch(`${EMULATOR_URL}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(30_000) })
         if (r.ok) return Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id
@@ -675,11 +666,10 @@ describe('v4 server: handleV4Play', () => {
   }, 300_000)
 
   it('server stage-2 poll settles a CONTESTED game to the winner (player revealed on-chain, NO /reveal)', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     const playerId = SingleKey.fromRandomBytes()
-    const playerW = await Wallet.create({
-      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const playerW = await createTestWallet(playerId, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })
@@ -740,7 +730,7 @@ describe('v4 server: handleV4Play', () => {
         catch (e) { if (!String(e).includes('No taproot scripts signed')) throw e }
         return base64.encode(x.toPSBT())
       }))
-      const body = JSON.stringify({ arkTx: base64.encode(s.toPSBT()), checkpointTxs: cps })
+      const body = JSON.stringify(await prepareSettleForEmulator({ arkTx: s, checkpoints: cps.map((checkpoint) => Transaction.fromPSBT(base64.decode(checkpoint))) }, playerW.indexerProvider, playerW.onchainProvider))
       for (let a = 0; a < 12; a++) {
         const r = await fetch(`${EMULATOR_URL}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(30_000) })
         if (r.ok) return Transaction.fromPSBT(base64.decode((await r.json() as { signedArkTx: string }).signedArkTx)).id
@@ -791,13 +781,12 @@ describe('v4 server: handleV4Play', () => {
   }, 300_000)
 
   it('accepts an off-tier bet amount and rejects one above the rail maximum', async () => {
-    if (!arkAvailable) { console.warn('ark unavailable — skipped'); return }
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     // Player identity + addresses (no funding needed for /play — same as the
     // covenant-params test above).
     const playerId = SingleKey.fromRandomBytes()
-    const playerW = await Wallet.create({
-      identity: playerId, arkServerUrl: ARK_SERVER_URL, esploraUrl: ESPLORA_URL,
+    const playerW = await createTestWallet(playerId, {
       storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
       settlementConfig: false,
     })

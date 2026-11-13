@@ -5,16 +5,20 @@ import {
   hasBoardingTxExpired,
   isSubdust,
   isVtxoExpiringSoon,
-  isExpired,
-  isSpendable,
+  canRecoverOnchain,
+  isVtxoSpent,
+  isVirtualCoin,
+  VtxoReservedError,
+  SettlementEventType,
   type ExtendedCoin,
-  type ExtendedVirtualCoin,
+  type NormalizedExtendedVirtualCoin,
   type SettleParams,
 } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { makeSettlementHandler } from './settlement-events.js'
 import {
   reservations,
+  HouseBusyError,
   houseVtxoCache,
   selectionMutex,
   outpointKey,
@@ -22,45 +26,12 @@ import {
 import { timeoutReject, ARK_SYNC_TIMEOUT_MS, ARK_SUBMIT_TIMEOUT_MS } from './async-timeout.js'
 import type { AppDeps } from './deps.js'
 import { makeLogDedup } from './log-dedup.js'
+import { HOUSE_RENEWAL_INTERVAL_MS, houseRenewalBufferForWalletMs, rememberCompletedHouseBatchLifetime, VTXO_LIFETIME_BUFFER_MS } from './house-renewal-policy.js'
+export { RENEWAL_EXPIRY_BUFFER_MS, VTXO_LIFETIME_BUFFER_MS } from './house-renewal-policy.js'
 
-/**
- * Minimum remaining VTXO lifetime when selecting house VTXOs for a new
- * game. The fallback path requires the input VTXO to remain spendable
- * up to `setupExpiration` (10 min) plus a safety margin for the Ark
- * server's settlement round.
- */
-export const VTXO_LIFETIME_BUFFER_MS = 30 * 60_000
-
-/**
- * How long before batch expiry the renewal timer re-anchors a house VTXO.
- * Matches the SDK's own default renewal threshold
- * (DEFAULT_SETTLEMENT_CONFIG.vtxoThreshold = 259_200 s = 3 days).
- *
- * Deliberately much larger than VTXO_LIFETIME_BUFFER_MS, which the renewal
- * gate previously reused: the SELECTION buffer only has to keep a coin
- * spendable through one game setup, but the RENEWAL buffer has to survive
- * outages. With the 30-min gate the timer had a single half-hour window in a
- * multi-day batch cycle to be alive and healthy — miss it (process down, a
- * wedged tick) and the batch is swept. Renewing 3 days early costs one settle
- * per batch cycle and buys days of margin.
- */
-export const RENEWAL_EXPIRY_BUFFER_MS = 259_200_000
-
-/**
- * True when a house VTXO needs a renewal settle: expiring within `bufferMs`,
- * OR already expired/swept. The latter is the recovery case: once arkd sweeps
- * a batch the VTXO becomes "recoverable" — spendable ONLY via a settle (arkd
- * rejects a normal offchain spend with VTXO_RECOVERABLE), so the renewal
- * settle is what reclaims those funds. `isExpired` is timestamp-based (and
- * also true for the "swept" state), so it catches a swept VTXO even when the
- * SDK's cached state still reads "preconfirmed". Note `isVtxoExpiringSoon`
- * is false once expiry has passed — only the `isExpired` clause covers the
- * already-expired/swept states.
- *
- * Exported for unit testing.
- */
-export function vtxoNeedsRenewal(v: ExtendedVirtualCoin, bufferMs: number): boolean {
-  return isVtxoExpiringSoon(v, bufferMs) || (isSpendable(v) && isExpired(v))
+/** Renew near-expiry outputs and recover unspent swept/expired outputs. */
+export function vtxoNeedsRenewal(v: NormalizedExtendedVirtualCoin, bufferMs: number): boolean {
+  return isVtxoExpiringSoon(v, bufferMs) || canRecoverOnchain(v, { timestamp: new Date(), height: houseVtxoCache.chainHeight })
 }
 
 /**
@@ -79,11 +50,11 @@ export function vtxoNeedsRenewal(v: ExtendedVirtualCoin, bufferMs: number): bool
  * Exported for unit testing.
  */
 export function selectableHouseVtxos(
-  vtxos: ExtendedVirtualCoin[],
+  vtxos: NormalizedExtendedVirtualCoin[],
   bufferMs = VTXO_LIFETIME_BUFFER_MS,
-): { selectable: ExtendedVirtualCoin[]; dropped: ExtendedVirtualCoin[] } {
-  const selectable: ExtendedVirtualCoin[] = []
-  const dropped: ExtendedVirtualCoin[] = []
+): { selectable: NormalizedExtendedVirtualCoin[]; dropped: NormalizedExtendedVirtualCoin[] } {
+  const selectable: NormalizedExtendedVirtualCoin[] = []
+  const dropped: NormalizedExtendedVirtualCoin[] = []
   for (const v of vtxos) {
     if (vtxoNeedsRenewal(v, bufferMs)) {
       dropped.push(v)
@@ -132,7 +103,7 @@ export interface SettleParamsOptions {
    * (`runPeriodicSettle`/`renewVtxos`) has the same expiring-only semantics.
    * The admin settle passes nothing and keeps settle-everything semantics.
    */
-  vtxoFilter?: (v: ExtendedVirtualCoin) => boolean
+  vtxoFilter?: (v: NormalizedExtendedVirtualCoin) => boolean
 }
 
 export async function buildReservationSafeSettleParams(
@@ -174,18 +145,19 @@ export async function buildReservationSafeSettleParams(
   // just ride the next renewal tick.
   const reserved = reservations.reservedOutpoints()
   const vtxos = (await wallet.getVtxos({ withRecoverable: true }))
+    .filter((v) => !v.assets?.length)
     .filter((v) => !reserved.has(outpointKey(v.txid, v.vout)))
     .filter((v) => (opts.vtxoFilter ? opts.vtxoFilter(v) : true))
     .sort((a, b) => b.value - a.value)
-  const filteredVtxos: ExtendedVirtualCoin[] = []
+  const filteredVtxos: NormalizedExtendedVirtualCoin[] = []
   for (const vtxo of vtxos) {
     if (filteredVtxos.length >= MAX_VTXOS_PER_SETTLEMENT) break
     const inputFee = estimator.evalOffchainInput({
       amount: BigInt(vtxo.value),
-      type: vtxo.virtualStatus.state === 'swept' ? 'recoverable' : 'vtxo',
+      type: vtxo.isSwept ? 'recoverable' : 'vtxo',
       weight: 0,
       birth: vtxo.createdAt,
-      expiry: vtxo.virtualStatus.batchExpiry ? new Date(vtxo.virtualStatus.batchExpiry) : undefined,
+      expiry: vtxo.expiresAt,
     })
     if (inputFee.satoshis >= vtxo.value) continue
     const net = vtxo.value - inputFee.satoshis
@@ -215,78 +187,17 @@ export async function buildReservationSafeSettleParams(
 /** Unique id per renewal settle for its transient reservation-ledger entry. */
 let renewalReservationSeq = 0
 
-/**
- * Settle to renew expiring/recoverable house VTXOs / confirm boarding
- * deposits.
- *
- * Passes EXPLICIT params from `buildReservationSafeSettleParams` — the SDK's
- * no-arg gathering with VTXOs reserved for in-flight games excluded (P0 #53:
- * the blind `settle(undefined)` could spend a coin already committed to a live
- * game's co-fund → VTXO_ALREADY_SPENT breaking the player's game), narrowed to
- * the coins that actually need re-anchoring (`vtxoNeedsRenewal` with the
- * renewal buffer: near-expiry, expired, or swept/recoverable — the swept case
- * IS the swept-fund recovery path, same selection the SDK's `recoverVtxos`
- * makes minus reserved coins). Healthy far-from-expiry coins stay untouched,
- * so a renewal no longer consolidates the whole pool into one output. The
- * params always carry a single non-empty self-output; an explicit
- * `outputs: []` would make arkd reject the intent proof ("proof does not
- * contain outputs").
- *
- * The chosen VTXO inputs are pinned in the reservation ledger for the
- * duration of the settle (under `selectionMutex`, sync-only): the params are
- * built against a snapshot of the ledger, so without the pin a concurrent
- * /play could reserve one of our inputs mid-settle and bake a coin this
- * settle is about to spend into a live game (the same failure P0 #53 fixed,
- * through the opposite window). A clash detected at pin time is a benign
- * skip — the next tick retries. The pin is released when the settle promise
- * settles; if the caller times out the await, the pin intentionally lingers
- * until the underlying settle resolves, keeping /play off coins a zombie
- * settle may still spend.
- *
- * Returns true if a settle round ran, false when there's nothing eligible
- * (no free inputs after the reservation filter, a pin clash, or the SDK's
- * "No inputs found" — all graceful no-ops so the renewal worker doesn't log
- * a failure).
- *
- * NOTE on phantom inputs: if the wallet's persisted DB holds a boarding UTXO
- * that arkd has lost (e.g. a regtest chain reset where the wallet volume
- * outlived the chain), the `status.confirmed` filter can still include it and
- * the settle fails with TX_NOT_FOUND. That's a stale-wallet condition that a
- * wallet resync/wipe resolves — not something the renewal path can filter
- * around, since the phantom looks confirmed in the wallet's own view.
- */
-export async function renewSettle(deps: AppDeps, label = 'renewal'): Promise<boolean> {
+/** Renew only due inputs. A competing hold defers work; all other failures remain visible. */
+export async function renewSettle(deps: AppDeps, label = 'renewal', bufferMs = houseRenewalBufferForWalletMs(deps.wallet, deps.arkInfo)): Promise<boolean> {
   try {
     const params = await buildReservationSafeSettleParams(deps, {
-      vtxoFilter: (v) => vtxoNeedsRenewal(v, RENEWAL_EXPIRY_BUFFER_MS),
+      vtxoFilter: (v) => vtxoNeedsRenewal(v, bufferMs),
     })
     if (!params) return false // nothing eligible once reserved coins are excluded
-    // Boarding inputs are onchain-only (never in /play's selection space);
-    // only the VTXO inputs need pinning.
-    const inputKeys = params.inputs
-      .filter((i): i is ExtendedVirtualCoin => 'virtualStatus' in i)
-      .map((v) => outpointKey(v.txid, v.vout))
-    const reservationId = `renewal:${++renewalReservationSeq}`
-    const pinned = await selectionMutex.runExclusive(async () => {
-      // Sync re-check: a /play may have reserved one of our chosen inputs
-      // between the params build (which reads the ledger un-locked) and now.
-      const reservedNow = reservations.reservedOutpoints()
-      if (inputKeys.some((k) => reservedNow.has(k))) return false
-      reservations.reserve(reservationId, inputKeys, 0)
-      return true
-    })
-    if (!pinned) return false // input claimed by a live game mid-build — retry next tick
-    try {
-      // Second arg is the batch/round event handler: per-phase visibility for
-      // this party's settle, and a loud BatchFailed line if the round dies
-      // mid-flight.
-      await deps.wallet.settle(params, makeSettlementHandler(label))
-      houseVtxoCache.invalidate() // settle spent + minted house VTXOs; drop the stale snapshot
-      return true
-    } finally {
-      reservations.release(reservationId)
-    }
+    await settleHeldInputs(deps, params, label)
+    return true
   } catch (err) {
+    if (err instanceof HouseBusyError || err instanceof VtxoReservedError) return false
     const msg = err instanceof Error ? err.message : String(err)
     if (/No inputs found/i.test(msg)) return false // nothing eligible — graceful no-op
     // Phantom boarding input: the wallet's cache holds a boarding UTXO whose
@@ -304,6 +215,31 @@ export async function renewSettle(deps: AppDeps, label = 'renewal'): Promise<boo
       return false
     }
     throw err
+  }
+}
+
+/** Hold explicit settlement inputs until the underlying operation completes. */
+export async function settleHeldInputs(deps: AppDeps, params: SettleParams, label: string): Promise<string> {
+  const inputKeys = params.inputs
+    .filter(isVirtualCoin)
+    .map((input) => outpointKey(input.txid, input.vout))
+  const reservationId = `settlement:${++renewalReservationSeq}`
+  await selectionMutex.runExclusive(async () => reservations.reserve(reservationId, inputKeys, 0))
+  try {
+    const log = makeSettlementHandler(label), started = new Map<string, bigint>(), finalized = new Map<string, string>()
+    const txid = await deps.wallet.settle(params, event => {
+      log(event)
+      if (event.type === SettlementEventType.BatchStarted) started.set(event.id, event.batchExpiry)
+      if (event.type === SettlementEventType.BatchFinalized) finalized.set(event.id, event.commitmentTxid)
+    })
+    for (const [id, commitment] of finalized) {
+      const lifetime = started.get(id)
+      if (commitment === txid && lifetime !== undefined) rememberCompletedHouseBatchLifetime(deps.wallet, lifetime)
+    }
+    houseVtxoCache.invalidate()
+    return txid
+  } finally {
+    reservations.release(reservationId)
   }
 }
 
@@ -369,29 +305,14 @@ export function shouldRenew(expiringVtxoCount: number, boardingTotalSats: number
 /** Timeout overrides for `runRenewalTick` (unit tests); defaults are the
  *  shared ARK_SYNC/ARK_SUBMIT bounds. */
 export interface RenewalTickOptions {
+  intervalMs?: number
   /** Bound for wallet reads (getVtxos / getBoardingUtxos). */
   syncTimeoutMs?: number
   /** Bound for the settle and deprecated-signer migration legs. */
   submitTimeoutMs?: number
 }
 
-/**
- * One renewal pass. Every await is timeout-bounded: the SDK's providers issue
- * plain fetches with no AbortSignal, and pre-fix a single black-holed
- * `getVtxos`/`getBalance` call here hung the tick forever — the in-flight
- * guard in `startRenewalTimer` then stayed latched and every later tick
- * returned silently, which is indistinguishable from "nothing to do" in the
- * logs. A bounded tick REJECTS instead (logged by the caller), and the next
- * tick runs.
- *
- * Also logs a per-tick pool status line (nearest batch expiry, coins inside
- * the renewal buffer, recoverable sats) so time-to-expiry is visible and
- * alarmable BEFORE arkd sweeps a batch — the production loss surfaced as a
- * zero balance days after the sweep, with nothing in the log ahead of it.
- *
- * Exported for unit testing (drives the full gate → settle chain without
- * timers).
- */
+/** Run migration, recovery and renewal with bounded waits. An unavailable provider must not wedge later ticks. */
 export async function runRenewalTick(
   deps: AppDeps,
   renewalLog: ReturnType<typeof makeLogDedup> = makeLogDedup(),
@@ -399,6 +320,7 @@ export async function runRenewalTick(
 ): Promise<void> {
   const syncMs = opts.syncTimeoutMs ?? ARK_SYNC_TIMEOUT_MS
   const submitMs = opts.submitTimeoutMs ?? ARK_SUBMIT_TIMEOUT_MS
+  const bufferMs = houseRenewalBufferForWalletMs(deps.wallet, deps.arkInfo, { intervalMs: opts.intervalMs, syncTimeoutMs: syncMs, submitTimeoutMs: submitMs })
   // Key-rotation guard: cooperatively migrate any deprecated-signer VTXOs
   // BEFORE the plain settle below — settle() rejects deprecated-signer inputs
   // (INVALID_VTXO_SCRIPT), so without this the renewal jams once the operator
@@ -413,9 +335,7 @@ export async function runRenewalTick(
     timeoutReject(deps.wallet.getBoardingUtxos(), syncMs, 'renewal getBoardingUtxos'),
   ])
   renewalLog.clear('renewal') // backend reachable -> reset so a future failure logs fresh
-  // VTXOs needing a settle within the RENEWAL buffer (3 days — NOT /play's
-  // 30-min selection buffer; see RENEWAL_EXPIRY_BUFFER_MS).
-  const { dropped } = selectableHouseVtxos(all, RENEWAL_EXPIRY_BUFFER_MS)
+  const { dropped } = selectableHouseVtxos(all, bufferMs)
   // A reserved VTXO can't be renewed (the settle excludes it — P0 #53), so
   // it mustn't count toward the gate either: a game's coin nearing the
   // buffer would otherwise fire a settle that can't touch it every tick.
@@ -434,21 +354,21 @@ export async function runRenewalTick(
   // looming sweep becomes loggable/alarmable days ahead instead of being
   // discovered as a zero balance afterwards, and the line doubles as tick
   // proof-of-life: a gap in status lines means ticks are not completing.
-  const spendable = all.filter((v) => isSpendable(v))
+  const spendable = all.filter((v) => !isVtxoSpent(v) && !v.isUnrolled)
   const recoverableSats = spendable
-    .filter((v) => v.virtualStatus.state === 'swept')
+    .filter((v) => v.isSwept)
     .reduce((sum, v) => sum + v.value, 0)
   // Same sanity guard the SDK's expiry helpers apply: regtest stores block
   // HEIGHTS in batchExpiry (tiny numbers → year 1970), which would print as a
   // giant negative time-to-expiry.
   const expiries = spendable
-    .map((v) => v.virtualStatus.batchExpiry)
+    .map((v) => v.expiresAt?.getTime())
     .filter((e): e is number => typeof e === 'number' && new Date(e).getFullYear() >= 2025)
   const nearestExpiryH = expiries.length > 0 ? Math.floor((Math.min(...expiries) - Date.now()) / 3600_000) : null
   const status =
     `[renewal] pool status: ${spendable.length} vtxo(s), nearest batch expiry ` +
     `${nearestExpiryH === null ? 'n/a' : `~${nearestExpiryH}h`}, ${droppedFree.length} needing renewal ` +
-    `(buffer ${Math.round(RENEWAL_EXPIRY_BUFFER_MS / 3600_000)}h), ${recoverableSats} recoverable sat(s), ` +
+    `(buffer ${Math.round(bufferMs / 60_000)}m), ${recoverableSats} recoverable sat(s), ` +
     `boarding ${confirmedBoardingSats} confirmed sat(s)`
   if (renewalLog.shouldLog('status', status)) console.log(status)
   if (!shouldRenew(droppedFree.length, confirmedBoardingSats)) return
@@ -459,7 +379,7 @@ export async function runRenewalTick(
   // clash) — treat that as a benign skip. On timeout the pin renewSettle
   // took on its inputs lingers until the zombie settle resolves, keeping
   // /play off coins it may still spend.
-  const settled = await timeoutReject(renewSettle(deps), submitMs, 'renewal settle')
+  const settled = await timeoutReject(renewSettle(deps, 'renewal', bufferMs), submitMs, 'renewal settle')
   if (!settled) {
     const msg =
       `[renewal] shouldRenew saw ${droppedFree.length} expiring + ${confirmedBoardingSats} boarding sats, ` +
@@ -468,20 +388,8 @@ export async function runRenewalTick(
   }
 }
 
-/**
- * Production VTXO-renewal + swept-fund-recovery timer. We keep the SDK
- * settlement poll-loop disabled (settlementConfig:false) because every SDK
- * self-settle path is reservation-blind (see bootstrapDeps in index.ts) and
- * drive the same work through `runRenewalTick` on a long cadence: it settles
- * ONLY when `shouldRenew` says so, renewing house VTXOs inside the SDK-default
- * 3-day buffer, recovering swept ones, and confirming boarding deposits.
- *
- * The in-flight guard prevents overlapping ticks; every await inside the tick
- * is timeout-bounded so the guard cannot latch forever, and a skipped tick
- * WARNS (pre-fix it returned silently, so a wedged tick looked exactly like a
- * healthy idle one).
- */
-export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.Timeout {
+/** Drive house renewal separately so it preserves the denomination pool. SDK holds also protect games from automatic selection. */
+export function startRenewalTimer(deps: AppDeps, intervalMs = HOUSE_RENEWAL_INTERVAL_MS): NodeJS.Timeout {
   let renewingSince: number | null = null
   const renewalLog = makeLogDedup()
   const tick = async () => {
@@ -493,7 +401,7 @@ export function startRenewalTimer(deps: AppDeps, intervalMs = 600_000): NodeJS.T
     }
     renewingSince = Date.now()
     try {
-      await runRenewalTick(deps, renewalLog)
+      await runRenewalTick(deps, renewalLog, { intervalMs })
     } catch (err) {
       const msg = `[renewal] tick failed: ${err instanceof Error ? err.message : String(err)}`
       if (renewalLog.shouldLog('renewal', msg)) console.warn(msg)

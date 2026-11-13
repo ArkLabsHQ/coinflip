@@ -1,3 +1,4 @@
+import type { V4State } from 'arkade-coinflip'
 import type {
   GameFilter,
   GameRepository,
@@ -10,15 +11,15 @@ import type {
 } from './types.js'
 
 /** A game is "co-funded" once its co-fund has been submitted/finalized — i.e. its
- *  house_vtxos_json (a persisted V4State) carries a cofund txid (`cofundArkTxid` set
+ *  state_json (a persisted V4State) carries a cofund txid (`cofundArkTxid` set
  *  at submit, `cofundTxid` at finalize). Such a game has both stakes live on-chain in
  *  a pot VTXO, so it MUST NOT be expired: the v4 refund/stage-2 reconcilers only act
  *  on non-resolved games, and flipping it to 'expired' strands both stakes and lets a
  *  stalling player sweep the whole pot via the unconditional playerTakeAll leaf. */
-export function isCofundedGame(houseVtxosJson: string | null | undefined): boolean {
-  if (!houseVtxosJson) return false
+export function isCofundedGame(stateJson: string | null | undefined): boolean {
+  if (!stateJson) return false
   try {
-    const s = JSON.parse(houseVtxosJson) as { cofundArkTxid?: string; cofundTxid?: string }
+    const s = JSON.parse(stateJson) as { cofundArkTxid?: string; cofundTxid?: string }
     return Boolean(s.cofundArkTxid || s.cofundTxid)
   } catch {
     return false
@@ -34,21 +35,45 @@ export const LIST_FOR_PLAYER_DEFAULT = 50
 export class SQLiteGameRepository implements GameRepository {
   constructor(private readonly db: SQLExecutor) {}
 
+  /** Claim broadcast permission atomically against the expiry worker. */
+  async beginCofundSubmission(id: string, submission: NonNullable<V4State['cofundSubmission']>): Promise<boolean> {
+    const updated = await this.db.get<{ id: string }>(`
+      UPDATE games SET state_json = json_set(state_json, '$.cofundSubmission', json(?))
+      WHERE id = ? AND status = 'pending'
+        AND json_extract(state_json, '$.cofundArkTxid') IS NULL
+        AND json_extract(state_json, '$.cofundTxid') IS NULL
+        AND (json_extract(state_json, '$.cofundSubmission') IS NULL
+          OR json_extract(state_json, '$.cofundSubmission.txid') = ?)
+      RETURNING id
+    `, [JSON.stringify(submission), id, submission.txid])
+    return updated !== undefined
+  }
+
+  /** Release broadcast intent only after a definite first-attempt validation refusal. */
+  async rejectCofundSubmission(id: string, txid: string): Promise<void> {
+    await this.db.run(`
+      UPDATE games SET state_json = json_remove(state_json, '$.cofundSubmission')
+      WHERE id = ? AND status = 'pending'
+        AND json_extract(state_json, '$.cofundSubmission.txid') = ?
+        AND json_extract(state_json, '$.cofundArkTxid') IS NULL
+        AND json_extract(state_json, '$.cofundTxid') IS NULL
+    `, [id, txid])
+  }
+
   async save(game: NewGame): Promise<void> {
     await this.db.run(
       `INSERT INTO games (
-         id, tier, player_pubkey, player_choice, player_hash,
-         player_change_address, house_secret_hex, house_vtxos_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         id, tier, player_pubkey, player_hash,
+         player_change_address, house_secret_hex, state_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         game.id,
         game.tier,
         game.playerPubkey,
-        game.playerChoice,
         game.playerHash,
         game.playerChangeAddress || null,
         game.houseSecretHex,
-        game.houseVtxosJson || null,
+        game.stateJson,
       ],
     )
   }
@@ -59,9 +84,8 @@ export class SQLiteGameRepository implements GameRepository {
 
     if (updates.playerSecretHex !== undefined) { sets.push('player_secret_hex = ?'); values.push(updates.playerSecretHex) }
     if (updates.winner !== undefined) { sets.push('winner = ?'); values.push(updates.winner) }
-    if (updates.rakeAmount !== undefined) { sets.push('rake_amount = ?'); values.push(updates.rakeAmount) }
     if (updates.payoutAmount !== undefined) { sets.push('payout_amount = ?'); values.push(updates.payoutAmount) }
-    if (updates.houseVtxosJson !== undefined) { sets.push('house_vtxos_json = ?'); values.push(updates.houseVtxosJson) }
+    if (updates.stateJson !== undefined) { sets.push('state_json = ?'); values.push(updates.stateJson) }
     if (updates.status !== undefined) {
       sets.push('status = ?')
       values.push(updates.status)
@@ -91,6 +115,10 @@ export class SQLiteGameRepository implements GameRepository {
       'SELECT * FROM games ORDER BY created_at DESC LIMIT ? OFFSET ?',
       [limit, offset],
     )
+  }
+
+  async listPending(): Promise<GameRow[]> {
+    return this.db.all<GameRow>("SELECT * FROM games WHERE status = 'pending' ORDER BY created_at, id")
   }
 
   async countPendingForPlayer(playerPubkey: string): Promise<number> {
@@ -123,24 +151,16 @@ export class SQLiteGameRepository implements GameRepository {
   }
 
   async expirePending(maxAgeMinutes: number): Promise<{ expired: number; rows: GameRow[] }> {
-    // Snapshot the pending-old rows, then expire ONLY the ones that are not
-    // co-funded. A co-funded game has a live on-chain pot the reconcilers must
-    // still refund/settle — expiring it strands both stakes and opens the
-    // playerTakeAll theft (see isCofundedGame). Pre-cofund abandoned games
-    // (played but never co-funded) are expired as before so their reserved house
-    // VTXOs free up. Expire by explicit id so the filter can't be raced by the UPDATE.
-    const candidates = await this.db.all<GameRow>(
-      `SELECT * FROM games WHERE status = 'pending'
-       AND created_at < datetime('now', '-' || ? || ' minutes')`,
-      [maxAgeMinutes],
-    )
-    const rows = candidates.filter((g) => !isCofundedGame(g.house_vtxos_json as string | null))
-    if (rows.length === 0) return { expired: 0, rows: [] }
-    const placeholders = rows.map(() => '?').join(',')
-    await this.db.run(
-      `UPDATE games SET status = 'expired' WHERE id IN (${placeholders})`,
-      rows.map((g) => g.id),
-    )
+    // One atomic write prevents a co-fund submitted during expiry from losing its holds.
+    const rows = await this.db.all<GameRow>(`
+      UPDATE games SET status = 'expired'
+      WHERE status = 'pending'
+        AND created_at < datetime('now', '-' || ? || ' minutes')
+        AND json_extract(state_json, '$.cofundArkTxid') IS NULL
+        AND json_extract(state_json, '$.cofundTxid') IS NULL
+        AND json_extract(state_json, '$.cofundSubmission') IS NULL
+      RETURNING *
+    `, [maxAgeMinutes])
     return { expired: rows.length, rows }
   }
 
@@ -148,51 +168,14 @@ export class SQLiteGameRepository implements GameRepository {
     const today = await this.db.get<{ count: number }>(
       "SELECT COUNT(*) as count FROM games WHERE status = 'resolved' AND date(created_at) = date('now')",
     )
-    // House profit per resolved game, from the REAL stakes.
-    //
-    // The previous formula was `winner='house' THEN tier` /
-    // `winner='player' THEN rake_amount - tier`, which is wrong twice over for
-    // v4:
-    //
-    //   * v4 is VARIABLE-ODDS. The house stake is derived from the win chance
-    //     and reaches roughly 19x the player's at a 95% win chance, so a player
-    //     win costs the house `houseStake`, not `tier`. Booking it as `-tier`
-    //     understated losses by up to ~19x and made profit read far too high.
-    //   * `rake_amount` is NEVER WRITTEN by v4 — it is only read for display,
-    //     and the house edge lives entirely in `variable_odds_edge_bps`, baked
-    //     into the odds. `buildJointPotSettleTx` pays the WHOLE pot to the
-    //     winner, so there is no rake to add.
-    //
-    // Both stakes are recoverable: /play persists the V4State into
-    // `house_vtxos_json`, which carries `pot` and `houseStake` at the top level,
-    // and playerStake = pot - houseStake.
-    //
-    // `json_valid` guards the extract so a legacy or malformed blob cannot fail
-    // the whole stats query and blank the dashboard. Pre-v4 rows stored a plain
-    // `string[]` of outpoints, and those games WERE even-money — so the `tier`
-    // fallback is not a guess, it is correct for exactly the rows that hit it.
+    // The odds already include the house edge; the winner receives the entire pot.
     const profit = await this.db.get<{ profit: number }>(`
-      SELECT COALESCE(SUM(
-        CASE
-          WHEN winner = 'house' THEN
-            COALESCE(
-              CASE WHEN json_valid(house_vtxos_json)
-                THEN json_extract(house_vtxos_json, '$.pot')
-                     - json_extract(house_vtxos_json, '$.houseStake')
-              END,
-              tier
-            )
-          WHEN winner = 'player' THEN
-            -COALESCE(
-              CASE WHEN json_valid(house_vtxos_json)
-                THEN json_extract(house_vtxos_json, '$.houseStake')
-              END,
-              tier
-            )
-          ELSE 0
-        END
-      ), 0) as profit FROM games
-      WHERE status = 'resolved' AND created_at > datetime('now', '-1 day')
+      SELECT COALESCE(SUM(CASE
+        WHEN winner = 'house' THEN json_extract(state_json, '$.covenant.playerStake')
+        WHEN winner = 'player' THEN -json_extract(state_json, '$.covenant.houseStake')
+        ELSE 0
+      END), 0) AS profit FROM games
+      WHERE status = 'resolved' AND resolved_at > datetime('now', '-1 day')
     `)
     const total = await this.db.get<{ count: number }>(
       "SELECT COUNT(*) as count FROM games WHERE status = 'resolved'",

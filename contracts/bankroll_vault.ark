@@ -1,0 +1,115 @@
+pragma arkade ^0.1.0;
+
+contract BankrollVault(
+  bytes32 controlTxid, int controlGidx,
+  bytes32 shareTxid, int shareGidx
+) {
+  const int MAX_NAV = 1000000;
+  const int MAX_SUPPLY = 1000000000000;
+  const int DUST = 330;
+
+  private function supply() int {
+    require(this.activeInputIndex == 0, "vault input");
+    require(tx.numInputs == 2, "one member input");
+    require(tx.inputs[1].script != tx.input.current.script, "one vault");
+    require(controlTxid != shareTxid || controlGidx != shareGidx, "distinct assets");
+    require(controlGidx >= 0 && controlGidx <= 65535, "control index");
+    require(shareGidx >= 0 && shareGidx <= 65535, "share index");
+    require(tx.input.current.value >= DUST && tx.input.current.value <= MAX_NAV, "vault NAV");
+    require(tx.inputs[1].value >= DUST && tx.inputs[1].value <= 2100000000000000, "member carrier");
+    require(tx.inputs[0].assets.length == 1, "vault assets");
+    require(tx.inputs[0].assets.lookup(controlTxid, controlGidx) == 1, "control unit");
+    require(tx.assetGroups.length == 2, "asset groups");
+    let control = tx.assetGroups.find(controlTxid, controlGidx);
+    let shares = tx.assetGroups.find(shareTxid, shareGidx);
+    require(!control.isFresh && !shares.isFresh, "existing assets");
+    require(!control.hasControl && !shares.hasControl, "no issuance reference");
+    require(control.numInputs == 1 && control.sumInputs == 1, "control input count");
+    require(control.inputs[0].type == 1 && control.inputs[0].index == 0, "local control input");
+    bytes previous = tx.inputs[0].packet(32);
+    require(size(previous) >= 1 && size(previous) <= 6, "supply encoding size");
+    int issued = bin2num(previous);
+    require(issued > 0 && issued <= MAX_SUPPLY, "share supply");
+    require(previous == bytes(issued), "minimal supply encoding");
+    return issued;
+  }
+
+  private function continueVault(int nextNAV, int nextSupply) {
+    require(tx.numOutputs == 4, "continuation outputs");
+    require(tx.outputs[0].script == tx.input.current.script, "vault continuation");
+    require(tx.outputs[0].value == nextNAV, "next NAV");
+    require(tx.outputs[0].assets.length == 1, "continuation assets");
+    require(tx.outputs[0].assets.lookup(controlTxid, controlGidx) == 1, "continue control");
+    let control = tx.assetGroups.find(controlTxid, controlGidx);
+    require(control.numOutputs == 1 && control.sumOutputs == 1, "control preserved");
+    require(control.outputs[0].index == 0, "control destination");
+    require(tx.packet(32) == bytes(nextSupply), "next share supply");
+    require(tx.outputs[1].script == tx.inputs[1].script, "member destination");
+    @allow(output-script-unchecked, "only zero-valued extension and anchor outputs are allowed")
+    require(tx.outputs[2].value == 0 && tx.outputs[3].value == 0, "no hidden value");
+  }
+
+  @allow(unsigned-spend-path, "the control-bearing input and the member's signed funding input authorize the pinned outputs")
+  function subscribe(int deposit, int minShares) {
+    int issued = supply();
+    int nav = tx.input.current.value;
+    require(deposit > 0 && deposit <= MAX_NAV - nav, "deposit bound");
+    require(minShares > 0 && minShares <= MAX_SUPPLY, "minimum shares");
+    require(tx.inputs[1].assets.length == 0, "plain funding input");
+    require(tx.inputs[1].value >= deposit + DUST, "member change carrier");
+    int minted = deposit * issued / nav;
+    require(minted > 0 && minted >= minShares, "share quote");
+    require(minted <= MAX_SUPPLY - issued, "supply limit");
+    continueVault(nav + deposit, issued + minted);
+    require(tx.outputs[1].value == tx.inputs[1].value - deposit, "member change");
+    require(tx.outputs[1].assets.length == 1, "member share asset");
+    require(tx.outputs[1].assets.lookup(shareTxid, shareGidx) == minted, "minted shares");
+    let shares = tx.assetGroups.find(shareTxid, shareGidx);
+    require(shares.numInputs == 0 && shares.sumInputs == 0, "no share inputs");
+    require(shares.numOutputs == 1 && shares.sumOutputs == minted, "exact mint");
+    require(shares.outputs[0].index == 1, "share destination");
+  }
+
+  @allow(unsigned-spend-path, "the member spends their shares and both the redemption and remaining shares return to that input's script")
+  function redeem(int burnShares, int minSats) {
+    int issued = supply();
+    int nav = tx.input.current.value;
+    require(burnShares > 0 && burnShares <= issued, "burn bound");
+    require(minSats > 0 && minSats <= MAX_NAV, "minimum sats");
+    require(tx.inputs[1].assets.length == 1, "member share input");
+    int held = tx.inputs[1].assets.lookup(shareTxid, shareGidx);
+    require(held >= burnShares && held <= issued, "member shares");
+    let shares = tx.assetGroups.find(shareTxid, shareGidx);
+    require(shares.numInputs == 1 && shares.sumInputs == held, "exact share input");
+    require(shares.inputs[0].type == 1 && shares.inputs[0].index == 1, "local share input");
+    int payout = burnShares * nav / issued;
+    require(payout > 0 && payout >= minSats, "redemption quote");
+    int nextSupply = issued - burnShares;
+    int remaining = held - burnShares;
+    require(shares.sumOutputs == remaining, "exact share burn");
+    if (nextSupply == 0) {
+      require(tx.numOutputs == 3, "close outputs");
+      require(tx.outputs[0].script == tx.inputs[1].script, "final member");
+      require(tx.outputs[0].value == nav + tx.inputs[1].value, "final payout");
+      require(tx.outputs[0].assets.length == 0, "close assets");
+      require(tx.outputs[1].value == 0 && tx.outputs[2].value == 0, "no hidden value");
+      let control = tx.assetGroups.find(controlTxid, controlGidx);
+      require(control.numOutputs == 0 && control.sumOutputs == 0, "retire control");
+      require(shares.numOutputs == 0, "retire shares");
+      require(!tx.packet.has(32), "retired state");
+    } else {
+      require(nav - payout >= DUST, "remaining vault carrier");
+      continueVault(nav - payout, nextSupply);
+      require(tx.outputs[1].value == tx.inputs[1].value + payout, "member payout");
+      if (remaining == 0) {
+        require(shares.numOutputs == 0, "no share change");
+        require(tx.outputs[1].assets.length == 0, "no member assets");
+      } else {
+        require(shares.numOutputs == 1, "one share change");
+        require(shares.outputs[0].index == 1, "share change destination");
+        require(tx.outputs[1].assets.length == 1, "member share change");
+        require(tx.outputs[1].assets.lookup(shareTxid, shareGidx) == remaining, "remaining shares");
+      }
+    }
+  }
+}

@@ -1,12 +1,11 @@
 import { Router, Request, Response } from 'express'
 import path from 'path'
-import { isVtxoExpiringSoon, selectVirtualCoins } from '@arkade-os/sdk'
+import { isVtxoExpiringSoon, selectVirtualCoins, isBtcAddress, createDefaultPaymentRouter } from '@arkade-os/sdk'
 import type { AppDeps } from '../deps.js'
 import type { V4State } from '../v4/types.js'
 import { houseVtxoCache, reservations, ensureHouseVtxoPool, selectionMutex, outpointKey, freeHouseVtxos } from '../vtxo-pool.js'
 import { ARK_SUBMIT_TIMEOUT_MS } from '../async-timeout.js'
-import { buildReservationSafeSettleParams } from '../game-engine.js'
-import { makeSettlementHandler } from '../settlement-events.js'
+import { buildReservationSafeSettleParams, settleHeldInputs } from '../game-engine.js'
 import {
   collapsedTtlRead,
   timeoutReject,
@@ -14,11 +13,28 @@ import {
   ADMIN_WALLET_READ_TIMEOUT_MS,
 } from './cached-wallet-reads.js'
 
+/** Preserve the explicit input set for both Arkade sends and collaborative exits. */
+async function sendHousePayment(
+  deps: AppDeps,
+  address: string,
+  amount: number,
+  selectedVtxos?: Awaited<ReturnType<AppDeps['wallet']['getVtxos']>>,
+): Promise<string> {
+  if (!isBtcAddress(address)) {
+    return deps.wallet.send({ recipients: [{ address, amount }], ...(selectedVtxos ? { selectedVtxos } : {}) })
+  }
+  const quote = await createDefaultPaymentRouter(deps.wallet).route({ raw: address, amount, selectedVtxos })
+  const result = await (await quote.send()).settled()
+  if (!result.txid) throw new Error('Collaborative exit completed without a transaction id')
+  return result.txid
+}
+
 /** Same buffer the game-engine uses to treat a VTXO as "expiring soon". */
 const VTXO_EXPIRING_BUFFER_MS = 30 * 60_000
 
 /** How long the settle endpoint waits before returning "in progress". */
 const SETTLE_TIMEOUT_MS = 60_000
+let withdrawalSequence = 0
 
 /** Resolve to the promise's value, or `{ timedOut: true }` after `ms`. */
 function withTimeout<T>(
@@ -88,8 +104,6 @@ export function createAdminRoutes(deps: AppDeps): Router {
   router.get('/api/config', async (_req: Request, res: Response) => {
     const config = await deps.repos.config.all()
     res.json({
-      rakeType: config.rake_type || 'percentage',
-      rakeValue: parseInt(config.rake_value || '2', 10),
       tiers: JSON.parse(config.tiers || '[1000,5000,10000,50000]'),
       minHouseBalance: parseInt(config.min_house_balance || '100000', 10),
       oddsEdgeBps: parseInt(config.variable_odds_edge_bps || '300', 10),
@@ -104,7 +118,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
   // the config, and a wallet summary. SECRETS NEVER LEAVE: the per-game
   // commitment secrets are reduced to a boolean and the house_wallet table is
   // never read. `raw=1` additionally embeds each game's untouched
-  // house_vtxos_json for deeper digging.
+  // state_json for deeper digging.
   router.get('/api/export', async (req: Request, res: Response) => {
     try {
       const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '1000'), 10) || 1000, 1), 10_000)
@@ -117,15 +131,13 @@ export function createAdminRoutes(deps: AppDeps): Router {
       ])
 
       const games = rows.map((r) => {
-        // house_vtxos_json holds the V4State for v4 games (odds, stakes, pot,
-        // co-fund txids); legacy rows hold a plain outpoint array instead.
-        // Parse defensively so one malformed row can't fail the whole export.
+        // Redact secrets while preserving the funded game's terms and transaction ids.
         let v4: Record<string, unknown> | null = null
         try {
-          const parsed = r.house_vtxos_json
-            ? (JSON.parse(r.house_vtxos_json) as V4State | string[])
+          const parsed = r.state_json
+            ? (JSON.parse(r.state_json) as V4State)
             : null
-          if (parsed && !Array.isArray(parsed) && parsed.protocolVersion === 'v4') {
+          if (parsed && parsed.protocolVersion === 'v4') {
             v4 = {
               oddsN: parsed.oddsN,
               oddsTarget: parsed.oddsTarget,
@@ -134,6 +146,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
               houseStake: parsed.houseStake,
               playerStake: parsed.covenant?.playerStake ?? null,
               potAddress: parsed.potAddress ?? null,
+              cofundSubmission: parsed.cofundSubmission ?? null,
               cofundArkTxid: parsed.cofundArkTxid ?? null,
               cofundTxid: parsed.cofundTxid ?? null,
               setupExpiration: parsed.setupExpiration,
@@ -141,15 +154,14 @@ export function createAdminRoutes(deps: AppDeps): Router {
               houseInputCount: parsed.houseInputs?.length ?? 0,
             }
           }
-        } catch { /* unparseable or legacy shape — leave v4 null */ }
+        } catch { /* unparseable state — leave v4 null */ }
 
         return {
           id: r.id,
           tier: r.tier,
           playerPubkey: r.player_pubkey,
-          playerChoice: r.player_choice,
           winner: r.winner,
-          rakeAmount: r.rake_amount,
+          rakeAmount: 0,
           payoutAmount: r.payout_amount,
           status: r.status,
           createdAt: r.created_at,
@@ -157,7 +169,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
           // Redacted: presence only, never the secret itself.
           playerRevealed: r.player_secret_hex !== null,
           v4,
-          ...(includeRaw ? { houseVtxosRaw: r.house_vtxos_json } : {}),
+          ...(includeRaw ? { stateRaw: r.state_json } : {}),
         }
       })
 
@@ -210,8 +222,8 @@ export function createAdminRoutes(deps: AppDeps): Router {
           txid: v.txid,
           vout: v.vout,
           value: v.value,
-          batchExpiry: v.virtualStatus?.batchExpiry ?? null,
-          state: v.virtualStatus?.state ?? null,
+          batchExpiry: v.expiresAt?.getTime() ?? null,
+          state: v.isSpent ? 'spent' : v.isSwept ? 'swept' : v.isUnrolled ? 'unrolled' : v.isPreconfirmed ? 'preconfirmed' : 'settled',
         })),
         // The full SDK balance, including the recoverable/pendingRecovery
         // fields the dashboard used to drop on the floor.
@@ -224,24 +236,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
 
   // POST /api/config — update configuration
   router.post('/api/config', async (req: Request, res: Response) => {
-    const { rakeType, rakeValue, tiers, minHouseBalance, oddsEdgeBps, maxBetFractionBps } = req.body
-
-    if (rakeType !== undefined) {
-      if (rakeType !== 'percentage' && rakeType !== 'flat') {
-        res.status(400).json({ error: 'rakeType must be "percentage" or "flat"' })
-        return
-      }
-      await deps.repos.config.set('rake_type', rakeType)
-    }
-
-    if (rakeValue !== undefined) {
-      const val = parseInt(rakeValue, 10)
-      if (isNaN(val) || val < 0) {
-        res.status(400).json({ error: 'rakeValue must be a non-negative number' })
-        return
-      }
-      await deps.repos.config.set('rake_value', String(val))
-    }
+    const { tiers, minHouseBalance, oddsEdgeBps, maxBetFractionBps } = req.body
 
     if (tiers !== undefined) {
       if (!Array.isArray(tiers) || tiers.some((t: unknown) => typeof t !== 'number' || t <= 0)) {
@@ -283,8 +278,6 @@ export function createAdminRoutes(deps: AppDeps): Router {
 
     const config = await deps.repos.config.all()
     res.json({
-      rakeType: config.rake_type,
-      rakeValue: parseInt(config.rake_value || '2', 10),
       tiers: JSON.parse(config.tiers || '[]'),
       minHouseBalance: parseInt(config.min_house_balance || '100000', 10),
       oddsEdgeBps: parseInt(config.variable_odds_edge_bps || '300', 10),
@@ -302,9 +295,8 @@ export function createAdminRoutes(deps: AppDeps): Router {
     res.json(games.map((g) => ({
       id: g.id,
       tier: g.tier,
-      playerChoice: g.player_choice,
       winner: g.winner,
-      rakeAmount: g.rake_amount,
+      rakeAmount: 0,
       payoutAmount: g.payout_amount,
       status: g.status,
       createdAt: g.created_at,
@@ -413,7 +405,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
           txid: v.txid,
           vout: v.vout,
           value: v.value,
-          batchExpiry: v.virtualStatus?.batchExpiry ?? null,
+          batchExpiry: v.expiresAt?.getTime() ?? null,
           expiringSoon: isVtxoExpiringSoon(v, VTXO_EXPIRING_BUFFER_MS),
           reservedBy: outpointToGame.get(`${v.txid}:${v.vout}`) ?? null,
         })),
@@ -433,22 +425,8 @@ export function createAdminRoutes(deps: AppDeps): Router {
     })
   })
 
-  // POST /api/wallet/send — move house funds out to an address (Ark or on-chain;
-  // sendBitcoin routes by address type). Two guards, both bypassed by
-  // { force: true }:
-  //  - liability: the amount can't eat into the worst-case payout obligation
-  //    of in-flight games (coarse, amount-level);
-  //  - reservation (P0 #53): the spend can't consume a VTXO pinned to a live
-  //    game's co-fund. The SDK's own selection is reservation-blind, so the
-  //    non-force path mirrors `Wallet._sendImpl` exactly — same candidate set
-  //    (getVtxos({withRecoverable:false}) minus pendingRecoveryOutpoints()),
-  //    same selector and target (selectVirtualCoins to max(amount, dust)) —
-  //    minus reserved outpoints, then hands the picks to
-  //    sendBitcoin({selectedVtxos}). Every coin we submit is one the SDK's
-  //    blind path could have picked itself, so arkd accepts them identically.
-  //    Selection + submit run under selectionMutex (like the pool split) so
-  //    /play can't reserve a picked coin mid-flight, with the submit
-  //    timeout-bounded so a wedged arkd can't hold /play hostage.
+  // Explicit withdrawal inputs remain disjoint from game and maintenance holds.
+  // force overrides the liability ceiling; SDK input holds are always respected.
   router.post('/api/wallet/send', async (req: Request, res: Response) => {
     try {
       const { address, force } = req.body
@@ -473,13 +451,6 @@ export function createAdminRoutes(deps: AppDeps): Router {
         })
         return
       }
-      if (force) {
-        // Blind operator hatch: the SDK picks inputs from ALL coins, reserved
-        // ones included.
-        const txid = await deps.wallet.sendBitcoin({ address: address.trim(), amount })
-        res.json({ txid })
-        return
-      }
       // The candidate set `_sendImpl` would use. Fetched before the lock (like
       // /play's getVtxos) so a slow re-sync doesn't serialize under the mutex;
       // staleness is safe: reservations are re-read under the lock, and a coin
@@ -489,6 +460,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
       const candidates = pendingRecovery.size
         ? allCoins.filter((v) => !pendingRecovery.has(outpointKey(v.txid, v.vout)))
         : allCoins
+      const reservationId = `withdrawal:${++withdrawalSequence}`
       const outcome = await selectionMutex.runExclusive(async () => {
         const reserved = reservations.reservedOutpoints()
         const free = reserved.size
@@ -501,23 +473,27 @@ export function createAdminRoutes(deps: AppDeps): Router {
         if (freeSpendable < target) {
           return { freeSpendable, reservedCount: reserved.size }
         }
-        const { inputs } = selectVirtualCoins(free, target)
-        const txid = await timeoutReject(
-          deps.wallet.sendBitcoin({ address: address.trim(), amount, selectedVtxos: inputs }),
-          ARK_SUBMIT_TIMEOUT_MS,
-          'admin wallet send',
-        )
-        // Drop the spent coins from the hot-path snapshot so a /play selection
-        // before the next refresh can't re-pick them.
-        for (const v of inputs) houseVtxoCache.removeOutpoint(v.txid, v.vout)
-        return { txid }
+        const selected = selectVirtualCoins(free, target).inputs
+        const inputs = selected.map((input) => free.find((coin) => coin.txid === input.txid && coin.vout === input.vout)!)
+        reservations.reserve(reservationId, inputs.map((input) => outpointKey(input.txid, input.vout)), 0)
+        return { inputs }
       })
-      if ('txid' in outcome) {
-        res.json({ txid: outcome.txid })
+      if (outcome.inputs) {
+        try {
+          const txid = await timeoutReject(
+            sendHousePayment(deps, address.trim(), amount, outcome.inputs),
+            ARK_SUBMIT_TIMEOUT_MS,
+            'admin wallet send',
+          )
+          for (const input of outcome.inputs) houseVtxoCache.removeOutpoint(input.txid, input.vout)
+          res.json({ txid })
+        } finally {
+          reservations.release(reservationId)
+        }
         return
       }
       res.status(400).json({
-        error: `Amount ${amount} needs ${Math.max(amount, Number(deps.wallet.dustAmount))} sat of un-reserved spendable VTXOs; only ${outcome.freeSpendable} sat is free (${outcome.reservedCount} outpoint(s) reserved by in-flight games). Retry when games resolve, or pass force:true to spend blind.`,
+        error: `Amount ${amount} needs ${Math.max(amount, Number(deps.wallet.dustAmount))} sat of un-reserved spendable VTXOs; only ${outcome.freeSpendable} sat is free (${outcome.reservedCount} outpoint(s) reserved by in-flight games). Retry when games resolve; force:true overrides only the liability ceiling.`,
         freeSpendable: outcome.freeSpendable,
         reservedOutpoints: outcome.reservedCount,
       })
@@ -538,7 +514,7 @@ export function createAdminRoutes(deps: AppDeps): Router {
       // otherwise; null = nothing eligible → same error the SDK would throw.
       const params = await buildReservationSafeSettleParams(deps)
       if (!params) throw new Error('No inputs found')
-      const settlePromise = deps.wallet.settle(params, makeSettlementHandler('admin'))
+      const settlePromise = settleHeldInputs(deps, params, 'admin')
       // Ensure a late rejection (after we've already responded) can't surface as
       // an unhandled rejection and crash the process.
       settlePromise.catch((e) =>

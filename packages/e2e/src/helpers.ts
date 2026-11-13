@@ -2,7 +2,7 @@
  * E2E test helpers for interacting with regtest infrastructure.
  */
 
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import path from 'path'
 import {
   Wallet,
@@ -10,8 +10,10 @@ import {
   RestArkProvider,
   RestIndexerProvider,
   EsploraProvider,
+  InMemoryWalletRepository,
+  InMemoryContractRepository,
   DefaultVtxo,
-  ArkInfo,
+  OperatorInfo,
   type Identity,
   type ArkProvider,
   type IndexerProvider,
@@ -32,7 +34,7 @@ export async function createEsploraProvider(): Promise<EsploraProvider> {
   return new EsploraProvider(ESPLORA_URL)
 }
 
-export async function getArkInfo(): Promise<ArkInfo> {
+export async function getArkInfo(): Promise<OperatorInfo> {
   const provider = await createArkProvider()
   return provider.getInfo()
 }
@@ -42,13 +44,27 @@ export async function createFundedWallet(): Promise<{
   identity: SingleKey
 }> {
   const identity = SingleKey.fromRandomBytes()
-  const wallet = await Wallet.create({
-    identity,
-    arkServerUrl: ARK_SERVER_URL,
-    esploraUrl: ESPLORA_URL,
-  })
+  const wallet = await createTestWallet(identity)
 
   return { wallet, identity }
+}
+
+export function createTestWallet(
+  identity: Identity,
+  options: Omit<Parameters<typeof Wallet.create>[0], 'identity' | 'operatorProvider' | 'indexerProvider' | 'onchainProvider'> = {},
+): Promise<Wallet> {
+  return Wallet.create({
+    identity,
+    operatorProvider: new RestArkProvider(ARK_SERVER_URL),
+    indexerProvider: new RestIndexerProvider(ARK_SERVER_URL),
+    onchainProvider: new EsploraProvider(ESPLORA_URL),
+    settlementConfig: false,
+    storage: {
+      walletRepository: new InMemoryWalletRepository(),
+      contractRepository: new InMemoryContractRepository(),
+    },
+    ...options,
+  })
 }
 
 /**
@@ -138,8 +154,8 @@ export async function mineBlock(count = 1): Promise<void> {
  */
 export async function setChainTime(toUnixSeconds: number, blocks = 12): Promise<void> {
   const container = process.env.REGTEST_BTC_CONTAINER || 'bitcoin'
-  const cli = `docker exec ${container} bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123`
-  execSync(`${cli} setmocktime ${Math.floor(toUnixSeconds)}`, { stdio: ['ignore', 'pipe', 'pipe'] })
+  execFileSync('docker', ['exec', container, 'bitcoin-cli', '-regtest', '-rpcuser=admin1', '-rpcpassword=123',
+    'setmocktime', String(Math.floor(toUnixSeconds))], { stdio: ['ignore', 'pipe', 'pipe'] })
   await mineBlock(blocks)
 }
 
@@ -147,8 +163,10 @@ export async function setChainTime(toUnixSeconds: number, blocks = 12): Promise<
  *  the median-time-past self-heals as the wall clock catches the mocked future. */
 export function resetChainTime(): void {
   const container = process.env.REGTEST_BTC_CONTAINER || 'bitcoin'
-  const cli = `docker exec ${container} bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123`
-  try { execSync(`${cli} setmocktime 0`, { stdio: ['ignore', 'pipe', 'pipe'] }) } catch { /* best effort */ }
+  try {
+    execFileSync('docker', ['exec', container, 'bitcoin-cli', '-regtest', '-rpcuser=admin1', '-rpcpassword=123', 'setmocktime', '0'],
+      { stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch { /* best effort */ }
 }
 
 /**
@@ -171,11 +189,10 @@ export async function faucet(address: string, amountBtc: number): Promise<string
  * Returns trimmed stdout.
  */
 function regtestCli(args: string[]): string {
-  const joined = args.map((a) => JSON.stringify(a)).join(' ')
-  const cmd = process.env.REGTEST_CLI
-    ? `${process.env.REGTEST_CLI} ${joined}`
-    : `node ${JSON.stringify(path.resolve(process.cwd(), '../../arkade-regtest/regtest.mjs'))} ${joined}`
-  return execSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim()
+  const root = path.resolve(__dirname, '../../..')
+  const script = process.env.REGTEST_SCRIPT || path.join(root, 'scripts/regtest.mjs')
+  return execFileSync(process.execPath, [script, ...args, '--env', process.env.REGTEST_ENV || path.join(root, '.env.regtest')],
+    { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim()
 }
 
 async function waitForBalance(

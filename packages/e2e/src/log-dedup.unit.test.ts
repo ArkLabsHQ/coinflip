@@ -3,7 +3,7 @@
  * Verifies it logs first/changed/heartbeat occurrences and resets on clear,
  * WITHOUT changing retry cadence (it only gates console output).
  */
-import { makeLogDedup } from '../../server/src/log-dedup'
+import { makeLogDedup } from 'arkade-coinflip-server/dist/log-dedup'
 
 describe('makeLogDedup — recovery/renewal log-noise suppression', () => {
   it('logs the first occurrence, suppresses identical repeats', () => {

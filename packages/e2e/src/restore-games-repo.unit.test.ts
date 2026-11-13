@@ -35,7 +35,7 @@ function makeExecutor() {
       rake_amount INTEGER NOT NULL DEFAULT 0,
       payout_amount INTEGER,
       status TEXT NOT NULL DEFAULT 'pending',
-      house_vtxos_json TEXT,
+      state_json TEXT,
       created_at TEXT NOT NULL,
       resolved_at TEXT
     )
@@ -52,11 +52,11 @@ function makeExecutor() {
 /** Insert a game row with an explicit created_at so ordering is deterministic. */
 function insert(db: any, row: Partial<any> & { id: string; player_pubkey: string; created_at: string }) {
   db.prepare(`
-    INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, status, house_vtxos_json, winner, rake_amount, payout_amount, created_at, resolved_at)
-    VALUES (@id, @tier, @player_pubkey, @player_choice, @player_hash, @house_secret_hex, @status, @house_vtxos_json, @winner, @rake_amount, @payout_amount, @created_at, @resolved_at)
+    INSERT INTO games (id, tier, player_pubkey, player_choice, player_hash, house_secret_hex, status, state_json, winner, rake_amount, payout_amount, created_at, resolved_at)
+    VALUES (@id, @tier, @player_pubkey, @player_choice, @player_hash, @house_secret_hex, @status, @state_json, @winner, @rake_amount, @payout_amount, @created_at, @resolved_at)
   `).run({
     tier: 1000, player_choice: 'trustless-v4', player_hash: 'hh', house_secret_hex: 'hs',
-    status: 'pending', house_vtxos_json: null, winner: null, rake_amount: 0, payout_amount: null,
+    status: 'pending', state_json: null, winner: null, rake_amount: 0, payout_amount: null,
     resolved_at: null, ...row,
   })
 }
@@ -125,3 +125,19 @@ describe('SQLiteGameRepository.listForPlayer', () => {
 })
 
 export {}
+
+
+describe('complete pending game work queue', () => {
+  it('returns every pending game beyond the public page limit, with oldest work first', async () => {
+    const { db, exec } = makeExecutor()
+    for (let index = 0; index < 1205; index++) {
+      insert(db, { id: `pending-${String(index).padStart(4, '0')}`, player_pubkey: PK_A, created_at: '2026-01-01 00:00:00' })
+    }
+    insert(db, { id: 'resolved', player_pubkey: PK_A, status: 'resolved', created_at: '2026-01-01 00:00:00' })
+    const rows = await new SQLiteGameRepository(exec).listPending()
+    expect(rows).toHaveLength(1205)
+    expect(rows[0].id).toBe('pending-0000')
+    expect(rows.at(-1).id).toBe('pending-1204')
+    db.close()
+  })
+})

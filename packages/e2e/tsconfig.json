@@ -10,7 +10,12 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "baseUrl": ".",
+    "paths": {
+      "@arkade-os/swap/advanced": ["../../node_modules/@arkade-os/swap/dist/advanced.d.ts"],
+      "@arkade-os/swap/nostr": ["../../node_modules/@arkade-os/swap/dist/nostr.d.ts"]
+    }
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

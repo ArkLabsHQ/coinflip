@@ -1,0 +1,2 @@
+contracts/*.ark text eol=lf
+packages/lib/src/artifact/*.json text eol=lf

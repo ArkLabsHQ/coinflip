@@ -58,6 +58,7 @@ beforeAll(async () => {
   } catch {
     arkAvailable = false
   }
+  if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 }, 10_000)
 
 describe('server HTTP API: house wallet + game lifecycle', () => {
@@ -66,7 +67,7 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
   let dataDir: string
 
   beforeAll(async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
 
     // Isolate the server's SQLite to a temp dir so we don't share state with a
     // long-running server instance (or with other test runs).
@@ -105,7 +106,7 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
   })
 
   it('GET /api/tiers reports houseReady when funded', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const resp = await request(app).get('/api/tiers').expect(200)
     expect(Array.isArray(resp.body.tiers)).toBe(true)
     expect(resp.body.tiers).toContain(BET_AMOUNT)
@@ -113,7 +114,7 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
   })
 
   it('GET /api/tiers rejects bets above maxAvailable', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const resp = await request(app).get('/api/tiers').expect(200)
     // The largest tier the house can cover is bounded by available balance.
     expect(resp.body.maxAvailable).toBeLessThanOrEqual(
@@ -122,7 +123,7 @@ describe('server HTTP API: house wallet + game lifecycle', () => {
   })
 
   it('GET /api/tiers publishes the bet envelope the client sizes its slider from', async () => {
-    if (!arkAvailable) return
+    if (!arkAvailable) throw new Error('Required regtest services are unavailable')
     const resp = await request(app).get('/api/tiers').expect(200)
     // Shape, not just presence — the client (Task 5) reads these names directly,
     // so a missing/misnamed/mistyped field here would pass every other gate.
@@ -155,8 +156,8 @@ describe('selectableHouseVtxos: VTXO expiry filter', () => {
       script: '00'.repeat(34),
       intentTapLeafScript: [new Uint8Array(33), new Uint8Array(34)],
       tapTree: new Uint8Array(0),
-      virtualStatus: { state: 'settled', batchExpiry: batchExpiryMs },
-      createdAt: 0,
+      expiresAt: new Date(batchExpiryMs),
+      createdAt: new Date(),
       isPreconfirmed: false,
       isSwept: false,
       isUnrolled: false,

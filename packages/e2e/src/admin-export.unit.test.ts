@@ -47,7 +47,7 @@ const ROWS = [
     player_hash: 'hash1', player_change_address: null,
     house_secret_hex: HOUSE_SECRET, player_secret_hex: PLAYER_SECRET,
     winner: 'player', rake_amount: 0, payout_amount: 6000, status: 'resolved',
-    house_vtxos_json: V4_STATE,
+    state_json: V4_STATE,
     created_at: '2026-07-06 12:00:00', resolved_at: '2026-07-06 12:05:00',
   },
   {
@@ -56,7 +56,7 @@ const ROWS = [
     player_hash: 'hash2', player_change_address: null,
     house_secret_hex: HOUSE_SECRET, player_secret_hex: null,
     winner: null, rake_amount: 0, payout_amount: null, status: 'expired',
-    house_vtxos_json: '["txid:0","txid:1"]',
+    state_json: '["txid:0","txid:1"]',
     created_at: '2026-07-07 12:00:00', resolved_at: null,
   },
   {
@@ -65,7 +65,7 @@ const ROWS = [
     player_hash: 'hash3', player_change_address: null,
     house_secret_hex: HOUSE_SECRET, player_secret_hex: null,
     winner: 'house', rake_amount: 0, payout_amount: null, status: 'resolved',
-    house_vtxos_json: '{not valid json',
+    state_json: '{not valid json',
     created_at: '2026-07-08 12:00:00', resolved_at: '2026-07-08 12:01:00',
   },
 ]
@@ -130,11 +130,11 @@ describe('admin GET /api/export', () => {
 
   it('omits the raw state blob unless raw=1', async () => {
     const plain = await request(app).get('/api/export').expect(200)
-    expect(plain.body.games[0].houseVtxosRaw).toBeUndefined()
+    expect(plain.body.games[0].stateRaw).toBeUndefined()
 
     const raw = await request(app).get('/api/export?raw=1').expect(200)
     const g1 = raw.body.games.find((g: { id: string }) => g.id === 'g1')
-    expect(typeof g1.houseVtxosRaw).toBe('string')
+    expect(typeof g1.stateRaw).toBe('string')
   })
 
   it('reports export metadata (count, limit, what was redacted)', async () => {

@@ -822,7 +822,7 @@ function canonical(value: unknown): string {
   if (value instanceof Uint8Array) return `bytes:${hex.encode(value)}`
   if (typeof value === 'bigint') return `bigint:${value}`
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
-  if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${key}:${canonical(item)}`).join(',')}}`
+  if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(',')}}`
   return JSON.stringify(value) ?? 'undefined'
 }
 

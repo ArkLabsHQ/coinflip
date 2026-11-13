@@ -19,8 +19,8 @@ export function randomUniformInt(n: number): number {
 }
 
 export function determineWinnerV3(
-  creatorReveal: DigitCommit,
-  playerReveal: DigitCommit,
+  creatorReveal: Pick<DigitCommit, 'digit'>,
+  playerReveal: Pick<DigitCommit, 'digit'>,
   n: number,
   target: number,
   lo: number,

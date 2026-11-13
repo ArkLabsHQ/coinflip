@@ -808,6 +808,21 @@ describe('pool coordinator durable boundaries', () => {
     expect(adapter.authorize).toHaveBeenCalledTimes(savedRelay ? 0 : 1)
   })
 
+  it('records the contract winner when a recovered player digit is out of range', async () => {
+    const quote = await service.prepare(quoteRequest())
+    const game = (await repo.game(quote.gameId))!
+    // n = 2, so digit 2 + house digit loses on-chain while (player + house) % n alone would win.
+    const playerSecretHex = `${(2 + parseInt(game.house_secret_hex.slice(0, 2), 16)).toString(16).padStart(2, '0')}${'22'.repeat(16)}`
+    const request: PoolSubmitRequest = { ...submission(`settle:${quote.gameId}`), expectedHead: { txid: 'cc'.repeat(32), vout: 0 },
+      command: { kind: 'settleGame', gameId: quote.gameId, playerSecretHex, houseSecretHex: game.house_secret_hex } }
+    await repo.claimOperation(request, 'private-request-hash', quote.gameId)
+    await repo.updateGame(quote.gameId, 'funded', { resolutionId: request.operationId })
+    adapter.verify.mockResolvedValue({ status: 'confirmed', receipt: {
+      arkTxid: request.arkTxid, consumedHead: request.expectedHead, nextHead: { txid: request.arkTxid, vout: 0 }, observedAt: Date.now() } })
+    await service.reconcile()
+    expect((await repo.game(quote.gameId))).toMatchObject({ status: 'settled', winner: 'pool' })
+  })
+
   it.each([false, true])('discards an expired unsigned opening after restart, quote CAS previously won: %s', async authorized => {
     const quote = await service.prepare(quoteRequest())
     const request: PoolSubmitRequest = { ...submission('opening-crash'), command: { kind: 'openGame', gameId: quote.gameId } }

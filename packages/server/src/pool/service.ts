@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { computeHouseStake, quotePoolEconomics, randomUniformInt } from 'arkade-coinflip'
+import { computeHouseStake, determineWinnerV3, quotePoolEconomics, randomUniformInt } from 'arkade-coinflip'
 import type { PoolBootstrapRequest, PoolGameDescriptor, PoolGameSummary, PoolOperationResponse, PoolPrepareRequest,
   PoolPreparedGame, PoolPublicResponse, PoolRevealResponse, PoolSubmitRequest, PoolOperatorActionRequest, PoolOperatorPosition, PoolGameSnapshot } from 'arkade-coinflip'
 import type { AppDeps } from '../deps.js'
@@ -43,6 +43,10 @@ function canonical(value: unknown): string {
 }
 function hash(value: unknown): string { return createHash('sha256').update(canonical(value)).digest('hex') }
 function secretHash(secret: string): string { return createHash('sha256').update(Buffer.from(secret, 'hex')).digest('hex') }
+function poolWinner(playerSecretHex: string, houseSecretHex: string, game: PoolPreparedGame): 'player' | 'pool' {
+  const digit = (secret: string) => ({ digit: parseInt(secret.slice(0, 2), 16) })
+  return determineWinnerV3(digit(houseSecretHex), digit(playerSecretHex), game.oddsN, game.oddsTarget, game.oddsLo) === 'player' ? 'player' : 'pool'
+}
 
 export class PoolService {
   private readonly locks = new KeyedMutex()
@@ -385,9 +389,8 @@ export class PoolService {
           else if (game?.resolution_operation_id === row.operation_id) {
             const prepared = JSON.parse(game.prepared_json) as PoolPreparedGame
             const player = request.command.kind === 'settleGame' ? request.command.playerSecretHex : undefined
-            const roll = player ? (parseInt(player.slice(0, 2), 16) + parseInt(game.house_secret_hex.slice(0, 2), 16)) % prepared.oddsN : undefined
             await this.repo.updateGame(row.game_id, player ? 'settled' : 'refunded',
-              roll === undefined ? {} : { winner: roll >= prepared.oddsLo && roll < prepared.oddsTarget ? 'player' : 'pool' })
+              player ? { winner: poolWinner(player, game.house_secret_hex, prepared) } : {})
           }
         }
       } else if (result.status === 'conflict') {
@@ -446,9 +449,8 @@ export class PoolService {
         ...(game.player_secret_hex ? { houseSecretHex: game.house_secret_hex } : {}), ...(game.winner ? { winner: game.winner } : {}) }
       await this.repo.updateGame(game.game_id, game.status === 'revealed' ? 'revealed' : 'funded', { playerSecret })
       const operation = await this.resolveGame((await this.repo.game(game.game_id))!, 'settle')
-      const roll = (parseInt(playerSecret.slice(0, 2), 16) + parseInt(game.house_secret_hex.slice(0, 2), 16)) % prepared.oddsN
       return { gameId: game.game_id, operation, houseSecretHex: game.house_secret_hex,
-        winner: roll >= prepared.oddsLo && roll < prepared.oddsTarget ? 'player' : 'pool' }
+        winner: poolWinner(playerSecret, game.house_secret_hex, prepared) }
     })
   }
 

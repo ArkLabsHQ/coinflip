@@ -101,7 +101,13 @@ describe('v4 server: handleV4Play', () => {
 
     await faucet(await deps.wallet.getBoardingAddress(), HOUSE_FUND_BTC)
     await waitForBoarding(deps.wallet, HOUSE_FUND_BTC * 1e8 * 0.9)
-    await settleWithRetry(deps.wallet)
+    // Settle through the house's own path: it learns the batch lifetime that sizes the splitter's renewal horizon.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { renewSettle } = require('arkade-coinflip-server/dist/game-engine.js')
+    for (let attempt = 1; !(await renewSettle(deps, 'test funding')); attempt++) {
+      if (attempt === 3) throw new Error('House funding did not settle')
+      await new Promise((resolve) => setTimeout(resolve, 5000))
+    }
     await waitForSettled(deps.wallet, BET * 5)
     // Fragment into a small pool — v4 spends a WHOLE house VTXO per game, so each
     // game needs its own free stake input (one big VTXO would go "house busy").

@@ -590,6 +590,39 @@ describe('P0 #53 — admin POST /api/wallet/send spends only un-reserved coins',
     expect(sendCalls).toHaveLength(0)
   })
 
+  it('keeps a timed-out send\'s inputs pinned until the send itself settles', async () => {
+    process.env.ARK_SUBMIT_TIMEOUT_MS = '50'
+    let isolated: any
+    jest.isolateModules(() => {
+      isolated = { ...require('arkade-coinflip-server/dist/admin/routes.js'), ...require('arkade-coinflip-server/dist/vtxo-pool.js') }
+    })
+    delete process.env.ARK_SUBMIT_TIMEOUT_MS
+    const free = coin('ab'.repeat(32), 0, 40_000)
+    let land!: (txid: string) => void
+    const landed = new Promise<string>((resolve) => { land = resolve })
+    const app = express()
+    app.use(express.json())
+    app.use(isolated.createAdminRoutes({
+      wallet: {
+        dustAmount: 330n,
+        getBalance: async () => ({ available: free.value }),
+        getVtxos: async () => [free],
+        pendingRecoveryOutpoints: async () => new Set(),
+        send: () => landed,
+      },
+    }))
+
+    const res = await request(app).post('/api/wallet/send').send({ address: HOUSE_ADDRESS, amount: 1000 })
+    expect(res.status).toBe(500)
+    expect(res.body.error).toMatch(/timed out/)
+    expect(isolated.reservations.reservedOutpoints().has(`${free.txid}:0`)).toBe(true)
+
+    land('txid-late')
+    await landed
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(isolated.reservations.reservedOutpoints().has(`${free.txid}:0`)).toBe(false)
+  })
+
   it('never selects a pending-recovery coin (the coin arkd would reject)', async () => {
     const stuck = coin('88'.repeat(32), 0, 80_000)
     const clean = coin('99'.repeat(32), 1, 30_000)

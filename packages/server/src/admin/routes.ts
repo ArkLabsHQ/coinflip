@@ -479,17 +479,13 @@ export function createAdminRoutes(deps: AppDeps): Router {
         return { inputs }
       })
       if (outcome.inputs) {
-        try {
-          const txid = await timeoutReject(
-            sendHousePayment(deps, address.trim(), amount, outcome.inputs),
-            ARK_SUBMIT_TIMEOUT_MS,
-            'admin wallet send',
-          )
-          for (const input of outcome.inputs) houseVtxoCache.removeOutpoint(input.txid, input.vout)
-          res.json({ txid })
-        } finally {
-          reservations.release(reservationId)
-        }
+        const inputs = outcome.inputs
+        const send = sendHousePayment(deps, address.trim(), amount, inputs)
+        // A timed-out request can still spend these coins, so the hold ends when the send settles.
+        void send
+          .then(() => { for (const input of inputs) houseVtxoCache.removeOutpoint(input.txid, input.vout) }, () => {})
+          .finally(() => reservations.release(reservationId))
+        res.json({ txid: await timeoutReject(send, ARK_SUBMIT_TIMEOUT_MS, 'admin wallet send') })
         return
       }
       res.status(400).json({

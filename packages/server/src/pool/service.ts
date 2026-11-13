@@ -44,7 +44,7 @@ function canonical(value: unknown): string {
 function hash(value: unknown): string { return createHash('sha256').update(canonical(value)).digest('hex') }
 function secretHash(secret: string): string { return createHash('sha256').update(Buffer.from(secret, 'hex')).digest('hex') }
 function poolWinner(playerSecretHex: string, houseSecretHex: string, game: PoolPreparedGame): 'player' | 'pool' {
-  const digit = (secret: string) => ({ digit: parseInt(secret.slice(0, 2), 16) })
+  const digit = (secret: string) => ({ digit: parseInt(secret.slice(0, 2), 16), salt: new Uint8Array() })
   return determineWinnerV3(digit(houseSecretHex), digit(playerSecretHex), game.oddsN, game.oddsTarget, game.oddsLo) === 'player' ? 'player' : 'pool'
 }
 

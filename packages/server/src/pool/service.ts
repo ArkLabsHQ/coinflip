@@ -49,6 +49,8 @@ function poolWinner(playerSecretHex: string, houseSecretHex: string, game: PoolP
   return determineWinnerV3(digit(houseSecretHex), digit(playerSecretHex), game.oddsN, game.oddsTarget, game.oddsLo) === 'player' ? 'player' : 'pool'
 }
 
+const lossBreakerBps = Number(process.env.POOL_LOSS_BREAKER_BPS ?? 2000)
+
 export class PoolService {
   private readonly locks = new KeyedMutex()
   private readonly operationHolds = new Map<string, PoolInputReservation>()
@@ -65,6 +67,13 @@ export class PoolService {
     return snapshot.readyForOperations === true &&
       snapshot.expiresAtHeight === null && snapshot.expiresAt !== null &&
       snapshot.expiresAt > Date.now() + requiredGameLifetimeSeconds(snapshot) * 1000
+  }
+
+  // Bounds what an operator colluding with bettors can take: a large daily loss pauses new wagers and contributions.
+  private async breakerReason(navSats: string): Promise<string | undefined> {
+    const loss = await this.repo.realizedLossSince(Date.now() - 86_400_000)
+    if (loss * 10000n <= BigInt(navSats) * BigInt(lossBreakerBps)) return undefined
+    return `Paused after the pool lost ${loss} sats in 24 hours (over ${lossBreakerBps / 100}% of equity); redemptions stay open`
   }
 
   async restoreStartupHolds(): Promise<void> {
@@ -190,13 +199,14 @@ export class PoolService {
       const available = await this.adapter.available()
       const idle = snapshot.phase === 'idle'
       const exitsReady = available && capitalReady(snapshot) && idle && !pending && BigInt(snapshot.navSats) > 0n
-      const enabled = fairnessReady && exitsReady && this.gameReady(snapshot)
+      const paused = fairnessReady ? await this.breakerReason(snapshot.navSats) : undefined
+      const enabled = fairnessReady && exitsReady && this.gameReady(snapshot) && !paused
       const reason = !fairnessReady ? `New contributions and wagers are disabled while fairness assumptions are unresolved; ${exitsReady
         ? 'verified idle shares can still be redeemed' : 'redemption also requires an idle, usable vault and the Arkade and covenant services'}`
         : !available ? 'The covenant service is unavailable'
         : !this.gameReady(snapshot) ? snapshot.recoveryReason || 'Pool batch lifetime does not cover the game deadline and exit margin; renewal is required before new contributions or wagers'
         : pending ? 'A pool transaction is awaiting verified chain evidence'
-        : !idle ? 'Finish or recover the active pool game before changing capital' : BigInt(snapshot.navSats) === 0n ? 'The pool has no redeemable equity' : undefined
+        : !idle ? 'Finish or recover the active pool game before changing capital' : BigInt(snapshot.navSats) === 0n ? 'The pool has no redeemable equity' : paused
       return { ...base, head: snapshot, status: idle && !pending ? 'ready' : 'busy',
         capabilities: { subscribe: enabled, redeem: exitsReady, play: enabled, ...(reason ? { reason } : {}) } }
     } catch (error) { return { ...base, status: 'error', error: text(error) } }
@@ -259,6 +269,8 @@ export class PoolService {
     const snapshot = await this.adapter.read(descriptor)
     if (!snapshot || snapshot.phase !== 'idle' || !sameHead(snapshot.outpoint, request.expectedHead)) fail('Pool snapshot changed; request a fresh quote', 409)
     if (!this.gameReady(snapshot)) fail(snapshot.recoveryReason || 'The pool head does not cover the game deadline and exit margin; renew before a new game', 503)
+    const paused = await this.breakerReason(snapshot.navSats)
+    if (paused) fail(paused, 503)
     const configuredHouseStakeDiscountBps = Number(await this.deps.repos.config.get('variable_odds_edge_bps') ?? 300)
     const houseStake = computeHouseStake(Number(player), request.oddsN, request.oddsTarget, request.oddsLo, configuredHouseStakeDiscountBps)
     const economics = quotePoolEconomics({ playerStake: Number(player), houseStake, oddsN: request.oddsN,
@@ -326,6 +338,8 @@ export class PoolService {
       const snapshot = await this.adapter.read(descriptor)
       if (!snapshot || snapshot.phase !== 'idle' || !sameHead(snapshot.outpoint, request.expectedHead)) fail('Pool snapshot changed before submission', 409)
       if (!(request.command.kind === 'redeem' ? capitalReady(snapshot) : this.gameReady(snapshot))) fail(snapshot.recoveryReason || 'The pool head is not safe for this operation; renew or recover it', 503)
+      const paused = request.command.kind === 'redeem' ? undefined : await this.breakerReason(snapshot.navSats)
+      if (paused) fail(paused, 503)
       if (!await this.repo.claimOperation(request, requestHash, game?.game_id)) {
         stored = await this.repo.operation(request.operationId)
         if (!stored || stored.request_hash !== requestHash) fail('Another operation owns this pool head', 409)

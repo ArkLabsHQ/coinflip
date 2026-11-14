@@ -8,7 +8,7 @@
 
     <div class="bankroll-heading"><div><h1>Bankroll</h1><p>Own a share of the table. Share its wins and its losses.</p></div><span class="availability-label"><span/>{{ view === 'practice' ? 'Practice sats' : view === 'watch' ? 'Read-only vault inspection' : 'Community house' }}</span></div>
     <div class="surface-tabs" role="tablist" aria-label="Bankroll view">
-      <button id="pool-tab" role="tab" :aria-selected="view === 'pool'" aria-controls="pool-panel" :tabindex="view === 'pool' ? 0 : -1" @keydown="switchTab" @click="view = 'pool'">Community pool</button>
+      <button id="pool-tab" role="tab" :aria-selected="view === 'pool'" aria-controls="pool-panel" :tabindex="view === 'pool' ? 0 : -1" @keydown="switchTab" @click="view = 'pool'">Community pool<span>Experimental</span></button>
       <button id="practice-tab" role="tab" :aria-selected="view === 'practice'" aria-controls="practice-panel" :tabindex="view === 'practice' ? 0 : -1" @keydown="switchTab" @click="view = 'practice'">Practice pool<span>Simulated</span></button>
       <button id="watch-tab" role="tab" :aria-selected="view === 'watch'" aria-controls="watch-panel" :tabindex="view === 'watch' ? 0 : -1" @keydown="switchTab" @click="view = 'watch'">Watch a vault<span v-if="watched.descriptor">1 saved</span></button>
     </div>

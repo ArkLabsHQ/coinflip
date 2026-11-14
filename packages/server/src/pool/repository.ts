@@ -188,6 +188,15 @@ export class SQLitePoolRepository {
   games(limit = 30): Promise<PoolGameRow[]> {
     return this.db.all<PoolGameRow>('SELECT * FROM pool_games ORDER BY created_at DESC LIMIT ?', [limit])
   }
+  /** Pool loss (positive) from games started since `since`: house stakes paid out minus player stakes won. */
+  async realizedLossSince(since: number): Promise<bigint> {
+    const rows = await this.db.all<{ winner: string; prepared_json: string }>(
+      "SELECT winner, prepared_json FROM pool_games WHERE status='settled' AND created_at>=?", [since])
+    return rows.reduce((loss, row) => {
+      const game = JSON.parse(row.prepared_json) as { houseStakeSats: string; playerStakeSats: string }
+      return loss + (row.winner === 'player' ? BigInt(game.houseStakeSats) : -BigInt(game.playerStakeSats))
+    }, 0n)
+  }
   activeGames(): Promise<PoolGameRow[]> {
     return this.db.all<PoolGameRow>("SELECT * FROM pool_games WHERE status IN ('quoted','authorized','funded','revealed') ORDER BY created_at")
   }

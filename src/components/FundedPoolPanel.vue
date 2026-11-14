@@ -20,7 +20,7 @@
     </div>
 
     <template v-if="initialized && (state.verified || state.pending)">
-      <p v-if="state.fairnessTrust === 'operator'" class="fairness-notice">Game fairness depends on the casino operator. An operator cooperating with a bettor can force losses onto pool members. The contract enforces payouts and shares; it does not prevent that collusion.</p>
+      <p v-if="state.fairnessTrust === 'operator'" class="fairness-notice"><strong>Experimental.</strong> Game fairness depends on the casino operator. An operator cooperating with a bettor can force losses onto pool members. The contract enforces payouts and shares; it does not prevent that collusion. Each wager is capped by the pool's exposure limit, and new wagers and contributions pause after a large daily loss.</p>
       <div v-if="state.pending" class="pending-operation" role="status" aria-live="polite">
         <span class="spinner"/><div><strong>{{ pendingTitle }}</strong><p>{{ state.pending.error || 'Keep this operation here while its exact transaction is reconciled. Its inputs stay reserved.' }}</p><code v-if="state.pending.arkTxid">{{ shortId(state.pending.arkTxid) }}</code></div>
         <button class="btn-outline" :disabled="busy" @click="refresh">Check status</button>

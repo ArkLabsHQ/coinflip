@@ -243,6 +243,18 @@ describe('pool coordinator durable boundaries', () => {
     expect((await service.submit({ ...submission('revoked-policy-exit'), command: { kind: 'redeem', burnShares: '1000', minSats: '1' } })).status).toBe('pending')
   })
 
+  it('pauses new wagers and contributions after a large daily pool loss while redemptions stay open', async () => {
+    db.prepare(`INSERT INTO pool_games (game_id, request_id, request_hash, request_json, prepared_json, head_txid, head_vout,
+      house_secret_hex, status, winner, created_at, expires_at) VALUES (?, ?, 'h', '{}', ?, ?, 0, '00', 'settled', 'player', ?, ?)`)
+      .run('lost-big', 'lost-big', JSON.stringify({ houseStakeSats: '25000', playerStakeSats: '1000' }), 'dd'.repeat(32), Date.now(), Date.now())
+    const state = await service.publicState()
+    expect(state.capabilities).toMatchObject({ subscribe: false, play: false, redeem: true })
+    expect(state.capabilities.reason).toMatch(/Paused after the pool lost 25000 sats in 24 hours/)
+    await expect(service.prepare(quoteRequest())).rejects.toThrow(/Paused/)
+    await expect(service.submit(submission('paused-capital'))).rejects.toThrow(/Paused/)
+    expect((await service.submit({ ...submission('paused-exit'), command: { kind: 'redeem', burnShares: '1000', minSats: '1' } })).status).toBe('pending')
+  })
+
   it.each([{}, { fairnessAssumption: 'independent' }, { fairnessAssumption: true },
     { fairnessAssumption: 'honest-operator', enableAll: true }])('rejects unsupported policy bodies without changing configuration: %p', async body => {
     const app = express().use(express.json()).use(createPoolAdminRoutes(service))

@@ -1,6 +1,6 @@
 /** SDK-backed input holds and the house liability ledger. Rebuilt from durable games on startup. */
 
-import { canSpendOffchain, type NormalizedExtendedVirtualCoin, type Wallet, type VtxoReservation } from '@arkade-os/sdk'
+import { canSpendOffchain, isVtxoSpent, type NormalizedExtendedVirtualCoin, type Wallet, type VtxoReservation } from '@arkade-os/sdk'
 import type { V4State } from './v4/types.js'
 import type { AppDeps } from './deps.js'
 import {
@@ -20,6 +20,27 @@ export const outpointKey = (txid: string, vout: number): string => `${txid}:${vo
 
 export const isPlainHouseVtxo = (coin: Pick<NormalizedExtendedVirtualCoin, 'assets'>): boolean =>
   !coin.assets?.length
+
+const indexerReadLog = makeLogDedup()
+
+// The wallet store keeps listing coins a co-fund spent, so a refresh resurrected them for /play.
+// The indexer is authoritative on spends; if it is unreachable, keep the wallet's list.
+export async function readHouseVtxos(deps: Pick<AppDeps, 'wallet'>, label: string): Promise<NormalizedExtendedVirtualCoin[]> {
+  const vtxos = await timeoutReject(deps.wallet.getVtxos(), ARK_SYNC_TIMEOUT_MS, label)
+  try {
+    const spent = new Set<string>()
+    for (let i = 0; i < vtxos.length; i += 100) {
+      const outpoints = vtxos.slice(i, i + 100).map(({ txid, vout }) => ({ txid, vout }))
+      const { vtxos: indexed } = await timeoutReject(deps.wallet.indexerProvider.getVtxos({ outpoints }), ARK_SYNC_TIMEOUT_MS, `${label} (indexer)`)
+      for (const coin of indexed) if (isVtxoSpent(coin)) spent.add(outpointKey(coin.txid, coin.vout))
+    }
+    return spent.size ? vtxos.filter((v) => !spent.has(outpointKey(v.txid, v.vout))) : vtxos
+  } catch (error) {
+    const message = `[house pool] indexer spend check skipped: ${error instanceof Error ? error.message : String(error)}`
+    if (indexerReadLog.shouldLog(label, message)) console.warn(message)
+    return vtxos
+  }
+}
 
 /** A minimal FIFO async mutex. */
 export class Mutex {
@@ -241,7 +262,7 @@ export class HouseVtxoCache {
   async refresh(deps: AppDeps): Promise<NormalizedExtendedVirtualCoin[]> {
     if (this.inflight) return this.inflight
     // Bound the re-sync: a stalled getVtxos otherwise wedges /play (which awaits this).
-    this.inflight = timeoutReject(deps.wallet.getVtxos(), ARK_SYNC_TIMEOUT_MS, 'house getVtxos')
+    this.inflight = readHouseVtxos(deps, 'house getVtxos')
       .then(async (vtxos) => {
         const plain = vtxos.filter(isPlainHouseVtxo)
         if (plain.some((vtxo) => vtxo.expiresAtHeight !== undefined)) {
@@ -649,8 +670,7 @@ async function runSplit(
   // its warm snapshot AND is kept off every coin we have spent, even though
   // that snapshot still lists them. The shared cache is dropped once, at the
   // end, so the next reader sees the new shape.
-  const readPrivate = () =>
-    timeoutReject(deps.wallet.getVtxos(), ARK_SYNC_TIMEOUT_MS, 'house getVtxos (split)')
+  const readPrivate = () => readHouseVtxos(deps, 'house getVtxos (split)')
 
   let working = splittableHouseVtxos(await readPrivate(), renewalBufferMs)
   /** Every outpoint this run has committed to spending. */

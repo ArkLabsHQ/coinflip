@@ -662,8 +662,9 @@ export default defineComponent({
 
     // ── Stats recording ───────────────────────────────────────────────
     let sparkKey = 0
-    function recordResult(won: boolean, payout: number, roll: number | null) {
-      const tier = betAmount.value
+    // `stake` is what was actually risked: a sub-dust change can be folded into the chosen amount.
+    function recordResult(won: boolean, payout: number, roll: number | null, stake = betAmount.value) {
+      const tier = stake
       const net = won ? payout - tier : -tier
 
       // P&L
@@ -770,7 +771,7 @@ export default defineComponent({
           new Promise((r) => setTimeout(r, MIN_FLIP_MS)),
         ])
 
-        recordResult(result.winner === 'player', result.payout, result.roll ?? null)
+        recordResult(result.winner === 'player', result.payout, result.roll ?? null, result.stake ?? betAmount.value)
 
         const historyEntry = {
           id: `${Date.now()}`,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
-import { selectPlainGameInputs } from './walletRuntime'
+import { planGameInputs, selectPlainGameInputs } from './walletRuntime'
 
 function coin(value: number, assetUnits?: bigint): ExtendedVirtualCoin {
   return { txid: value.toString(16).padStart(64, '0'), vout: 0, value,
@@ -25,5 +25,16 @@ describe('normal game funding ownership', () => {
   it('accepts a fully covered plain stake and never spends an unrelated asset', () => {
     const plain = coin(1500)
     expect(selectPlainGameInputs([coin(9000, 7n), plain], 1000)).toEqual([plain])
+  })
+
+  it('adds a coin rather than folding sub-dust change into the stake', () => {
+    const payout = coin(6794), other = coin(6795 - 6000)
+    expect(planGameInputs([payout, other], 6464, 330)).toEqual({ inputs: [payout, other], stakeTopUp: 0 })
+  })
+
+  it('folds sub-dust change only when no other coin can absorb it', () => {
+    const payout = coin(6794)
+    expect(planGameInputs([payout], 6464, 330)).toEqual({ inputs: [payout], stakeTopUp: 330 })
+    expect(planGameInputs([coin(7140)], 6464, 330)).toEqual({ inputs: [coin(7140)], stakeTopUp: 0 })
   })
 })

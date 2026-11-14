@@ -31,7 +31,7 @@ import { gameActivityResolver } from './gameActivityResolver'
 import { stashV4ForfeitRecovery } from './v4Recovery'
 import { validatePlay } from './validatePlay'
 import { signPlayerCheckpoints, assertFinalizedPot } from './authorizeCofund'
-import { reconcileRecovery as reconcileIndexedRecovery, type RecoveryStatus } from './recoveryStatus'
+import { potIndexed, reconcileRecovery as reconcileIndexedRecovery, type RecoveryStatus } from './recoveryStatus'
 import { computeHouseStake } from 'arkade-coinflip/dist/stake-math.js'
 import {
   uniformRandomInt, addressToPkScriptHex, parseClaimPayload,
@@ -199,6 +199,18 @@ export function selectPlainGameInputs(coins: readonly ExtendedVirtualCoin[], tar
   }
   if (total < target) throw new Error(`Insufficient plain spendable balance for a ${target}-sat bet (have ${total})`)
   return inputs
+}
+
+// Change of at most `dust` cannot be an output; take one more coin rather than raise the player's stake.
+export function planGameInputs(coins: readonly ExtendedVirtualCoin[], tier: number, dust: number): { inputs: ExtendedVirtualCoin[]; stakeTopUp: number } {
+  const inputs = selectPlainGameInputs(coins, tier)
+  const change = inputs.reduce((sum, coin) => sum + coin.value, 0) - tier
+  if (change === 0 || change > dust) return { inputs, stakeTopUp: 0 }
+  try {
+    return { inputs: selectPlainGameInputs(coins, tier + dust + 1), stakeTopUp: 0 }
+  } catch {
+    return { inputs, stakeTopUp: change }
+  }
 }
 
 async function reconcileRecovery(stash: StashedV4Forfeit, wallet: Wallet): Promise<RecoveryStatus> {
@@ -572,17 +584,10 @@ export async function playV4Game(
     const stuck = allSpendable.filter((v: ExtendedVirtualCoin) => !tapLeafHasKey(v.forfeitTapLeafScript, playerXOnly))
     logDiag('warn', 'v4play', `skipping ${stuck.length} VTXO(s) this wallet can't co-sign: ${stuck.map((v) => `${v.txid}:${v.vout}`).join(', ')}`)
   }
-  const playerVtxos = selectPlainGameInputs(spendable, tier)
-  const playerSum = playerVtxos.reduce((sum, coin) => sum + coin.value, 0)
-
-  // Fold a sub-dust change into the stake. If our selected VTXOs would leave a
-  // change ≤ dust — a dust output can't exist, so the co-fund can't balance and
-  // arkd rejects it — stake the whole remainder instead: the server folds
-  // `stakeTopUp` into playerStake, the pot grows to match, and our change becomes 0.
+  // A remaining sub-dust change is folded into playerStake by the server; the pot grows to match.
   const dust = state.info?.dust ? parseInt(state.info.dust, 10) : 546
-  const change = playerSum - tier
-  const stakeTopUp = change > 0 && change <= dust ? change : 0
-  const betAmount = tier + stakeTopUp // == playerSum when folding, else the tier
+  const { inputs: playerVtxos, stakeTopUp } = planGameInputs(spendable, tier, dust)
+  const betAmount = tier + stakeTopUp
 
   const hold = wallet.reserveVtxos(playerVtxos)
   try {
@@ -678,7 +683,7 @@ export async function playV4Game(
   if (recovery) void reconcileRecovery({ ...recovery, confirmationPending: true }, wallet).catch(error => console.warn('[recovery] confirmation pending:', error))
   // Surface the on-chain txids so the activity history can collapse this
   // game's wallet transactions (co-fund + settle) into one "Dice game" row.
-  return { ...result, cofundTxid: finRes.potOutpoint.txid }
+  return { ...result, stake: betAmount, cofundTxid: finRes.potOutpoint.txid }
   } finally { hold.release() }
 }
 
@@ -875,7 +880,7 @@ export async function runAutoClaim({ state, rootState, commit, dispatch }: ArkCt
     if (state.claimingGames[v4.gameId]) continue
     if (!hasClaimableV4Forfeit(v4) || v4.covenant.playerPubkey !== rootState.wallet.publicKey) continue
     const current = await reconcileRecovery(v4, wallet)
-    if (current.kind === 'spent') continue
+    if (current.kind === 'spent' || (current.kind === 'pending' && !(await potIndexed(v4, wallet.indexerProvider)))) continue
     if (current.kind === 'staged') v4 = { ...v4, stageTwoOutpoint: current.outpoint }
     const selfRefund = pickV4ClaimPath(v4) === 'self-refund'
     // SELF-REFUND ONLY: back off a restored stash whose covenant the emulator

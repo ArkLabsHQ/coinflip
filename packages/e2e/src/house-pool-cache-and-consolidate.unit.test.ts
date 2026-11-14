@@ -145,6 +145,20 @@ describe('the splitter does not churn the shared snapshot', () => {
     expect(spendableTotal([token, plain])).toBe(plain.value)
   })
 
+  it('drops coins the indexer reports spent even while the wallet store still lists them', async () => {
+    const cofunded = coin(hex64(7), 0, 5_000), live = coin(hex64(6), 0, 5_000)
+    const indexerGetVtxos = jest.fn().mockResolvedValue({ vtxos: [{ ...cofunded, spentBy: 'bb'.repeat(32) }, live] })
+    const localDeps = { wallet: { getVtxos: async () => [cofunded, live], indexerProvider: { getVtxos: indexerGetVtxos } } }
+    expect(await new HouseVtxoCache(60_000).refresh(localDeps)).toEqual([live])
+    expect(indexerGetVtxos).toHaveBeenCalledWith({ outpoints: [{ txid: cofunded.txid, vout: 0 }, { txid: live.txid, vout: 0 }] })
+  })
+
+  it('keeps the wallet list when the indexer spend check fails', async () => {
+    const live = coin(hex64(6), 0, 5_000)
+    const localDeps = { wallet: { getVtxos: async () => [live], indexerProvider: { getVtxos: async () => { throw new Error('indexer down') } } } }
+    expect(await new HouseVtxoCache(60_000).refresh(localDeps)).toEqual([live])
+  })
+
   it('evicts newly identified asset carriers on refresh and never serves them from the warm cache', async () => {
     const plain = coin(hex64(8), 0, 40_000)
     const identified = { ...plain, assets: [{ assetId: '11'.repeat(32) + '0100', amount: 1000n }] }

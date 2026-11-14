@@ -11,6 +11,7 @@ import type { StashedV4Forfeit } from './v4ForfeitStash'
 import { loadV4Forfeits, saveV4Forfeits } from './v4ForfeitStashStore'
 import { getErrorMessage } from '@/utils/errors'
 import { rearmV4ReclaimHints } from './v4Recovery'
+import { potIndexed } from './recoveryStatus'
 // The module-mutable SDK-wallet runtime — the `sdkWallet` handle, its timers/
 // flags, and every action that touches them — lives in walletRuntime.ts. The
 // wrapper actions below delegate there with the live ActionContext.
@@ -248,7 +249,11 @@ const ark: Module<ArkState, RootState> = {
     /** Stalled joint-pot games, after a short grace for normal settlement. */
     async listV4StalledBets(): Promise<StashedV4Forfeit[]> {
       const cutoff = Date.now() - 90_000
-      return (await loadV4Forfeits()).filter((b) => b.createdAt <= cutoff)
+      const stalled = (await loadV4Forfeits()).filter((b) => b.createdAt <= cutoff)
+      const wallet = walletRuntime.getSDKWallet()
+      if (!wallet) return stalled
+      const indexed = await Promise.all(stalled.map((b) => potIndexed(b, wallet.indexerProvider)))
+      return stalled.filter((_, i) => indexed[i])
     },
 
     /**

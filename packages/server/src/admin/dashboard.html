@@ -416,7 +416,7 @@
     <div id="communityPoolAdminActions" hidden>
       <h3 class="op-label">Admission and game fairness</h3>
       <p id="communityPoolPolicy" class="op-hint"></p>
-      <div class="config-row"><label for="communityPoolPolicyChoice">New contributions / games</label><select id="communityPoolPolicyChoice"><option value="unresolved">Disabled pending fairness policy</option><option value="honest-operator">Enable with operator-fairness disclosure</option></select><button class="btn" onclick="reviewCommunityPolicy()">Review policy</button></div>
+      <div class="config-row"><label for="communityPoolPolicyChoice">New contributions / games</label><select id="communityPoolPolicyChoice"><option value="unresolved">Disabled pending fairness policy</option><option value="honest-operator">Open as experimental (operator-fairness disclosure)</option></select><button class="btn" onclick="reviewCommunityPolicy()">Review policy</button></div>
       <h3 class="op-label">Operator position</h3>
       <div class="config-row"><button class="btn" onclick="loadCommunityPosition()">Check shares and fees</button><button class="btn" onclick="checkCommunityOperation()">Check last operation</button></div>
       <p id="communityOperatorState" class="op-hint" role="status"></p>
@@ -832,7 +832,7 @@
       details.replaceChildren(); details.style.display = data.descriptor ? 'block' : 'none';
       document.getElementById('communityPoolAdminActions').hidden = !data.descriptor;
       document.getElementById('communityPoolPolicyChoice').value = data.fairnessAssumption === 'honest-operator' ? 'honest-operator' : 'unresolved';
-      document.getElementById('communityPoolPolicy').textContent = data.fairnessAssumption === 'honest-operator' ? 'Operator-fairness policy selected. Members see and acknowledge the collusion risk before contributing.' : 'New contributions and games are disabled. Existing shares can still be redeemed when the contract is idle and available.';
+      document.getElementById('communityPoolPolicy').textContent = data.fairnessAssumption === 'honest-operator' ? 'Open as experimental. Members see and acknowledge the collusion risk before contributing; new wagers and contributions pause after a 20% daily loss.' : 'New contributions and games are disabled. Existing shares can still be redeemed when the contract is idle and available.';
       if (data.descriptor) {
         const rows = [['Pool', data.descriptor.name], ['Network', data.descriptor.network], ['Phase', data.head?.phase || 'Unknown'], ['Distributable equity', data.head?.navSats == null ? 'Unknown' : BigInt(data.head.navSats).toLocaleString() + ' sats'], ['Share asset', data.descriptor.shareAssetId], ['Bootstrap', data.descriptor.bootstrapTxid]];
         for (const [label, value] of rows) {

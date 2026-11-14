@@ -61,6 +61,17 @@ export async function recoveryStatus(
   return { kind: 'pending' }
 }
 
+// A rejected co-fund never creates its pot: nothing to claim until it is indexed. Errors count as indexed.
+export async function potIndexed(stash: StashedV4Forfeit, indexer: Pick<IndexerProvider, 'getVtxos'>): Promise<boolean> {
+  const target = stash.stageTwoOutpoint ?? stash.potOutpoint
+  try {
+    const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid: target.txid, vout: target.vout }] })
+    return vtxos.some(vtxo => vtxo.txid === target.txid && vtxo.vout === target.vout)
+  } catch {
+    return true
+  }
+}
+
 export async function reconcileRecovery(
   stash: StashedV4Forfeit,
   indexer: Pick<IndexerProvider, 'getVtxos' | 'getVirtualTxs'>,

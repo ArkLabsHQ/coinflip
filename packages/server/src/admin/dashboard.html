@@ -277,7 +277,7 @@
         <div class="value balance" id="balance">—</div>
       </div>
       <div class="stat-card">
-        <div class="label">Settled / Preconfirmed</div>
+        <div class="label">Unspent</div>
         <div class="value balance" id="balanceDetail">—</div>
       </div>
       <div class="stat-card">
@@ -582,7 +582,7 @@
     const data = await res.json();
     const bal = data.balance;
     document.getElementById('balance').textContent = fmt(bal.available) + ' sats';
-    document.getElementById('balanceDetail').textContent = fmt(bal.settled) + ' / ' + fmt(bal.preconfirmed);
+    document.getElementById('balanceDetail').textContent = fmt(bal.settled + bal.preconfirmed) + ' sats';
     document.getElementById('boardingBalance').textContent = fmt(bal.boarding.total) + ' sats';
     // A swept VTXO is still RECOVERABLE while unspent — reclaim it by settling
     // it back in a batch. Rendering it (highlighted when non-zero) so an expiry

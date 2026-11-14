@@ -56,8 +56,14 @@ export function createAdminRoutes(deps: AppDeps): Router {
   // "loads forever" (see cached-wallet-reads.ts). VTXO reads reuse the pool
   // snapshot (houseVtxoCache, kept warm by pool maintenance); all are timeout-
   // bounded so a stalled sync returns an error instead of hanging the request.
+  // Asset amounts are bigint (supplies exceed 2^53), which res.json cannot serialize.
+  const assetAmounts = (assets: { assetId: string; amount: bigint }[] = []) =>
+    assets.map((asset) => ({ ...asset, amount: asset.amount.toString() }))
   const readBalance = collapsedTtlRead(
-    () => deps.wallet.getBalance(),
+    async () => {
+      const balance = await deps.wallet.getBalance()
+      return { ...balance, assets: assetAmounts(balance.assets), availableAssets: assetAmounts(balance.availableAssets) }
+    },
     ADMIN_WALLET_READ_TTL_MS,
     ADMIN_WALLET_READ_TIMEOUT_MS,
     'getBalance',

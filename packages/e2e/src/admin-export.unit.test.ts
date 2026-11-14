@@ -137,6 +137,14 @@ describe('admin GET /api/export', () => {
     expect(typeof g1.stateRaw).toBe('string')
   })
 
+  it('serializes bigint asset balances instead of failing the wallet endpoints', async () => {
+    const base = makeDeps()
+    const deps = { ...base, wallet: { ...base.wallet, getBalance: async () => ({ available: 0, settled: 0, preconfirmed: 0, total: 0,
+      assets: [{ assetId: 'aa'.repeat(34), amount: 100_000_000_000n }], availableAssets: [] }) } }
+    const res = await request(express().use(server.createAdminRoutes(deps))).get('/api/status').expect(200)
+    expect(res.body.balance.assets).toEqual([{ assetId: 'aa'.repeat(34), amount: '100000000000' }])
+  })
+
   it('reports export metadata (count, limit, what was redacted)', async () => {
     const res = await request(app).get('/api/export').expect(200)
     expect(res.body.meta.gameCount).toBe(3)
